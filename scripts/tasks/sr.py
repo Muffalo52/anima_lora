@@ -61,7 +61,7 @@ def cmd_sr_rsd_dryrun(extra):
 
 
 def cmd_sr_rsd_infer(extra):
-    """Single-step RSD student inference + MUSIQ: make sr-rsd-infer CKPT=… (passes --ckpt)."""
+    """Single-step RSD student inference + MUSIQ. CKPT=… picks a ckpt; unset = most recent."""
     ckpt = os.environ.get("CKPT", "")
     argv = (["--ckpt", ckpt] if ckpt else []) + list(extra)
     _run([_venv_py(), str(SR / "distill_rsd" / "infer.py"), *argv])

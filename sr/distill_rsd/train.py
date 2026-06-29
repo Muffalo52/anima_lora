@@ -45,6 +45,10 @@ def main():
     ap.add_argument("--nodes", type=int, nargs="+", default=[4, 8, 12, 14],
                     help="N multistep timestep nodes (0-indexed in [0,T-1])")
     ap.add_argument("--amp", action="store_true", help="bf16 autocast")
+    ap.add_argument("--src", default=None,
+                    help="HR source dir (default image_dataset; pass the prep_rsd_cache "
+                         "4096-capped cache for faster decode at the right 1024->4096 scale)")
+    ap.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
     ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "rsd"))
     ap.add_argument("--log_every", type=int, default=20)
     ap.add_argument("--save_every", type=int, default=500)
@@ -78,9 +82,10 @@ def main():
     opt_f = torch.optim.AdamW(list(fake.parameters()) + list(disc.parameters()),
                               lr=args.lr, betas=(0.9, 0.95))
 
-    loader = DataLoader(ArtSRDataset(gt_size=256, scale=cfg.diffusion.params.sf,
+    loader = DataLoader(ArtSRDataset(src=args.src, gt_size=256, scale=cfg.diffusion.params.sf,
                                      length=args.iters * (args.K + 1) * args.bs * args.grad_accum + 1000),
-                        batch_size=args.bs, num_workers=4, drop_last=True, pin_memory=True)
+                        batch_size=args.bs, num_workers=args.num_workers, drop_last=True,
+                        pin_memory=True, persistent_workers=args.num_workers > 0)
     it = iter(loader)
     nodes = torch.tensor(args.nodes, device=dev)
 

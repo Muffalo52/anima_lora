@@ -18,7 +18,7 @@
 #   make scfm                                  # same, via the task runner
 #   make scfm ARGS="--iterations 4000"         # CLI flags override TOML values
 
-output_name = "anima_scfm2"
+output_name = "anima_scfm2_channel"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -28,7 +28,7 @@ batch_size = 1
 seed = 42
 use_masked_loss = true
 
-channel_scaling_alpha = 0.0     # channel scaling harmed turbo training; keep off
+channel_scaling_alpha = 0.5
 
 base_loss = "scfm"              # select the SCFM objective (this file's whole point)
 
@@ -69,7 +69,7 @@ teacher_cfg = 4                 # CFG scale baked into the Term-A teacher target
 # Optimization. The fake stack is the EMA copy θ⁻ (no optimizer), so the fake_*
 # optimizer knobs are omitted here — they'd never be stepped under SCFM.
 [optim]
-student_lr = 2e-5               # 5e-5 is the SCFM win (5× the 1e-5 dpdmd default; sharper, diversity preserved)
+student_lr = 5e-5               # 5e-5 is the SCFM win (5× the 1e-5 dpdmd default; sharper, diversity preserved)
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
 # Gradient accumulation: micro-steps per optimizer step. Effective batch =
