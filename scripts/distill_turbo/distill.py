@@ -68,6 +68,7 @@ from .primitives import (
     renoise,
     sample_t,
 )
+from .scfm import run_scfm
 from .softrank import CaptionNegativePool, caption_rank_loss
 from .warmup import run_fake_warmup
 
@@ -773,6 +774,32 @@ def main():
                 else f"fixed μ_t={mv_tgt_mu}, σ²_t={mv_tgt_var}"
             )
         )
+
+    # SCFM (velocity-space self-distillation) is a self-contained objective —
+    # no critic optimizer, no fake head-start, no DMD/GAN rollout. It reuses
+    # everything built above (DiT + compile, dataloader, the `_forward` closure,
+    # `_teacher_cfg_velocity`, σ grids, writer, snapshot) and owns only its own
+    # student optimizer + EMA bookkeeping. Branch here and return so the fake
+    # warmup and the DP-DMD loop below never run. docs/proposal/turbo_scfm.md §4.
+    if cfg.base_loss == "scfm":
+        logger.info(f"starting turbo training (scfm): {cfg.iterations} iterations")
+        run_scfm(
+            cfg=cfg,
+            turbo=turbo,
+            model=model,
+            forward_fn=_forward,
+            teacher_cfg_velocity_fn=_teacher_cfg_velocity,
+            dataloader=dataloader,
+            student_sigmas=student_sigmas,
+            uncond_base=uncond_base,
+            device=device,
+            dtype=dtype,
+            writer=writer,
+            val_cond=val_cond,
+            val_latent_shape=val_latent_shape,
+            val_clean=val_clean,
+        )
+        return
 
     # Fake (critic) head-start.
     data_iter = iter(dataloader)

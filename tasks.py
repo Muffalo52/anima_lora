@@ -89,6 +89,13 @@ COMMANDS = {
         "(bypasses train.py/accelerate, like distill-mod). Output is a normal LoRA "
         "(https://huggingface.co/sorryhyun/anima-turbo-4step).",
     ),
+    "scfm": (
+        training.cmd_scfm,
+        "SCFM velocity-space self-distillation — clean SCFM-only sibling of "
+        "`turbo` (configs/methods/scfm.toml, base_loss=scfm). Same bespoke loop, "
+        "no GAN/critic/anchor. Output is a normal 4-step LoRA "
+        "(docs/proposal/turbo_scfm.md).",
+    ),
     "easycontrol": (
         training.cmd_easycontrol,
         "EasyControl training (extended self-attn KV with VAE-encoded reference). "

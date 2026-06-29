@@ -1,0 +1,112 @@
+# SCFM Anima — velocity-space self-distillation (docs: docs/proposal/turbo_scfm.md).
+#
+# Read by scripts/distill_turbo/ (the same bespoke loop as turbo.toml) — NOT by
+# train.py. This is the CLEAN, SCFM-only sibling of configs/methods/turbo.toml:
+# it pins base_loss="scfm" and drops every section that SCFM force-ignores
+# (dpdmd / gan / f_distill / repa / softrank / mean_var). If you want the
+# DP-DMD/GAN machinery, use turbo.toml instead.
+#
+# SCFM is a standalone fidelity objective: no critic, no GAN, no diversity
+# anchor. Term A pins a renoised real latent's velocity to the CFG-guided teacher
+# (quality ceiling); Term B enforces "one coarse Euler step == two finer
+# sub-steps" on a stop-grad EMA copy of the student (θ⁻ = the repurposed fake
+# stack) so the trajectory straightens and few-step Euler works. Output is a
+# plain LoRA — infer with --infer_steps <student_steps> --cfg 1.0, exactly like
+# the dpdmd student.
+#
+#   python -m scripts.distill_turbo.distill --config configs/methods/scfm.toml
+#   make scfm                                  # same, via the task runner
+#   make scfm ARGS="--iterations 4000"         # CLI flags override TOML values
+
+output_name = "anima_scfm2"
+dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
+data_dir = "post_image_dataset/lora"
+output_dir = "output/ckpt"
+
+iterations = 1500
+batch_size = 1
+seed = 42
+use_masked_loss = true
+
+channel_scaling_alpha = 0.0     # channel scaling harmed turbo training; keep off
+
+base_loss = "scfm"              # select the SCFM objective (this file's whole point)
+
+# Dynamo per-_forward graph budget — the loop traces the compiled block under
+# grad_mode × token-family × num_threads combos; 64 gives ample headroom.
+dynamo_recompile_limit = 64
+compile_dynamic_seq = true
+
+# torch.compile partitioner saved-activation fraction (same lever as base.toml).
+# <1.0 recomputes cheap intermediates in backward to reclaim VRAM at ~equal step
+# time. Only applies when torch_compile is on AND grad_ckpt is off. 1.0 = off.
+activation_memory_budget = 0.99
+
+[network]
+# SCFM requires fake_rank == student_rank: the fake stack is repurposed as the
+# EMA student copy θ⁻ and must mirror it shape-for-shape. OrthoInit / SVD-Down /
+# per_step_expert are all out of scope for the Phase-1 port (the EMA averages
+# lora_down/lora_up directly), so the stacks stay plain LoRA.
+student_rank = 64
+student_alpha = 180
+fake_rank = 64
+fake_alpha = 180
+attn_mode = "flash"
+
+# SVD-Down init for the student: seed lora_down from W0's top-r right singular
+# vectors (scale-matched, so NOT a larger first step) for a wider, W0-aligned
+# tangent at start. Stays plain LoRA, so the EMA copy (reset_ema → fake stack)
+# inherits the SVD-seeded down shape-for-shape and SCFM's lora_down/lora_up
+# averaging is unaffected. Distills to a plain mergeable LoRA at save.
+# (fake_down_init is left default — the EMA stack is overwritten by reset_ema.)
+student_down_init = "weight_svd"
+
+# Student rollout grid (teacher_cfg + student_steps are reused by the SCFM loop).
+[dmd]
+student_steps = 4               # N — student rolls N Euler steps; inference matches (--infer_steps 4)
+teacher_cfg = 4                 # CFG scale baked into the Term-A teacher target (Anima prod CFG=4)
+
+# Optimization. The fake stack is the EMA copy θ⁻ (no optimizer), so the fake_*
+# optimizer knobs are omitted here — they'd never be stepped under SCFM.
+[optim]
+student_lr = 5e-5               # 5e-5 is the SCFM win (5× the 1e-5 dpdmd default; sharper, diversity preserved)
+weight_decay = 0.0
+grad_clip = 1.0                 # student grad-norm cap
+# Gradient accumulation: micro-steps per optimizer step. Effective batch =
+# batch_size * this. The paper's Eq. 13 splits a batch of N into k Term-A +
+# (N−k) Term-B samples so EVERY step sees both terms; at batch_size=1 a single
+# micro-step is a pure-A-OR-B coin flip, throttling Term-A duty cycle to k_ratio.
+# Accumulating ≥4 micro-steps mixes both roles within the window (P(≥1 A) at
+# k_ratio=0.4, accum=2 ≈ 0.64) → recovers the mixed gradient at B=1 memory.
+# LR is accum-invariant (each micro-loss scaled by 1/accum). Cost: accum×
+# forwards per optimizer step. SCFM-only (the dpdmd/dmd loops reject accum>1).
+gradient_accumulation_steps = 1
+
+# SCFM knobs (read only under base_loss="scfm").
+[scfm]
+k_ratio = 0.9                   # per-sample fraction on Term A (teacher); rest Term B
+ema_mu = 0.999                  # θ⁻ ← μθ⁻ + (1−μ)θ decay (Eq. 14)
+ema_restart = 1000              # cyclic restart θ⁻←θ every N steps (0 = never)
+dual_ema = false                # Phase-2 fast+slow accelerator (not implemented in the minimal port)
+n_consistency_grid = 8          # renoise mode only: finer sub-step grid for adjacent triples (>= dmd.student_steps)
+# Term B's self-consistency point. "renoise" (paper-faithful) renoises a real
+# latent → ON-manifold, where Anima's teacher field is already ~95% straight so
+# Term B is INERT (consistency_residual flat ~0.05; confirmed across lr + grad-
+# accum runs). "rollout" rolls θ⁻ from noise on its own coarse student grid →
+# the OFF-manifold points the few-step Euler rollout actually visits (the washout
+# source, turbo_scfm.md §9.1/§9.4). Watch train/scfm_consistency_residual: it
+# should climb off the ~0.05 floor if the redesign gives Term B real work.
+term_b_point = "renoise"
+
+# τ sampling + σ-schedule shift (flow_shift is reused by the SCFM Euler grids).
+[sampling]
+t_distribution = "uniform"      # "uniform" or "sigmoid"
+sigmoid_scale = 1.0
+flow_shift = 3.0                # σ-schedule shift for the Euler grids (matches inference)
+
+# Logging / checkpoints.
+[io]
+save_every = 750
+log_interval = 5
+log_dir = "output/logs/scfm"
+validate_every_n_steps = 750

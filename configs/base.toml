@@ -30,7 +30,7 @@ lora_cache_dir = "post_image_dataset/lora"
 #   `char_a/*|char_b/*`  → two subfolders
 #   `*portrait*`         → any path containing "portrait"
 # Same blueprint applies to validation enumeration.
-path_pattern = "*"
+# path_pattern = "*"
 
 # Multi-scale constant-token tiers (`target_res`) live in configs/preprocess.toml.
 # It's a preprocess knob that training mirrors, and — unlike this file — it is
