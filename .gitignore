@@ -45,3 +45,9 @@ configs/gui-methods/custom/
 near_twins_temp.toml
 sincos_decensored/
 bench/x0_contradiction/prompts/
+# ResShift SR sidecar (upstream clone + venv + weights/data)
+/ResShift/
+/sr/.venv/
+/sr/resshift
+/sr/data/
+/sr/**/weights/

@@ -13,7 +13,15 @@
 > adapter** — the conclusion below is that it deliberately lives outside the
 > adapter system.
 
-Status: **PROPOSAL — Phase 0 not yet run.** Written in response to "can we train
+Status: **Phase 0 DONE (2026-06-29) — gate PASSED, released model transfers well.**
+Sidecar stood up under `sr/` with an isolated `sr/.venv` (Blackwell torch, no
+xformers; see `sr/README.md`). Released ResShift ×4 v3 beats bicubic on every metric
+(LPIPS 0.12 vs 0.35, MUSIQ 74 vs 41) with no hallucination/color-shift on flat art —
+the feared photo-prior domain gap did **not** materialize. The env-pin assumptions in
+§0/§3 are corrected in `sr/README.md` (this box is sm_120; the pinned torch/xformers
+don't run). Phase 1 (×2 finetune + degradation ablation) is next but now justified by
+the true-×2 product + pipeline-matched degradation, not by a large domain gap.
+Originally written in response to "can we train
 an SR model here, e.g. 1024²→2048²." The honest answer drove the shape: a small
 convolutional SR diffusion model is the right tool, and it is *independent of
 Anima by design* — so this is a **sibling subproject**, not a `networks/` method.
@@ -150,21 +158,36 @@ spending GPU-weeks. Pure inference.
 5. **Deliverable**: a 4-step (v3-schedule) art-SR checkpoint + a `make sr-test`
    that tiles 1024→2048.
 
-### Phase 2 — one-step distillation (optional, gated on Phase 1)
-**Goal: collapse 4 steps → 1 step.**
-- **RSD** (the `22490` paper) is the SOTA distiller but its **code is unreleased
-  ("coming soon")**, so it must be reconstructed from §3.2–3.4: frozen Phase-1
-  teacher + a trainable one-step student + a "fake-ResShift" critic (VSD/DMD2
-  gradient) + GAN head + LPIPS. This is **structurally the same machinery as our
-  `turbo` DP-DMD loop** ([[project_daemon_wiring_pattern]], `docs/methods/turbo.md`)
-  — so we have a working reference implementation of the hard part (fake-model +
-  GAN), just in a different codebase. Reconstruction risk is real but bounded.
-- **SinSR** (Wang et al. 2024, *released code*) is the consistency-preserving
-  one-step ResShift distiller and the **safe fallback** — wire it first, treat RSD
-  as the upgrade once their code lands. The RSD paper reports it beats SinSR
-  perceptually, so the ordering is: SinSR now → RSD when released.
-- Gate Phase 2 on Phase 1 actually being good; a one-step distill of a mediocre
-  teacher is wasted effort.
+### Phase 2 — RSD one-step distillation (PROMOTED to the primary goal, 2026-06-29)
+**Goal: reconstruct RSD and collapse the 15-step ResShift teacher → 1 step.** After
+Phase 0 showed the released model already transfers to our art, the objective
+re-centered on **RSD itself** (the distillation) rather than domain-finetuning
+ResShift — start from the released ×4 teacher; ×2/art finetune is deferred.
+
+- **RSD code is NOT actually released** — `github.com/Daniil-Selikhanovych/RSD` is a
+  bare "Coming soon." README placeholder (checked 2026-06-29), despite the abstract
+  claiming code. So it **must be reconstructed** from the paper. Digested method
+  (§3.2–3.5, Fig 2): it is **DMD2 distribution-matching distillation ported to
+  ResShift** — frozen teacher `f*`, trainable one-step student `G_θ` (z_T,z_y,ε→ẑ0),
+  trainable "fake" ResShift critic `f_φ` (Prop 3.1 / Eq 10, = training a fake ResShift
+  on student outputs with objective Eq 7), a GAN head on `f_φ`'s bottleneck (Eq 12),
+  and image-space LPIPS. Generator loss `L_θ + λ1·L_LPIPS + λ2·L_GAN` (Eq 13). `L_θ`
+  and `L_GAN` in VQ-f4 latent; LPIPS in pixel space. This is **the same machinery as
+  our `turbo` DP-DMD loop** ([[project_daemon_wiring_pattern]], `docs/methods/turbo.md`)
+  — fake-critic + GAN + two-timescale alternation — just over ResShift's
+  residual-shift forward (Eq 1/4) and SwinUNet+VQGAN instead of flow-matching on the
+  Anima DiT. The ResShift repo already ships the forward process, nets, and a BasicSR
+  trainer to borrow from. Reconstruction risk is real but bounded.
+- **Decisions (2026-06-29):** teacher = **v2 (15-step)** realsr ×4 (paper-faithful);
+  **validate benchmark-first** — reproduce the paper's 1-step number on a standard set
+  with the released teacher (so a miss is a reconstruction bug, not a domain gap),
+  THEN apply to our art. Single-step first; multistep (§3.3) is a later add.
+- **SinSR** (Wang et al. 2024, *released code*) stays the safe fallback if the
+  reconstruction stalls. RSD reportedly beats SinSR perceptually.
+- Build lives in `sr/distill_rsd/`. GPU note: this is the heaviest step — teacher +
+  student + fake + discriminator + LPIPS + VQGAN resident at once on 16 GB; lean on
+  grad-checkpointing + small microbatch (no block-swap in ResShift). Measure a real
+  number on a 1-step dry run before committing.
 
 ---
 

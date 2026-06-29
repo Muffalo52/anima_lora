@@ -65,6 +65,7 @@ gui = _LazyModule("scripts.tasks.gui")
 inference = _LazyModule("scripts.tasks.inference")
 masking = _LazyModule("scripts.tasks.masking")
 preprocess = _LazyModule("scripts.tasks.preprocess")
+sr = _LazyModule("scripts.tasks.sr")
 tagger = _LazyModule("scripts.tasks.tagger")
 training = _LazyModule("scripts.tasks.training")
 utilities = _LazyModule("scripts.tasks.utilities")
@@ -110,6 +111,35 @@ COMMANDS = {
         training.cmd_easycontrol_preprocess,
         "Full EasyControl preprocess: latents + text emb. "
         "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
+    ),
+    # ── ResShift SR sidecar (isolated sr/.venv — NOT Anima's torch) ───
+    "sr-setup": (
+        sr.cmd_sr_setup,
+        "Create sr/.venv (Blackwell torch, no xformers) + patch basicsr. One-time.",
+    ),
+    "sr-prep": (
+        sr.cmd_sr_prep,
+        "Build the frozen synthetic-LR eval set from image_dataset/ (--n 30).",
+    ),
+    "sr-phase0": (
+        sr.cmd_sr_phase0,
+        "Phase-0 sanity: released ResShift x4 (v3) on eval set + metrics + montage.",
+    ),
+    "sr-test": (
+        sr.cmd_sr_test,
+        "Tiled SR on IN=<img|dir> [OUT= SCALE=4 VERSION=v3 CHOP=512] via the SR venv.",
+    ),
+    "sr-rsd-train": (
+        sr.cmd_sr_rsd_train,
+        "RSD distillation: v2 15-step teacher -> 1-step student on our art (paper 22490).",
+    ),
+    "sr-rsd-dryrun": (
+        sr.cmd_sr_rsd_dryrun,
+        "RSD VRAM feasibility dry-run (--bs N).",
+    ),
+    "sr-rsd-infer": (
+        sr.cmd_sr_rsd_infer,
+        "Single-step RSD student inference + MUSIQ: CKPT=<rsd_student_*.pth>.",
     ),
     # ── Training daemon ───────────────────────────────────────────────
     "daemon": (

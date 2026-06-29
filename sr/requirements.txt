@@ -1,0 +1,23 @@
+# ResShift SR sidecar — isolated env deps.
+# NOTE: torch/torchvision installed separately from the cu128 index (Blackwell sm_120).
+# xformers is intentionally OMITTED — ResShift falls back to vanilla/softmax attention.
+scipy
+numpy
+opencv-python
+matplotlib
+timm
+pandas
+pillow
+scikit-learn
+scikit-image
+lpips
+loguru
+omegaconf
+six
+tqdm
+albumentations
+einops
+imageio
+loralib
+basicsr
+pyiqa

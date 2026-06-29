@@ -1,0 +1,126 @@
+"""RSD feasibility dry-run: build teacher/student/fake/disc/VQGAN/LPIPS, run one
+real fake-update and one generator-update backward (+optimizer step) and report peak
+VRAM. Answers 'does the RSD loop fit on 16 GB' before writing the full training loop.
+
+Uses random tensors (shapes only) — not real data. Run inside sr/.venv.
+"""
+import argparse
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import rsd_models as M  # noqa: E402
+
+TEACHER_CKPT = M.RESSHIFT / "weights" / "resshift_realsrx4_s15_v2.pth"
+
+
+def predict_x0(diff, model, z_t, z_y, t, eps=None):
+    """ResShift x0 prediction (predict_type=xstart): scale input, forward, output IS x0.
+    eps is passed only to stochastic (student/fake) nets; the teacher is deterministic."""
+    kw = {"lq": z_y}
+    if eps is not None:
+        kw["eps"] = eps
+    return model(diff._scale_input(z_t, t), t, **kw)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bs", type=int, default=1)
+    ap.add_argument("--amp", action="store_true")
+    args = ap.parse_args()
+    dev = "cuda"
+    torch.cuda.reset_peak_memory_stats()
+
+    cfg = M.load_configs()
+    print("building nets...")
+    teacher = M.build_teacher(cfg, str(TEACHER_CKPT), dev)
+    student = M.build_generator(cfg, str(TEACHER_CKPT), dev)
+    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev)
+    disc = M.DiscHead().to(dev)
+    vqgan = M.build_autoencoder(cfg, dev)
+    diff = M.build_diffusion(cfg)
+    T = diff.num_timesteps
+    print(f"  T={T} kappa={diff.kappa} params/net={sum(p.numel() for p in student.parameters())/1e6:.0f}M")
+
+    import lpips
+    lp = lpips.LPIPS(net="vgg").to(dev).eval()
+    for p in lp.parameters():
+        p.requires_grad_(False)
+
+    opt_g = torch.optim.AdamW(student.parameters(), lr=5e-5, betas=(0.9, 0.95))
+    opt_f = torch.optim.AdamW(list(fake.parameters()) + list(disc.parameters()), lr=5e-5, betas=(0.9, 0.95))
+
+    B = args.bs
+    N_NODES = [4, 8, 12, 14]  # provisional N=4 multistep set (0-indexed t in [0,T-1])
+    # NOTE: --amp is a placeholder; real bf16 autocast is wired in train.py, not here.
+
+    def sample_latents():
+        gt = torch.rand(B, 3, 256, 256, device=dev) * 2 - 1
+        lq = torch.rand(B, 3, 256, 256, device=dev) * 2 - 1
+        z0 = vqgan.encode(gt) * cfg.diffusion.params.scale_factor
+        z_y = vqgan.encode(lq) * cfg.diffusion.params.scale_factor
+        return z0, z_y
+
+    def report(tag):
+        torch.cuda.synchronize()
+        print(f"  [{tag}] peak alloc {torch.cuda.max_memory_allocated()/1e9:.2f} GB | "
+              f"reserved {torch.cuda.max_memory_reserved()/1e9:.2f} GB")
+
+    # ---- one FAKE-critic update ----
+    print("fake-critic update...")
+    z0, z_y = sample_latents()
+    t_n = torch.tensor([N_NODES[0]] * B, device=dev).long()
+    eps = torch.randn_like(z0)
+    with torch.no_grad():
+        z_tn = diff.q_sample(z0, z_y, t_n)
+        z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)  # student output (frozen here)
+    t = torch.randint(0, T, (B,), device=dev).long()
+    z_t = diff.q_sample(z0_hat, z_y, t)
+    x0_fake = predict_x0(diff, fake, z_t, z_y, t, eps)
+    L_fake = F.mse_loss(x0_fake, z0_hat)
+    # GAN-D: real=z0, fake=z0_hat features off fake critic bottleneck
+    d_real = disc(fake.encode_features(z0, z_y, eps=eps))
+    d_fake = disc(fake.encode_features(z0_hat.detach(), z_y, eps=eps))
+    L_gan_d = (F.softplus(-d_real) + F.softplus(d_fake)).mean()
+    (L_fake + 3e-3 * L_gan_d).backward()
+    opt_f.step(); opt_f.zero_grad(set_to_none=True)
+    report("after fake update")
+
+    # ---- one GENERATOR update ----
+    print("generator update...")
+    z0, z_y = sample_latents()
+    t_n = torch.tensor([N_NODES[0]] * B, device=dev).long()
+    eps = torch.randn_like(z0)
+    z_tn = diff.q_sample(z0, z_y, t_n)
+    z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)        # grad
+    t = torch.randint(0, T, (B,), device=dev).long()
+    z_t = diff.q_sample(z0_hat.detach(), z_y, t)
+    with torch.no_grad():                                          # DMD: teacher & fake no-grad
+        x0_teacher = predict_x0(diff, teacher, z_t, z_y, t)
+        x0_fakep = predict_x0(diff, fake, z_t, z_y, t, eps)
+        grad = (x0_fakep - x0_teacher)
+        grad = grad / (grad.abs().mean(dim=[1, 2, 3], keepdim=True) + 1e-8)
+    L_theta = 0.5 * F.mse_loss(z0_hat, (z0_hat - grad).detach())
+    # LPIPS single-step path from t=T-1
+    z_TT = z_y + diff.kappa * torch.randn_like(z_y)
+    tT = torch.tensor([T - 1] * B, device=dev).long()
+    z0_single = predict_x0(diff, student, z_TT, z_y, tT, torch.randn_like(z_y))
+    x0_img = vqgan.decode(z0_single, force_not_quantize=True).clamp(-1, 1)
+    gt_img = torch.rand(B, 3, 256, 256, device=dev) * 2 - 1
+    L_lpips = lp(x0_img, gt_img).mean()
+    # GAN-G through fake bottleneck
+    L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, z_y, eps=eps))).mean()
+    (L_theta + 2.0 * L_lpips + 3e-3 * L_gan_g).backward()
+    opt_g.step(); opt_g.zero_grad(set_to_none=True)
+    report("after generator update")
+
+    print(f"\n=== RSD dry-run OK at bs={B}{' (bf16 amp)' if args.amp else ' (fp32)'} ===")
+    report("FINAL PEAK")
+
+
+if __name__ == "__main__":
+    main()
