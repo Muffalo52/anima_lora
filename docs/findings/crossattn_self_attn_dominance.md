@@ -6,6 +6,13 @@
 > per pathway — "what each pathway writes"). Extends the velocity-level result
 > [[project_crossattn_drive_frontloaded]] and [[project_crossattn_map_evolution]].
 > No code path changed.
+>
+> **UPDATE (2026-06-29).** Added Result 4 — `attn_evolution.py` run on literal
+> *text-in-image* glyph strings (the text a speech bubble "reads"), EN + KO,
+> tracked as their own token columns. Confirms the text wall for Korean and tests
+> (and tempers) the idea that cross-attn **mass** could measure glyph-rendering
+> difficulty: it is **prompt-composition-sensitive and sink-confounded**, not yet
+> a portable metric. No code path changed.
 
 ## The question
 
@@ -99,6 +106,67 @@ data/capability limit, not a cross-attn-mass deficit the adapter can fix) and
 explains why late cross-attn levers are inert ([[project_tag_boost_late_sigma_kill]]):
 there is almost no cross-attn budget to lever below mid-σ.
 
+## Result 4 — literal glyph tokens hit the same wall (EN + KO), but attention *mass* is not yet a portable glyph-rendering metric
+
+Probed the actual *text-in-image* string a speech bubble "reads", tracked as its own
+token columns alongside the `speech bubble` / `*text` **category** tags (base model,
+8 cap × 2 seed, 1024/28, cfg 4). Two contexts:
+
+- **Run A (clean):** `speech bubble` + EN glyph `this is anima image`.
+- **Run B (crowded):** `speech bubble`, `korean text`, `english text`, EN glyph
+  `this is anima image`, KO glyph `아니마 이미지 입니다`.
+
+Mass is shown **per token** — raw mass is *summed* over a tag's columns, so a 5–6
+token glyph inflates ~2.5–3× vs a 2-token tag purely by span; always divide out.
+Per-token uniform = 1/512 = 0.00195.
+
+| run | tag | kind | tok | rate hi→low | mass/tok hi→low (×unif) |
+|---|---|---|---|---|---|
+| A | speech bubble | category | 2 | 1.97→0.21 | 1.21× → 0.58× |
+| A | this is anima image | EN glyph | 5 | 1.50→0.24 | 1.06× → 0.55× |
+| B | speech bubble | category | 2 | 1.89→0.20 | 0.81× → 0.32× |
+| B | 아니마 이미지 입니다 | **KO glyph** | 6 | 1.37→0.21 | 0.81× → 0.46× |
+| B | english text | category (irrel) | 2 | 1.22→0.16 | 1.14× → 0.79× |
+| B | korean text | category (match) | 3 | 0.90→0.11 | 2.40× → 2.06× |
+| B | this is anima image | EN glyph | 5 | **0.48→0.04** | **2.08× → 1.99×** |
+
+Two robust signals:
+
+1. **Re-routing: every column is `LOCKS_EARLY`** (english text borderline
+   `PARTIAL_DECAY`). The KO glyph behaves *exactly* like the EN glyph and the
+   categories — front-loaded burst, then floor. Adding a non-Latin script or a
+   category tag changes nothing on the WHERE axis. **The Korean glyph hits the same
+   wall** (Result 1).
+2. **category ≫ literal content.** The matching category `korean text` sustains high
+   mass (2.40×→2.06×) while the KO glyph it labels decays to *under* per-token uniform
+   (0.81×→0.46×, same trajectory as `speech bubble`'s own content). Cross-attn handles
+   *"there is Korean text here"* far better than the specific characters — the model
+   holds no sustained token-level attention on the glyphs where they'd be drawn. Direct
+   read of why the bubble's *presence* renders but its *text* garbles, and a multilingual
+   confirmation of [[project_lora_crossattn_learns_labeled_only]].
+
+**Why mass is *not* (yet) a glyph-rendering metric — the context-flip.** The *same*
+EN glyph `this is anima image` reads **clean-decaying** in Run A (1.06×→0.55×, rate
+1.50) but **flat-high** in Run B (2.08×→1.99×, rate 0.48) — identical tokens, the only
+change is Run B's prompt carrying 3 more text tags. Flat-high mass + near-zero
+re-route rate is the **attention-sink signature** (same family as the padding sink in
+Result 1): the patches dump a constant, un-churning budget onto a few positions —
+almost certainly the ordinary content-word subtokens (`image`, `text`), not the glyph
+content — and softmax redistributes which positions sink as the prompt composition
+changes. So absolute cross-attn mass is **prompt-composition-sensitive and
+sink-confounded**: a high reading can be sink absorption rather than rendering
+fidelity, and the value isn't portable across prompts. What *is* comparable is the
+within-a-fixed-prompt **re-routing verdict** (all `LOCKS_EARLY`) and the
+**category-vs-glyph mass gap**.
+
+**OPEN — is there a glyph-rendering proxy here at all?** A usable one would need
+(a) **per-column** mass to strip the sink subtokens (the recorder currently sums over
+a tag's columns — a per-column variant is a small change), and (b) calibration against
+by-eye legibility — which Anima has no quality reward to anchor
+([[project_null_tta_phase0_bounded_nudge]]). Until then, read the glyph result as
+"confirms the text wall (EN + KO), via re-routing + the category-vs-content gap", not
+as a rendering-quality number.
+
 ## Interpretation — coarse-to-fine division of labor
 
 Flow-matching denoising is coarse→fine in frequency: high σ sets low-frequency
@@ -141,7 +209,18 @@ elaborate them.
 ```
 uv run python bench/cross_attn_drive/attn_evolution.py   --captions 12 --seeds 2 --tags "speech bubble,japanese text,english text" [--lora_weight …]
 uv run python bench/cross_attn_drive/attn_contribution.py --captions 12 --seeds 2 [--tags "@sincos"] [--lora_weight …]
+
+# Result 4 — literal glyph columns. The tracked tags must appear as comma entries in
+# each caption (caption_has_tag selection + exact token-id subsequence match), so pass
+# a --prompts file of tag-list captions that each carry every tracked tag, e.g.
+#   "1girl, …, speech bubble, korean text, english text, this is anima image, 아니마 이미지 입니다"
+uv run python bench/cross_attn_drive/attn_evolution.py --prompts <glyph_captions.txt> \
+  --tags "speech bubble,korean text,english text,this is anima image,아니마 이미지 입니다" \
+  --captions 8 --seeds 2 --label glyph_ko_en
+# NB read mass PER TOKEN (divide by tag token count); flat-high mass + low re-route
+# rate = attention sink, not rendering fidelity (see Result 4 context-flip).
 ```
 
 Results: `bench/cross_attn_drive/results/*-contrib_{base,sincos}/` (+ `attn_contribution.png`),
-`*-tag_{base,sincos2}/`, `*-sincostag_{base,lora}/`.
+`*-tag_{base,sincos2}/`, `*-sincostag_{base,lora}/`,
+`*-glyph_vs_bubble/` (Run A), `*-glyph_ko_en/` (Run B).

@@ -88,6 +88,38 @@ def cmd_turbo(extra):
     run([PY, *argv])
 
 
+def cmd_scfm(extra):
+    """SCFM Anima — velocity-space self-distillation (docs: docs/proposal/turbo_scfm.md).
+
+    The clean SCFM-only sibling of ``make turbo``: same bespoke distill loop
+    (``scripts.distill_turbo.distill``), but pointed at ``configs/methods/scfm.toml``
+    which pins ``base_loss = "scfm"`` and drops the DP-DMD/GAN/REPA/soft-rank
+    machinery turbo.toml carries. Trailing args override TOML values::
+
+        make scfm                                   # defaults: rank=64, 4-step, lr 5e-5
+        make scfm ARGS="--iterations 4000"
+        make scfm --queue                           # enqueue on the daemon
+
+    Output is a normal LoRA — infer with ``--infer_steps 4 --cfg 1.0`` (like the
+    turbo student). Honors ``PRESET`` and ``--queue`` exactly as ``make turbo``.
+    """
+    extra = list(extra or [])
+    preset_flags = bespoke_preset_flags(_preset())
+    argv = [
+        "-m",
+        "scripts.distill_turbo.distill",
+        "--config",
+        "configs/methods/scfm.toml",
+        *preset_flags,
+        *extra,
+    ]
+    if "--queue" in argv:
+        argv.remove("--queue")
+        queue_command("turbo", argv)
+        return
+    run([PY, *argv])
+
+
 def cmd_lora_gui(extra):
     """Train from configs/gui-methods/<variant>.toml.
 
