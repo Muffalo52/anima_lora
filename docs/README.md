@@ -6,7 +6,7 @@ Index of the `docs/` tree. Each row is a one-line orientation; read the linked d
 - **Inference** — training-free runtime stacks: acceleration + sampler-boundary corrections.
 - **Experimental** — wired and runnable, but not part of the default stack.
 - **Structure** — architecture walkthroughs (how a thing is built, not how to use it).
-- **Findings** — negative results and feasibility probes; methods evaluated and *not* adopted.
+- **Findings** — empirical results and analyses on the Anima model; premises tested, behavior measured, decisions settled.
 - **Optimizations** — compiler, kernel, and hardware setup.
 - **Guidelines** — user-facing guides and references (multi-language).
 - **Proposals** — active design docs for unbuilt work.
@@ -69,20 +69,7 @@ Architecture walkthroughs — how a component is built.
 
 ## Findings
 
-Negative results and feasibility probes — methods evaluated and not adopted.
-
-| Doc | Description |
-|-----|-------------|
-| [findings/selfflow.md](findings/selfflow.md) | Self-Flow rep-loss — falsified on the frozen backbone (no information asymmetry to distill) |
-| [findings/sigma_signal_where_anima_resolves.md](findings/sigma_signal_where_anima_resolves.md) | Where Anima's denoising signal lives — the σ ≈ 0.75 → 0.45 → 0 resolution staircase |
-| [findings/spectral_guidance_no_subspace.md](findings/spectral_guidance_no_subspace.md) | Spectral Guidance — no low-rank guidable subspace on Anima (Phase 0 NO-GO) |
-| [findings/asymflow_parameterization.md](findings/asymflow_parameterization.md) | AsymFlow rank-asymmetric velocity parameterization — assessed, not worth reviving |
-| [findings/l2p_pixel_transfer.md](findings/l2p_pixel_transfer.md) | L2P latent→pixel transfer — shelved on the Anima budget |
-| [findings/freetext_text_rendering.md](findings/freetext_text_rendering.md) | FreeText — localization works, native OOD text rendering doesn't |
-| [findings/turbo_fei_band_deficit_falsified.md](findings/turbo_fei_band_deficit_falsified.md) | Turbo FEI band-deficit CA reweighting — why it was plausible, why it falsified |
-| [findings/agsm_reward_premise_holds.md](findings/agsm_reward_premise_holds.md) | AGSM reward premise — relative FM-ranking survives where absolute FM-MSE doesn't |
-| [findings/mod_guidance_quality_tag_axis.md](findings/mod_guidance_quality_tag_axis.md) | Mod-guidance pooled-text "quality axis" — demoted to geometry-only; replaced by image-space attribution |
-| [findings/channel_stats_content_independence.md](findings/channel_stats_content_independence.md) | Channel-scaling calibration is content-agnostic on Anima (A/B result) |
+Empirical results and analyses on the Anima model — premises tested against the real model, measurements of how it behaves, and the decisions the evidence settled (ship, don't-build, or pure characterization). The full set (20 docs, keyed by outcome: MEASUREMENT / NO-GO / FALSIFIED / CLOSED / DEMOTED / LANDED / TRAP) lives in its own index → **[findings/README.md](findings/README.md)**.
 
 ## Optimizations
 
