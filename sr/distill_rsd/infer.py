@@ -16,10 +16,9 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
-from train import predict_x0  # noqa: E402
+from rsd_models import TEACHER_CKPT, predict_x0  # noqa: E402
 
-REPO = M.RESSHIFT.parent
-TEACHER_CKPT = M.RESSHIFT / "weights" / "resshift_realsrx4_s15_v2.pth"
+REPO = M.REPO
 
 
 def load_lr(path, device, scale):
@@ -48,7 +47,7 @@ def main():
     ap.add_argument("--in_dir", default=str(REPO / "sr" / "data" / "lr_eval"))
     ap.add_argument("--out_dir", default=str(REPO / "output" / "sr" / "rsd" / "infer"))
     args = ap.parse_args()
-    dev = "cuda"
+    dev = M.DEVICE
     cfg = M.load_configs()
     diff = M.build_diffusion(cfg)
     vqgan = M.build_autoencoder(cfg, dev)
@@ -66,7 +65,6 @@ def main():
         musiq = pyiqa.create_metric("musiq", device=dev)
     except Exception:  # noqa: BLE001
         musiq = None
-    hr_dir = REPO / "sr" / "data" / "hr_eval"
 
     for lr_path in sorted(in_dir.glob("*.png")):
         lq_t, _ = load_lr(lr_path, dev, scale)

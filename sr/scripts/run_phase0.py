@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 REPO = Path(__file__).resolve().parents[2]
-RESSHIFT = REPO / "ResShift"
+SR_INFER = Path(__file__).resolve().parent / "sr_infer.py"
 
 
 def load_rgb(p: Path) -> np.ndarray:
@@ -49,16 +49,15 @@ def main():
     res_dir.mkdir(parents=True, exist_ok=True)
     mont_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) ResShift inference (subprocess, cwd=ResShift) -------------------------
+    # 1) ResShift inference (vendored, basicsr-free) --------------------------
     if not args.skip_infer:
         cmd = [
-            sys.executable, "inference_resshift.py",
+            sys.executable, str(SR_INFER),
             "-i", str(lr_dir), "-o", str(res_dir),
-            "--task", "realsr", "--scale", str(args.scale),
             "--version", args.version, "--chop_size", str(args.chop_size),
         ]
         print("RUN:", " ".join(cmd))
-        subprocess.run(cmd, cwd=RESSHIFT, check=True)
+        subprocess.run(cmd, check=True)
 
     # 2) metrics ---------------------------------------------------------------
     try:

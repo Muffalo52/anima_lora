@@ -14,17 +14,7 @@ import torch.nn.functional as F
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
-
-TEACHER_CKPT = M.RESSHIFT / "weights" / "resshift_realsrx4_s15_v2.pth"
-
-
-def predict_x0(diff, model, z_t, z_y, t, eps=None):
-    """ResShift x0 prediction (predict_type=xstart): scale input, forward, output IS x0.
-    eps is passed only to stochastic (student/fake) nets; the teacher is deterministic."""
-    kw = {"lq": z_y}
-    if eps is not None:
-        kw["eps"] = eps
-    return model(diff._scale_input(z_t, t), t, **kw)
+from rsd_models import TEACHER_CKPT, predict_x0  # noqa: E402
 
 
 def main():
@@ -32,7 +22,7 @@ def main():
     ap.add_argument("--bs", type=int, default=1)
     ap.add_argument("--amp", action="store_true")
     args = ap.parse_args()
-    dev = "cuda"
+    dev = M.DEVICE
     torch.cuda.reset_peak_memory_stats()
 
     cfg = M.load_configs()

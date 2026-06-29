@@ -1,9 +1,11 @@
 """``make sr-*`` — ResShift super-resolution sidecar dispatch.
 
 The SR sidecar lives OUTSIDE Anima's uv project: it has its own isolated venv
-(``sr/.venv`` — modern Blackwell-capable torch, **no xformers**) because ResShift
-pins an incompatible torch. These targets are thin shells that invoke that venv's
-python; they never import Anima's torch. See ``sr/README.md`` for the env split.
+(``sr/.venv`` — same Blackwell torch family as root, **no xformers**). The split is
+NOT a torch-incompatibility (that rationale is stale); it's to keep the SR deps out of
+the main Anima lockfile. ResShift's source is vendored under ``sr/resshift/`` (no
+external clone). These targets are thin shells that invoke that venv's python.
+See ``sr/README.md`` for the env split.
 """
 
 import os
@@ -14,7 +16,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SR = ROOT / "sr"
 VENV_PY = SR / ".venv" / "bin" / "python"
-RESSHIFT = ROOT / "ResShift"
 
 
 def _venv_py() -> str:
@@ -67,21 +68,19 @@ def cmd_sr_rsd_infer(extra):
 
 
 def cmd_sr_test(extra):
-    """Tiled SR on a folder/image: make sr-test IN=<path> [OUT=… SCALE=4 VERSION=v3].
+    """Tiled SR (released x4) on a folder/image: make sr-test IN=<path> [OUT=… VERSION=v3 CHOP=512].
 
-    Thin pass-through to ResShift's inference_resshift.py inside the SR venv.
+    Thin pass-through to the vendored, basicsr-free sr/scripts/sr_infer.py.
     """
     in_path = os.environ.get("IN", "")
     if not in_path:
         sys.exit("set IN=<input image or dir>  (e.g. make sr-test IN=foo.png)")
     out = os.environ.get("OUT", str(SR / "data" / "results"))
-    scale = os.environ.get("SCALE", "4")
     version = os.environ.get("VERSION", "v3")
     chop = os.environ.get("CHOP", "512")
     cmd = [
-        _venv_py(), "inference_resshift.py",
+        _venv_py(), str(SR / "scripts" / "sr_infer.py"),
         "-i", in_path, "-o", out,
-        "--task", "realsr", "--scale", scale,
         "--version", version, "--chop_size", chop, *extra,
     ]
-    _run(cmd, cwd=RESSHIFT)
+    _run(cmd)

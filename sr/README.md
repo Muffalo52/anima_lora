@@ -6,40 +6,37 @@ phasing, and the ×2-vs-×4 / degradation decisions live in
 [`docs/proposal/resshift_sr_sidecar.md`](../docs/proposal/resshift_sr_sidecar.md).
 This README is the ops surface.
 
-## Hard rule: isolated env (NOT Anima's torch)
+## Self-contained: vendored source, no external clone
 
-ResShift lives in its **own** venv `sr/.venv` and never imports Anima's torch.
-The proposal assumed ResShift's pinned `torch==2.1.1` + `xformers==0.0.23`; that is
-**wrong for this box** — the GPU is an **RTX 5070 Ti (Blackwell, sm_120)** and those
-wheels have no Blackwell kernels. So the real env is:
+ResShift's source is **vendored** under [`sr/resshift/`](resshift/) (committed —
+`models/`, `ldm/`, `utils/`, `configs/`, `LICENSE`; ~530 KB, basicsr-free). There is
+**no external `ResShift/` clone to fetch or patch.** Weights live separately under
+`sr/weights/` (gitignored, ~1.6 GB; auto-downloaded by `sr_infer.py` from the v2.0
+release if missing).
 
-- **Modern Blackwell torch** (`torch 2.12.1+cu132`, installed via the cu128 index).
-- **No xformers** — it's optional in ResShift; we use a query-chunked SDPA fallback
-  instead (see patches below). Avoids a Blackwell xformers source build.
-- `basicsr` needs a one-line shim (`torchvision.transforms.functional_tensor` was
-  removed) — applied by `setup_env.sh`.
+The sidecar still runs in its **own** venv `sr/.venv` — not for torch reasons (it runs
+the **same torch as root**: Python 3.13, `torch 2.12 + cu132`, Blackwell sm_120, no
+xformers) but to keep the SR deps (`pyiqa`, `lpips`, …) out of the main Anima lockfile.
+
+- **Same Blackwell torch as root** (`torch 2.12 + cu132`, cu132 index). Python 3.13
+  to match root and kill a version-drift axis.
+- **No xformers — and not worth building one.** Its only candidate use here is the
+  VQGAN single-head `head_dim=512` mid-attention, which xformers can't accelerate
+  anyway; the vendored VQGAN ships **query-chunked exact SDPA** (`ldm/modules/
+  diffusionmodules/model.py`, bit-faithful to the trained single-head math, `O(Bq·N)`
+  memory) that fixes the OOM, and the UNet's Swin attention gets SDPA-flash for free.
+- **No basicsr.** The vendored tree drops it (and the data/inference paths that needed
+  it); `sr_infer.py` reimplements released-model inference over the vendored core.
 
 ```bash
-make sr-setup        # one-time: create sr/.venv, install deps, patch basicsr + ResShift
+make sr-setup        # one-time: create sr/.venv (py3.13, cu132), install deps
 make sr-prep         # build frozen synthetic-LR eval set from image_dataset/ (--n 30)
 make sr-phase0       # released ResShift x4 (v3) on eval set + metrics + montages
-make sr-test IN=foo.png [OUT=… SCALE=4 VERSION=v3 CHOP=512]   # tiled SR on any image/dir
+make sr-test IN=foo.png [OUT=… VERSION=v3 CHOP=512]   # tiled SR on any image/dir
 ```
 
-`make sr-setup` is idempotent; re-run it after re-cloning ResShift to re-apply the
-source patches.
-
-## ResShift source patches (ResShift/ is a gitignored clone)
-
-Because `ResShift/` is an upstream clone (gitignored), our edits don't ride in git
-history — `sr/scripts/patch_resshift.py` re-applies them idempotently:
-
-- **VQGAN vanilla `AttnBlock`** (`ldm/modules/diffusionmodules/model.py`): the
-  single-head, `head_dim=512`, ~65k-token mid-attention has **no** flash/efficient
-  SDPA kernel (head_dim > 256), so plain SDPA falls to the math backend and OOMs on
-  a 16 GiB attention map. Replaced with **query-chunked exact SDPA** — bit-faithful
-  to the trained single-head math, `O(Bq·N)` memory.
-- `basicsr/data/degradations.py` import shim — applied in-venv by `setup_env.sh`.
+`make sr-setup` is idempotent. The vendored VQGAN attention patch lives in the source
+(committed), so there's nothing to re-apply.
 
 ## Phase 0 — verdict (2026-06-29): released model transfers well to our art
 

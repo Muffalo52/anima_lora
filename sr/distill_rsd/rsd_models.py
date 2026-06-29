@@ -15,20 +15,36 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-RESSHIFT = (Path(__file__).resolve().parents[2] / "ResShift")
+SR = Path(__file__).resolve().parents[1]   # sr/
+REPO = SR.parent                           # repo root (for output/ + data/ paths)
+RESSHIFT = SR / "resshift"                 # vendored ResShift source (no external clone)
+WEIGHTS = SR / "weights"                   # model checkpoints (gitignored, see sr/README.md)
 if str(RESSHIFT) not in sys.path:
     sys.path.insert(0, str(RESSHIFT))
 
-from utils import util_common  # noqa: E402  (ResShift)
-from models.unet import UNetModelSwin  # noqa: E402  (ResShift)
+from utils import util_common  # noqa: E402  (vendored ResShift)
+from models.unet import UNetModelSwin  # noqa: E402  (vendored ResShift)
 
 CONFIG = RESSHIFT / "configs" / "realsr_swinunet_realesrgan256.yaml"
+TEACHER_CKPT = WEIGHTS / "resshift_realsrx4_s15_v2.pth"
+DEVICE = "cuda"
 
 
-def load_configs():
-    cfg = OmegaConf.load(CONFIG)
-    # resolve ResShift-relative paths so we can run from anywhere
-    cfg.autoencoder.ckpt_path = str(RESSHIFT / cfg.autoencoder.ckpt_path)
+def predict_x0(diff, model, z_t, z_y, t, eps=None):
+    """ResShift x0 prediction (predict_type=xstart): scale input, forward, output IS x0.
+
+    eps is passed only to the stochastic student/fake nets; the teacher is deterministic.
+    """
+    kw = {"lq": z_y}
+    if eps is not None:
+        kw["eps"] = eps
+    return model(diff._scale_input(z_t, t), t, **kw)
+
+
+def load_configs(config_path=CONFIG):
+    cfg = OmegaConf.load(config_path)
+    # autoencoder ckpt is config-relative ("weights/autoencoder_vq_f4.pth"); point it at sr/weights/
+    cfg.autoencoder.ckpt_path = str(WEIGHTS / Path(cfg.autoencoder.ckpt_path).name)
     return cfg
 
 
@@ -45,11 +61,9 @@ class StochasticUNet(UNetModelSwin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        input_ch = int(self.channel_mult[0] * self.model_channels) \
-            if hasattr(self, "channel_mult") else self.input_blocks[0][0].out_channels
-        in_lat = self.input_blocks[0][0].out_channels  # 160
+        in_lat = self.input_blocks[0][0].out_channels  # post-conv width (160)
         # eps has the latent's channel count (3); project to the post-conv width.
-        self.noise_proj = nn.Conv2d(self.out_channels if False else 3, in_lat, 3, padding=1)
+        self.noise_proj = nn.Conv2d(3, in_lat, 3, padding=1)
         nn.init.zeros_(self.noise_proj.weight)
         nn.init.zeros_(self.noise_proj.bias)
 
@@ -81,10 +95,6 @@ class StochasticUNet(UNetModelSwin):
             h = module(h, emb)
         h = h.type(x.dtype)
         return self.out(h)
-
-    @torch.no_grad()
-    def _noop(self):
-        pass
 
     def encode_features(self, x, lq=None, timesteps=None, eps=None):
         """Bottleneck features for the GAN head: input_blocks + middle ResBlock."""

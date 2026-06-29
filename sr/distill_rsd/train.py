@@ -10,6 +10,7 @@ import copy
 import json
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -20,15 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
 from data import ArtSRDataset  # noqa: E402
-
-TEACHER_CKPT = M.RESSHIFT / "weights" / "resshift_realsrx4_s15_v2.pth"
-
-
-def predict_x0(diff, model, z_t, z_y, t, eps=None):
-    kw = {"lq": z_y}
-    if eps is not None:
-        kw["eps"] = eps
-    return model(diff._scale_input(z_t, t), t, **kw)
+from rsd_models import TEACHER_CKPT, predict_x0  # noqa: E402
 
 
 @torch.no_grad()
@@ -52,13 +45,13 @@ def main():
     ap.add_argument("--nodes", type=int, nargs="+", default=[4, 8, 12, 14],
                     help="N multistep timestep nodes (0-indexed in [0,T-1])")
     ap.add_argument("--amp", action="store_true", help="bf16 autocast")
-    ap.add_argument("--save_dir", default=str(M.RESSHIFT.parent / "output" / "sr" / "rsd"))
+    ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "rsd"))
     ap.add_argument("--log_every", type=int, default=20)
     ap.add_argument("--save_every", type=int, default=500)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
     args = ap.parse_args()
 
-    dev = "cuda"
+    dev = M.DEVICE
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     cfg = M.load_configs()
@@ -92,7 +85,7 @@ def main():
     nodes = torch.tensor(args.nodes, device=dev)
 
     def autocast():
-        return torch.autocast("cuda", dtype=torch.bfloat16) if args.amp else torch.enable_grad()
+        return torch.autocast("cuda", dtype=torch.bfloat16) if args.amp else nullcontext()
 
     def next_batch():
         nonlocal it

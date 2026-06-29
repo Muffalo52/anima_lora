@@ -1,6 +1,9 @@
-# ResShift SR sidecar — isolated env deps.
-# NOTE: torch/torchvision installed separately from the cu128 index (Blackwell sm_120).
-# xformers is intentionally OMITTED — ResShift falls back to vanilla/softmax attention.
+# ResShift SR sidecar — isolated env deps (kept out of the main Anima lockfile so the
+# SR closure doesn't pollute it; see sr/README.md). ResShift source is vendored under
+# sr/resshift/ (basicsr-free), so basicsr is NOT a dependency anymore.
+# NOTE: torch/torchvision installed separately from the cu132 index (Blackwell sm_120),
+# matching the root .venv. xformers is intentionally OMITTED — the vendored VQGAN ships
+# query-chunked SDPA attention; a Blackwell xformers build is a non-win.
 scipy
 numpy
 opencv-python
@@ -19,5 +22,4 @@ albumentations
 einops
 imageio
 loralib
-basicsr
 pyiqa

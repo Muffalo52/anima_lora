@@ -45,9 +45,9 @@ configs/gui-methods/custom/
 near_twins_temp.toml
 sincos_decensored/
 bench/x0_contradiction/prompts/
-# ResShift SR sidecar (upstream clone + venv + weights/data)
+# ResShift SR sidecar — vendored source (sr/resshift/) IS committed; ignore only
+# the (now-removed) external clone, the venv, weights, and data artifacts.
 /ResShift/
 /sr/.venv/
-/sr/resshift
 /sr/data/
 /sr/**/weights/
