@@ -51,8 +51,22 @@ def cmd_sr_phase0(extra):
 
 
 def cmd_sr_rsd_train(extra):
-    """RSD distillation: distill the v2 15-step teacher -> 1-step student on our art."""
-    _run([_venv_py(), str(SR / "distill_rsd" / "train.py"), *extra])
+    """RSD distillation: distill the v2 15-step teacher -> 1-step student on our art.
+
+    Defaults --src to the 4096-capped HR cache (sr/data/rsd_hr_cap4096) when it exists
+    and the caller didn't pass their own --src — that cache carries native ~4096-scale
+    detail at bounded decode cost (NOT the downsized rsd_hr_1024). Falls back to
+    train.py's own image_dataset default if the cache is absent.
+    """
+    argv = list(extra)
+    if not any(a == "--src" or a.startswith("--src=") for a in argv):
+        cache = SR / "data" / "rsd_hr_cap4096"
+        if cache.is_dir():
+            print(f"[sr-rsd-train] defaulting --src to {cache} (pass --src to override)")
+            argv = ["--src", str(cache), *argv]
+        else:
+            print(f"[sr-rsd-train] {cache} absent — train.py will fall back to image_dataset")
+    _run([_venv_py(), str(SR / "distill_rsd" / "train.py"), *argv])
 
 
 def cmd_sr_rsd_dryrun(extra):

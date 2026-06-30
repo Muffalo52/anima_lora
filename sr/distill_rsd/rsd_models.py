@@ -52,6 +52,23 @@ def _strip_module(sd):
     return {k[len("module."):] if k.startswith("module.") else k: v for k, v in sd.items()}
 
 
+def enable_grad_checkpointing(model):
+    """Turn on checkpointing for every Swin BasicLayer (bit-exact, big activation save).
+
+    UNetModelSwin hardcodes use_checkpoint=False on each BasicLayer, so the windowed
+    attention at the 64x64 latent grid keeps all activations live for backward. The
+    layer input always flows from trainable convs here, so reentrant checkpoint won't
+    drop grad. Only worth it on the trainable nets (student/fake) — frozen no_grad
+    forwards (teacher) build no graph anyway.
+    """
+    n = 0
+    for m in model.modules():
+        if hasattr(m, "use_checkpoint"):
+            m.use_checkpoint = True
+            n += 1
+    return n
+
+
 class StochasticUNet(UNetModelSwin):
     """UNetModelSwin + a zero-init noise branch -> stochastic one-step generator.
 
@@ -141,15 +158,25 @@ def build_teacher(cfg, ckpt_path, device, dtype=torch.float32):
     return model
 
 
-def build_generator(cfg, teacher_ckpt, device, dtype=torch.float32):
-    """Student or fake: teacher weights + zero-init noise branch (strict=False)."""
+def build_generator(cfg, teacher_ckpt, device, dtype=torch.float32, grad_ckpt=False,
+                    pretrained=True):
+    """Student or fake: teacher weights + zero-init noise branch (strict=False).
+
+    grad_ckpt=True enables Swin-attention gradient checkpointing (training only) —
+    large activation-memory save, bit-exact. Leave off for inference.
+    pretrained=False skips loading the teacher ckpt (random init) — use when the caller
+    immediately load_state_dict's a full student ckpt over it (avoids a wasted 174M read).
+    """
     model = _build_unet(cfg, StochasticUNet)
-    sd = torch.load(teacher_ckpt, map_location="cpu")
-    sd = sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
-    missing, unexpected = model.load_state_dict(_strip_module(sd), strict=False)
-    # only noise_proj.* should be missing from the ckpt
-    assert all("noise_proj" in m for m in missing), f"unexpected missing: {missing}"
-    assert not unexpected, f"unexpected keys: {unexpected}"
+    if pretrained:
+        sd = torch.load(teacher_ckpt, map_location="cpu")
+        sd = sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
+        missing, unexpected = model.load_state_dict(_strip_module(sd), strict=False)
+        # only noise_proj.* should be missing from the ckpt
+        assert all("noise_proj" in m for m in missing), f"unexpected missing: {missing}"
+        assert not unexpected, f"unexpected keys: {unexpected}"
+    if grad_ckpt:
+        enable_grad_checkpointing(model)
     return model.to(device, dtype)
 
 

@@ -116,30 +116,40 @@ class WindowAttention(nn.Module):
         Args:
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+
+        Uses F.scaled_dot_product_attention: the relative-position bias and the
+        shift-window mask are both purely additive pre-softmax terms, so they fold into
+        SDPA's `attn_mask`. SDPA fuses the softmax + both matmuls (mem-efficient backend;
+        flash is unavailable whenever a float bias is passed) and skips materializing the
+        score matrix. Numerically matches the manual q@kᵀ→+bias→softmax→@v path it replaces.
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple), B_ x H x N x C
-
-        q = q * self.scale
-        attn = (q @ k.transpose(-2, -1).contiguous())
+        head_dim = C // self.num_heads
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, head_dim).permute(2, 0, 3, 1, 4).contiguous()
+        q, k, v = qkv[0], qkv[1], qkv[2]  # each B_ x H x N x head_dim
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        attn = attn + relative_position_bias.unsqueeze(0).to(attn.dtype)
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # N,N,nH
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, N, N
+        attn_bias = relative_position_bias.unsqueeze(0).to(q.dtype)  # 1, nH, N, N (broadcasts over B_)
+        drop_p = self.attn_drop.p if self.training else 0.0
 
         if mask is not None:
+            # fold the per-window shift mask in via a 5D batch layout so the bias stays
+            # broadcast-light: (1, nW, nH, N, N) over q (B_//nW, nW, nH, N, head_dim).
             nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N)
-            attn = self.softmax(attn)
+            q = q.view(B_ // nW, nW, self.num_heads, N, head_dim)
+            k = k.view(B_ // nW, nW, self.num_heads, N, head_dim)
+            v = v.view(B_ // nW, nW, self.num_heads, N, head_dim)
+            attn_bias = attn_bias.unsqueeze(0) + mask.view(1, nW, 1, N, N).to(q.dtype)  # 1,nW,nH,N,N
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias,
+                                               dropout_p=drop_p, scale=self.scale)
+            x = x.reshape(B_, self.num_heads, N, head_dim)
         else:
-            attn = self.softmax(attn)
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias,
+                                               dropout_p=drop_p, scale=self.scale)
 
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).contiguous().reshape(B_, N, C)
+        x = x.transpose(1, 2).contiguous().reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x

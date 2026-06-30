@@ -32,6 +32,19 @@ def ema_update(ema, model, decay):
         be.copy_(bm)
 
 
+def dc_loss(a, b, k=32):
+    """L1 on the low-frequency (DC + coarse tone) band of the decoded image.
+
+    VGG-LPIPS is ~invariant to a uniform color/tone shift and the DMD gradient is
+    per-sample magnitude-normalized, so the global DC (mean color) is the objective's
+    unconstrained null-space — the 1-step student settles into a small systematic tint
+    (measured ~-0.027 on blue, -0.012 luma vs GT; the VQGAN roundtrip is color-faithful,
+    so it's the student, not the decoder). Avg-pooling to a coarse map and matching L1
+    pins that band without touching high-freq detail. Both a,b are image-space [-1,1].
+    """
+    return F.l1_loss(F.avg_pool2d(a, k), F.avg_pool2d(b, k))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=3000, help="generator updates")
@@ -41,10 +54,17 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--lambda_lpips", type=float, default=2.0)
     ap.add_argument("--lambda_gan", type=float, default=3e-3)
+    ap.add_argument("--lambda_dc", type=float, default=1.0,
+                    help="low-freq DC/color match on the 1-step decoded image — pins the "
+                         "global tone LPIPS+DMD leave free (fixes the student color drift). "
+                         "0 disables; raise toward ~5 if a tint persists.")
     ap.add_argument("--ema", type=float, default=0.999)
     ap.add_argument("--nodes", type=int, nargs="+", default=[4, 8, 12, 14],
                     help="N multistep timestep nodes (0-indexed in [0,T-1])")
     ap.add_argument("--amp", action="store_true", help="bf16 autocast")
+    ap.add_argument("--no_grad_ckpt", action="store_true",
+                    help="disable Swin gradient checkpointing on student/fake (on by "
+                         "default — big activation-memory save, bit-exact)")
     ap.add_argument("--src", default=None,
                     help="HR source dir (default image_dataset; pass the prep_rsd_cache "
                          "4096-capped cache for faster decode at the right 1024->4096 scale)")
@@ -63,8 +83,8 @@ def main():
 
     print("building nets...")
     teacher = M.build_teacher(cfg, str(TEACHER_CKPT), dev)
-    student = M.build_generator(cfg, str(TEACHER_CKPT), dev)
-    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev)
+    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt)
+    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt)
     disc = M.DiscHead().to(dev)
     vqgan = M.build_autoencoder(cfg, dev)
     diff = M.build_diffusion(cfg)
@@ -120,7 +140,7 @@ def main():
             gt, lq = next_batch(); B = gt.shape[0]
             z0, z_y = encode(gt, lq)
             t_n = rand_t(B, nodes); eps = torch.randn_like(z0)
-            with torch.no_grad():
+            with torch.no_grad(), autocast():
                 z_tn = diff.q_sample(z0, z_y, t_n)
                 z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)
             t = rand_t(B, T)
@@ -146,7 +166,7 @@ def main():
                 z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)
             t = rand_t(B, T)
             z_t = diff.q_sample(z0_hat.detach().float(), z_y, t)
-            with torch.no_grad():
+            with torch.no_grad(), autocast():
                 x0_teacher = predict_x0(diff, teacher, z_t, z_y, t)
                 x0_fakep = predict_x0(diff, fake, z_t, z_y, t, eps)
                 grad = (x0_fakep - x0_teacher).float()
@@ -159,11 +179,13 @@ def main():
                 z0_single = predict_x0(diff, student, z_TT, z_y, tT, torch.randn_like(z_y))
                 x0_img = vqgan.decode(z0_single.float(), force_not_quantize=True).clamp(-1, 1)
                 L_lpips = lp(x0_img, gt).mean()
+                L_dc = dc_loss(x0_img.float(), gt.float())
                 L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, z_y, eps=eps))).mean()
-            loss = (L_theta + args.lambda_lpips * L_lpips + args.lambda_gan * L_gan_g) / args.grad_accum
+            loss = (L_theta + args.lambda_lpips * L_lpips + args.lambda_dc * L_dc
+                    + args.lambda_gan * L_gan_g) / args.grad_accum
             loss.backward()
             g_logs = {k: v.detach().item() for k, v in
-                      {"L_theta": L_theta, "L_lpips": L_lpips, "L_gan_g": L_gan_g,
+                      {"L_theta": L_theta, "L_lpips": L_lpips, "L_dc": L_dc, "L_gan_g": L_gan_g,
                        "L_fake": L_fake, "L_gan_d": L_gan_d}.items()}
         torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
         opt_g.step()
