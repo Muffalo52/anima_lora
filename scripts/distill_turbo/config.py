@@ -414,6 +414,17 @@ def build_argparser() -> argparse.ArgumentParser:
         help="REPA-DoG post band-pass std normalization (0 = empirical per-batch "
         "std). Default: TOML (repa.dog_norm_std, default 0).",
     )
+    parser.add_argument(
+        "--repa_timestep_weighting",
+        type=float,
+        default=None,
+        help="REPA σ-emphasis g (signed; 0 = uniform τ, legacy). g>0 weights "
+        "HIGH-σ (where REPA is cheap cond-utilization on near-noise — wasted); "
+        "g<0 weights LOW/mid-σ (where DP-DMD contests alignment — the lever the "
+        "σ-structure diagnosis points at). w(σ) integrates to 1 (shape-not-scale; "
+        "mirrors library/training/repa.py _timestep_weights). Negative is a valid "
+        "value (not the -1 sentinel). Default: TOML (repa.timestep_weighting, 0).",
+    )
 
     # Soft-rank caption-discrimination auxiliary (off by default).
     parser.add_argument(
@@ -578,6 +589,7 @@ class TurboConfig:
     repa_dog_sigma1_div: float
     repa_dog_sigma2_div: float
     repa_dog_norm_std: float
+    repa_timestep_weighting: float
 
     # Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1)
     softrank_weight: float
@@ -757,6 +769,17 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     )
     repa_dog_norm_std = float(
         _pick(args.repa_dog_norm_std, cfg, "repa.dog_norm_std", 0.0)
+    )
+    # g<0 is a valid value (low/mid-σ emphasis), so only None counts as "unset"
+    # here — the default -1/-1.0 sentinels would swallow a real g=-1.0.
+    repa_timestep_weighting = float(
+        _pick(
+            args.repa_timestep_weighting,
+            cfg,
+            "repa.timestep_weighting",
+            0.0,
+            sentinels=(None,),
+        )
     )
 
     # weight=0 keeps the whole soft-rank path off → byte-identical DP-DMD (no
@@ -942,10 +965,16 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             if repa_target_dog
             else f"spatial_norm={repa_spatial_norm}"
         )
+        tw_desc = (
+            "τ=uniform"
+            if repa_timestep_weighting == 0.0
+            else f"τ_weight g={repa_timestep_weighting:+g} "
+            f"({'high-σ' if repa_timestep_weighting > 0 else 'low/mid-σ'})"
+        )
         logger.info(
             f"REPA (turbo×REPA relational alignment) ON: weight={repa_weight}, "
             f"layer={repa_layer}, encoder={repa_encoder!r}, "
-            f"every_n={repa_every_n}, {target_desc}."
+            f"every_n={repa_every_n}, {target_desc}, {tw_desc}."
         )
     if softrank_weight < 0.0:
         raise ValueError(f"softrank.weight={softrank_weight}: must be >= 0")
@@ -1183,6 +1212,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         repa_dog_sigma1_div=repa_dog_sigma1_div,
         repa_dog_sigma2_div=repa_dog_sigma2_div,
         repa_dog_norm_std=repa_dog_norm_std,
+        repa_timestep_weighting=repa_timestep_weighting,
         softrank_weight=softrank_weight,
         softrank_k=softrank_k,
         softrank_every_n=softrank_every_n,
@@ -1245,6 +1275,7 @@ _TB_KEYS = (
     "repa_dog_sigma1_div",
     "repa_dog_sigma2_div",
     "repa_dog_norm_std",
+    "repa_timestep_weighting",
     "softrank_weight",
     "f_div",
     "k_anchor",

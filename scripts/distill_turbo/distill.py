@@ -1103,8 +1103,21 @@ def main():
                     dog_sigma2_div=cfg.repa_dog_sigma2_div,
                     dog_norm_std=cfg.repa_dog_norm_std,
                 )
-                (cfg.repa_weight * repa_loss).backward()
-                repa_loss = repa_loss.detach()  # metrics-only from here
+                # σ-emphasis: scale this step's REPA grad by w(τ). w integrates
+                # to 1 under uniform τ (shape-not-scale; mirrors repa.py
+                # _timestep_weights), so over steps E[w·loss] = the g-weighted
+                # objective at the same expected magnitude. g<0 de-emphasizes the
+                # cheap σ→1 win and shifts mass to the contested low/mid-σ band.
+                g_rw = cfg.repa_timestep_weighting
+                if g_rw > 0.0:
+                    w_tau = (g_rw + 1.0) * (tau_val**g_rw)
+                elif g_rw < 0.0:
+                    p_rw = -g_rw
+                    w_tau = (p_rw + 1.0) * ((1.0 - tau_val) ** p_rw)
+                else:
+                    w_tau = 1.0
+                (cfg.repa_weight * w_tau * repa_loss).backward()
+                repa_loss = repa_loss.detach()  # raw (unweighted) for honest metrics
                 repa_ran = True
 
         # --- GAN generator term + f-distill reweighting (ideas 1 & 2) ---

@@ -11,6 +11,8 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
+## Test candidates: repa tau scheduling, and flow shift to 2
+
 output_name = "anima_turbo_R_KL"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
@@ -181,6 +183,9 @@ weight = 0.0                    # λ on the Gram align loss. 0 = off; first live
 layer = 8                       # DiT block tap (matches LoRA-family REPA)
 encoder = "pe_spatial"          # sidecar {stem}_anima_{encoder}.safetensors next to the TE cache
 every_n = 2                     # run the term every N student steps (amortization; ~0.08 partial fwd/step)
+# timestep_weighting = 0.0      # σ-emphasis g (signed). 0 = uniform τ. g>0 → high-σ (REPA is cheap
+#                               # cond-utilization on near-noise — wasted); g<0 → low/mid-σ (where DP-DMD
+#                               # contests alignment). σ-structure diagnosis points at g<0 (try -1 .. -2).
 # spatial_norm = true           # iREPA target standardization (the validated LoRA operating point)
 # target_dog = true             # turn the DoG band-pass on
 # dog_sigma1_div = 16.0         # low-pass σ1 = min(gh,gw)/16 (Phase-0 sweet spot min/16–32)
