@@ -50,6 +50,21 @@ def cmd_sr_phase0(extra):
     _run([_venv_py(), str(SR / "scripts" / "run_phase0.py"), *extra])
 
 
+def cmd_sr_build_hr_pool(extra):
+    """Filter gelcrawl/retrieved + image_dataset into a sharp HR pool (anima env OK)."""
+    # PIL/numpy only — run under whatever python invoked us (no SR venv needed).
+    _run([sys.executable, str(SR / "scripts" / "build_hr_pool.py"), *extra])
+
+
+def cmd_sr_train(extra):
+    """ResShift ×2 finetune: warm-start the released x4 v2, train on our HR pool.
+
+    Defaults --src to sr/data/hr_pool when it exists (build it with `make sr-build-hr-pool`);
+    otherwise train.py falls back to image_dataset. Pass ARGS=\"--iters … --bs … --amp\".
+    """
+    _run([_venv_py(), str(SR / "train_x2" / "train.py"), *extra])
+
+
 def cmd_sr_rsd_train(extra):
     """RSD distillation: distill the v2 15-step teacher -> 1-step student on our art.
 
@@ -95,6 +110,10 @@ def cmd_sr_test(extra):
     cmd = [
         _venv_py(), str(SR / "scripts" / "sr_infer.py"),
         "-i", in_path, "-o", out,
-        "--version", version, "--chop_size", chop, *extra,
+        "--version", version, "--chop_size", chop,
     ]
+    ckpt = os.environ.get("CKPT", "")  # x2 only: pick a make-sr-train checkpoint
+    if ckpt:
+        cmd += ["--ckpt", ckpt]
+    cmd += list(extra)
     _run(cmd)

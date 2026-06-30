@@ -122,6 +122,14 @@ COMMANDS = {
         sr.cmd_sr_test,
         "Tiled SR on IN=<img|dir> [OUT= SCALE=4 VERSION=v3 CHOP=512] via the SR venv.",
     ),
+    "sr-build-hr-pool": (
+        sr.cmd_sr_build_hr_pool,
+        "Filter gelcrawl/retrieved + image_dataset into a sharp HR pool (sr/data/hr_pool).",
+    ),
+    "sr-train": (
+        sr.cmd_sr_train,
+        "ResShift x2 finetune: warm-start released x4 v2, train on HR pool (ARGS=...).",
+    ),
     "sr-rsd-train": (
         sr.cmd_sr_rsd_train,
         "RSD distillation: v2 15-step teacher -> 1-step student on our art (paper 22490).",
