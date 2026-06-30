@@ -56,8 +56,12 @@ def get_timestep_embedding(timesteps, embedding_dim):
 
 
 def nonlinearity(x):
-    # swish
-    return x*torch.sigmoid(x)
+    # swish. Anima SR sidecar: fused F.silu instead of x*sigmoid(x) — same x·σ(x)
+    # math (within fp rounding) in one kernel, but avoids materializing the separate
+    # sigmoid intermediate (same size as x) + the extra elementwise multiply. Called
+    # hundreds of times per VAE encode/decode on full-res activations (the decode is
+    # the VRAM peak per distill_rsd/infer.py), so this is a real memory+speed win.
+    return torch.nn.functional.silu(x)
 
 
 def Normalize(in_channels, num_groups=32):

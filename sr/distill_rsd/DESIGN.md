@@ -72,7 +72,9 @@ step θ on (L_θ + λ1·L_LPIPS + λ2·L_GAN_G)
 of teacher vs fake at the same `z_t`. **w_t weighting omitted** (=1, DDPM-aligned, Eq 46).
 
 **DMD2 generator gradient** (mirror `turbo_dmd`): with `g = (f_φ_x0 − f*_x0).detach()`
-optionally normalized per-sample by `‖z_t − f*_x0‖`, apply via
+normalized per-sample by the teacher-derived magnitude `‖z_t − f*_x0‖` (mean-abs,
+floored at 0.05 — SiD/DMD form, App C; **not** by `g`'s own norm, which would flatten
+the distribution-matching signal and amplify critic noise once `f_φ≈f*`), apply via
 `L_θ = 0.5·MSE(ẑ0_tn, (ẑ0_tn − g).detach())` so `dL/dẑ0 = g`.
 
 ## Hyperparameters (App. C)

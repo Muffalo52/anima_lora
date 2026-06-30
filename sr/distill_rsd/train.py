@@ -169,8 +169,17 @@ def main():
             with torch.no_grad(), autocast():
                 x0_teacher = predict_x0(diff, teacher, z_t, z_y, t)
                 x0_fakep = predict_x0(diff, fake, z_t, z_y, t, eps)
+                # DMD/SiD per-sample normalization (App C, "loss normalization … SiD"):
+                # divide by a TEACHER-derived magnitude — the residual the teacher still
+                # removes, ‖z_t − f*_x0‖ (DESIGN) — NOT by the (fake−teacher) diff's own
+                # norm. Self-normalizing flattens the distribution-matching signal (every
+                # sample gets a unit push regardless of how wrong it is) and, lacking a
+                # real floor, amplifies critic noise to unit scale once fake≈teacher.
+                # Floor 0.05 mirrors turbo_dmd's norm_floor (scripts/distill_turbo).
                 grad = (x0_fakep - x0_teacher).float()
-                grad = grad / (grad.abs().mean(dim=[1, 2, 3], keepdim=True) + 1e-8)
+                denom = (z_t.float() - x0_teacher.float()).abs().mean(
+                    dim=[1, 2, 3], keepdim=True).clamp_min(0.05)
+                grad = grad / denom
             L_theta = 0.5 * F.mse_loss(z0_hat.float(), (z0_hat.float() - grad).detach())
             # single-step LPIPS path from z_T ~ N(z_y, kappa^2)
             z_TT = z_y + diff.kappa * torch.randn_like(z_y)
