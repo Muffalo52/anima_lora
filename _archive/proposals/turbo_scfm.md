@@ -1,5 +1,14 @@
 # SCFM — velocity-space self-distillation for turbo (DP-DMD alternative)
 
+> **ARCHIVED / CLOSED 2026-06-30.** This line was built, trained across five runs,
+> and falsified — Term B is inert on Anima in both `renoise` and `rollout` modes,
+> so SCFM reduces to per-step FM distillation onto the teacher's instantaneous
+> field (blurry at 4 steps). All SCFM code (loss loop, config knobs, EMA plumbing,
+> `make scfm`, tests, `scfm.toml`) was removed from the live tree. The verdict +
+> evidence live in `docs/findings/scfm_velocity_fidelity_closed.md`. This file is
+> kept only for the §9 progress log. Do not re-propose a pure velocity-fidelity
+> distiller for Anima.
+
 > Proposal to add **SCFM** (*Shortcutting Pre-trained Flow Matching Diffusion
 > Models is Almost Free Lunch*, Cai, Y. Wu, Chen, H. Wu, Xiang, Wen — NeurIPS
 > 2025; project page `shortcutfm.github.io`; PDF `2431_Shortcutting_Pre_trained_.pdf`

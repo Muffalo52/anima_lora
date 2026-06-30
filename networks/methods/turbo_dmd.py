@@ -458,68 +458,6 @@ class TurboDMDNetwork:
         """Trainable params for the fake optimizer."""
         return [p for p in self.fake.parameters() if p.requires_grad]
 
-    # --- SCFM: fake stack repurposed as the EMA student copy θ⁻ ---------------
-    # Under base_loss="scfm" the fake/critic stack is never trained by an
-    # optimizer; it holds a stop-grad EMA copy of the student (θ⁻) so the
-    # velocity-self-consistency term (Term B) can evaluate two finer Euler
-    # sub-steps on a stabilized field. The two stacks are built identically
-    # (same unet, same rank — the config enforces ``fake_rank == student_rank``
-    # under scfm), so ``.parameters()`` yields matched-shape tensors in the same
-    # construction order. We validate that pairing once.
-
-    def _student_ema_pairs(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Matched ``(student_param, ema_param)`` pairs for EMA bookkeeping.
-
-        Raises if the two stacks don't line up shape-for-shape — that only
-        happens if the fake stack was built with a different rank / variant,
-        which the scfm config validation forbids, so a mismatch here is a wiring
-        bug worth failing loudly on.
-        """
-        sp = list(self.student.parameters())
-        fp = list(self.fake.parameters())
-        if len(sp) != len(fp):
-            raise RuntimeError(
-                f"SCFM EMA pairing: student has {len(sp)} params but the EMA "
-                f"(fake) stack has {len(fp)} — the two LoRA stacks must be "
-                "structurally identical (same rank/variant) under base_loss='scfm'."
-            )
-        pairs = []
-        for i, (ps, pe) in enumerate(zip(sp, fp)):
-            if ps.shape != pe.shape:
-                raise RuntimeError(
-                    f"SCFM EMA pairing: param {i} shape mismatch "
-                    f"{tuple(ps.shape)} (student) vs {tuple(pe.shape)} (EMA)."
-                )
-            pairs.append((ps, pe))
-        return pairs
-
-    def freeze_ema(self) -> None:
-        """Detach the EMA (fake) stack from autograd — it has no optimizer.
-
-        Called once before the scfm loop so the θ⁻ forwards (view='fake') build
-        no graph and the fake params are never picked up by an optimizer.
-        ``reset_ema`` then seeds θ⁻ ← θ exactly.
-        """
-        for p in self.fake.parameters():
-            p.requires_grad_(False)
-
-    @torch.no_grad()
-    def update_ema(self, mu: float) -> None:
-        """EMA step ``θ⁻ ← μ·θ⁻ + (1−μ)·θ`` (SCFM Eq. 14, LoRA-space Eq. 15).
-
-        ``lerp_(end, w)`` computes ``θ⁻·(1−w) + θ·w``; with ``w = 1−μ`` that is
-        exactly the decayed average. In-place, no graph (decorated no_grad).
-        """
-        w = 1.0 - float(mu)
-        for ps, pe in self._student_ema_pairs():
-            pe.lerp_(ps.detach(), w)
-
-    @torch.no_grad()
-    def reset_ema(self) -> None:
-        """Cyclic restart ``θ⁻ ← θ`` (SCFM vanilla single-EMA restart)."""
-        for ps, pe in self._student_ema_pairs():
-            pe.copy_(ps.detach())
-
     def freeze_dit(self) -> None:
         """Set ``requires_grad=False`` on every base DiT param.
 

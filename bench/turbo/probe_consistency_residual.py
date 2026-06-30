@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """SCFM Phase 0 — base-field consistency-residual scan (Eq. 11 headroom).
 
-The SCFM proposal (`docs/proposal/turbo_scfm.md` §2) gates Phase 1 on two reads.
+The SCFM proposal (`_archive/proposals/turbo_scfm.md` §2 — line CLOSED, verdict in
+`docs/findings/scfm_velocity_fidelity_closed.md`) gated Phase 1 on two reads.
 The image arms (28-step teacher / naive 4-step teacher / DP-DMD student) answer
 "is the few-step teacher-fidelity ceiling high enough to beat the student". This
 probe answers the *complementary* question: **is there headroom for SCFM's
@@ -75,7 +76,9 @@ def main() -> None:
     add_model_args(ap, vae=False, text_encoder=False)
     ap.add_argument("--cache_root", default="post_image_dataset/lora")
     ap.add_argument("--n_images", type=int, default=24)
-    ap.add_argument("--n_noise", type=int, default=2, help="noise renoises per (image,interval)")
+    ap.add_argument(
+        "--n_noise", type=int, default=2, help="noise renoises per (image,interval)"
+    )
     ap.add_argument("--student_steps", type=int, default=4)
     ap.add_argument("--flow_shift", type=float, default=3.0)
     ap.add_argument("--seed", type=int, default=0)
@@ -87,7 +90,9 @@ def main() -> None:
     bundle = build_anima(args, adapter=None, train_mode=False)
     model, dtype = bundle.anima, bundle.dtype
 
-    sigmas = get_timesteps_sigmas(args.student_steps, args.flow_shift, "cpu")[1].tolist()
+    sigmas = get_timesteps_sigmas(args.student_steps, args.flow_shift, "cpu")[
+        1
+    ].tolist()
     # coarse intervals of the student grid, each split at its midpoint
     intervals = [(sigmas[i], sigmas[i + 1]) for i in range(len(sigmas) - 1)]
 
@@ -162,7 +167,9 @@ def main() -> None:
     overall_resid = mean([v for ii in acc for v in acc[ii]["resid"]])
     overall_curv = mean([v for ii in acc for v in acc[ii]["curv"]])
     low_sigma = bands[-1]["residual_rel"]  # [σ=0.5 → 0] band (text/detail)
-    print(f"\noverall residual_rel = {overall_resid:.4f}  | low-σ band [0.5→0] residual_rel = {low_sigma:.4f}")
+    print(
+        f"\noverall residual_rel = {overall_resid:.4f}  | low-σ band [0.5→0] residual_rel = {low_sigma:.4f}"
+    )
 
     run_dir = make_run_dir("turbo", label=args.label)
     write_result(
