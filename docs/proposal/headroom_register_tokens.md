@@ -7,9 +7,69 @@ hypothesis for unprompted white/black borders. Diagnose first (does the base eve
 seek headroom?), then ask whether the relaxation helps, then whether a few-hundred-
 step budget can get the base to *adopt* it.
 
-Status: **PROPOSED — not started.** Design-only; no code, no bench yet. The Phase-0
-gate is a pure observation over the existing base DiT and reuses machinery we
-already have.
+Status: **RQ1 FALSIFIED (2026-07-01) — border-specific line CLOSED.** Phase-0 ran
+(`bench/headroom/sink_probe.py` + `bench/headroom/border_toggle.py`). The base DiT
+*does* manufacture a strong self-attn sink — a ~26× high-norm outlier token, mid-layer,
+high-σ, self-attn-written (the DSR/ViT phenomenon is real on Anima) — **but the sink is
+decoupled from the border.** See "## RQ1 result" below. RQ2/RQ3 are moot for the border
+hypothesis; a general-quality register experiment (DSR's actual claim) remains
+*theoretically* open but is out of scope here and no longer distinguished from DSR.
+
+## RQ1 result (Phase 0) — the border is a text-controllable data prior, not a rendered sink
+
+Falsified on the decisive test. Method: instrument the block stream for per-token
+residual activation norm ‖x‖ (the canonical high-norm-outlier sink signature), split
+self- vs cross-attn contribution, resolved over **layer-depth × σ**; then a
+**matched-seed border toggle** — hold the noise fixed and flip the border via prompt.
+
+- **The border is fully text-controllable.** A `black border, letterboxed` positive
+  *induces* a heavy frame on 5/5 previously-clean seeds; a border *negative* erases it
+  on 5/5 previously-bordering seeds (verified by eye + detector). The user's confirmed
+  `cropped` reproducer bordered on only ~1/6 seeds — `cropped` is a muddy proxy (means
+  "subject cut off," not "rendered bar"); explicit border tags are the clean lever.
+- **The self-attn sink does NOT track the border.** Across the full ON→OFF text toggle,
+  mid/hi ‖x‖ border-enrichment barely moves (clean 1.77× → induced-border 1.97×;
+  matched border-removal Δ inconsistent in sign, mean 0.14×; overall ON 1.92× vs OFF
+  1.75×, Δ=0.17× ≪ the 0.50× bar). The 26× outlier is present identically whether or
+  not a border renders — a constant background computation, not the border's cause.
+- **Interpretation.** A softmax attention sink is not erasable by a *text* negative;
+  text-controllability is the signature of a learned data prior (letterbox/matte baked
+  into training art). This is exactly this doc's own kill branch: *"the sink is not
+  co-located with borders ⇒ borders are a data-prior problem, not a relocatable sink;
+  the honest answer is crop-conditioning or border augmentation, not headroom."*
+- **σ-direction footnote settled.** The sink localizes to **mid (intermediate) layers**
+  (DSR's finding) and is strongest at **high σ** (this doc's timing) — each prior was
+  half-right; but since the sink is border-decoupled, neither timing matters for borders.
+
+Redirect for the border defect: a data-side fix (crop/border-aware conditioning, border
+augmentation, or a border-suppressing negative at inference — which already works, see
+above), not an architectural headroom add.
+
+### Quality follow-up — is the sink load-bearing? (`bench/headroom/sink_intervention.py`)
+
+DSR's *actual* claim is about quality, not borders, so we asked it directly. Anima has
+no per-image quality reward (CMMD is distribution-level; Null-TTA closed on exactly this
+gap), and the sink is in *every* generation, so we can't correlate or compare
+with/without. Instead: the DSR masking test — clamp the mid-layer outlier tokens' norm
+to 4×median during generation (matched seed) and eyeball base-vs-clamp.
+
+Result: the sink is **load-bearing and global.** Clamping just **~0.16 % of tokens
+(~7 of 4200)** re-plans the *whole* image (16 % pixel L1 on the complex prompt, change
+spread *off* the sink patches at conc 0.70×; near-identical 5 % on the simple prompt).
+Quality is **roughly preserved** — one coherent image traded for another comparable one,
+with minor new artifacts (a malformed hand, faint speckles); no free quality win, no
+collapse. This **replicates DSR Tab. 1** (masking the outlier doesn't help — it's a
+symptom/carrier, not a removable defect) on Anima.
+
+Implication: registers would have to *absorb* the sink, not remove it, and whether that
+nets a quality gain is a Phase-1 training question **gated on a quality metric Anima
+lacks**. The general-quality register line is therefore train-and-pray with no gate and
+no longer distinct from DSR — **shelved unless an Anima per-image quality reward appears.**
+
+---
+
+Original design follows (superseded by the result above). Design-only; the Phase-0
+gate was a pure observation over the existing base DiT.
 
 - Planned bench: `bench/headroom/sink_probe.py` (new; Phase-0 — sigma-resolved,
   self-attn-split per-token activation-norm map over the patch grid; is there a

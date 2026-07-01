@@ -33,6 +33,16 @@ Usage::
     # ... write artifacts into run_dir ...
     write_result(run_dir, script=__file__, args=args,
                  metrics={...}, artifacts=["per_step.csv", "gap_curves.png"])
+
+Cache-level data access (issues.md DX4)::
+
+    For raw cache reads without the CachedDataset/blueprint layer, use
+    ``library/io/cache.py`` directly:
+        load_cached_latents(npz_path)      -> (latents, resolution, orig_h, orig_w)
+        load_cached_text_features(te_path) -> (crossattn_emb, pooled)  # None,None if absent
+        discover_latents_by_stem(root)     -> {stem: [LatentCacheFile, ...]}  # buckets/stem
+    Don't hand-roll the ``next(k for k if k.startswith("latents_"))`` NPZ read —
+    ``load_cached_latents`` already does it (and recovers original pixel size).
 """
 
 from __future__ import annotations
@@ -150,7 +160,14 @@ def write_result(
     device: Any = None,
     extra: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Write the standard ``result.json`` envelope into ``run_dir``."""
+    """Write the standard ``result.json`` envelope into ``run_dir``.
+
+    Only ``run_dir`` is positional; everything else is keyword-only (issues.md
+    DX5). Call as
+    ``write_result(run_dir, script=__file__, args=args, metrics={...})`` — a
+    positional ``write_result(run_dir, metrics)`` fails with an opaque
+    "takes 1 positional argument" error.
+    """
     args_dict = vars(args) if hasattr(args, "__dict__") else dict(args)
     script_path = Path(script)
     if script_path.is_absolute():

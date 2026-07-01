@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
@@ -160,6 +161,85 @@ def get_noisy_model_input_and_timesteps(
         noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
     return noisy_model_input.to(dtype), timesteps.to(dtype), sigmas
+
+
+def fm_training_batch(
+    latents: torch.Tensor,
+    noise: torch.Tensor,
+    *,
+    timestep_sampling: str = "sigmoid",
+    discrete_flow_shift: float = 1.0,
+    sigmoid_scale: float = 1.0,
+    sigmoid_bias: float = 0.0,
+    weighting_scheme: str = "uniform",
+    logit_mean: float = 0.0,
+    logit_std: float = 1.0,
+    mode_scale: float = 1.29,
+    ip_noise_gamma: Optional[float] = None,
+    ip_noise_gamma_random_strength: bool = False,
+    t_min: Optional[float] = None,
+    t_max: Optional[float] = None,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+    noise_scheduler: Optional[object] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The default rectified-flow training step, as plain kwargs (issues.md DX2).
+
+    Bench/adjacent code that wants a faithful FM step should call this instead
+    of reassembling ``get_noisy_model_input_and_timesteps`` (needs a full ``args``
+    Namespace + a scheduler) and then re-deriving the target by hand. This is the
+    exact recipe ``train.py`` runs — it delegates to the same function under the
+    hood (the ``tests/test_fm_training_batch.py`` invariant pins the bit-match),
+    with the trainer's argument **defaults** baked in as kwarg defaults.
+
+    Args:
+        latents: clean latents ``(B, C, H, W)`` (or 5D — ndim is honored).
+        noise: ``torch.randn_like(latents)`` drawn by the caller (kept explicit so
+            the caller owns the RNG stream / seeding).
+        The remaining kwargs mirror the identically-named ``args`` fields; the
+        defaults match ``configs/base.toml`` / the argparse defaults. ``device`` /
+        ``dtype`` default to the latents' device and float32 (the trainer casts the
+        noisy input to the weight dtype — pass ``dtype=weight_dtype`` to match).
+
+    Returns:
+        ``(noisy_model_input, timesteps, target)`` where
+
+        * ``noisy_model_input`` is ``(1-σ)·latents + σ·noise`` cast to ``dtype``,
+          same ndim as ``latents`` (NOT unsqueezed to the DiT's 5D — the caller
+          adds the ``dim=2`` singleton, see the 5D-latent invariant in CLAUDE.md);
+        * ``timesteps`` is the flat per-sample ``σ ∈ [0, 1]`` — this IS the DiT
+          time argument, and ``timesteps.view(-1, 1, 1, 1)`` recovers the broadcast
+          ``sigmas`` for loss weighting (``compute_loss_weighting_for_sd3``);
+        * ``target`` is the rectified-flow target ``noise - latents`` (native dtype,
+          uncast — matches ``train.py``'s ``target = noise - latents``).
+    """
+    if device is None:
+        device = latents.device
+    if noise_scheduler is None:
+        # Only consulted by the "sigma" (weighting-scheme) branch; built to match
+        # AnimaTrainer.get_noise_scheduler exactly so that path stays bit-faithful.
+        noise_scheduler = FlowMatchEulerDiscreteScheduler(
+            num_train_timesteps=1000, shift=discrete_flow_shift
+        )
+    args = SimpleNamespace(
+        timestep_sampling=timestep_sampling,
+        discrete_flow_shift=discrete_flow_shift,
+        sigmoid_scale=sigmoid_scale,
+        sigmoid_bias=sigmoid_bias,
+        weighting_scheme=weighting_scheme,
+        logit_mean=logit_mean,
+        logit_std=logit_std,
+        mode_scale=mode_scale,
+        ip_noise_gamma=ip_noise_gamma,
+        ip_noise_gamma_random_strength=ip_noise_gamma_random_strength,
+        t_min=t_min,
+        t_max=t_max,
+    )
+    noisy_model_input, timesteps, _sigmas = get_noisy_model_input_and_timesteps(
+        args, noise_scheduler, latents, noise, device, dtype
+    )
+    target = noise - latents
+    return noisy_model_input, timesteps, target
 
 
 def apply_model_prediction_type(args, model_pred, noisy_model_input, sigmas):

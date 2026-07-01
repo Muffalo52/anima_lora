@@ -39,6 +39,11 @@ from library.training.samplers import (
     SAMPLER_REGISTRY,
 )
 
+# The default rectified-flow training step as plain kwargs — the bench-friendly
+# entry point (issues.md DX2). Home is library.runtime.noise; re-exported here so
+# training-adjacent callers find it next to the sampler surface.
+from library.runtime.noise import fm_training_batch
+
 from library.training.losses import (
     LivenessLedger,
     LossContext,
@@ -142,6 +147,7 @@ __all__ = [
     "SamplerContext",
     "SamplerOut",
     "SAMPLER_REGISTRY",
+    "fm_training_batch",
     "LivenessLedger",
     "LossContext",
     "LossComposer",

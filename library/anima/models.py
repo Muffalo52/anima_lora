@@ -1480,6 +1480,16 @@ class Anima(nn.Module):
         nn.init.zeros_(self.pooled_text_sigma_film.bias)
 
     def enable_gradient_checkpointing(self, unsloth_offload: bool = False):
+        if not self.training:
+            # Block.forward gates checkpointing on `self.training` (see models.py
+            # ~1208), so enabling it on a module in eval mode — e.g. one built via
+            # the inference loader `load_dit_model` — is silently inert: you still
+            # OOM with no signal. Warn once. (issues.md DX1)
+            logger.warning(
+                "enable_gradient_checkpointing() called but module is in eval mode "
+                "— checkpointing is inert until you call .train() (Block.forward "
+                "gates on self.training)."
+            )
         for block in self.blocks:
             block.enable_gradient_checkpointing(unsloth_offload=unsloth_offload)
 
