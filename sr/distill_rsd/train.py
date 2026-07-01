@@ -84,8 +84,8 @@ def main():
                          "4096-capped cache for faster decode at the right 1024->4096 scale)")
     ap.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
     ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "rsd"))
-    ap.add_argument("--log_every", type=int, default=20)
-    ap.add_argument("--save_every", type=int, default=500)
+    ap.add_argument("--log_every", type=int, default=40)
+    ap.add_argument("--save_every", type=int, default=1000)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
     args = ap.parse_args()
 
