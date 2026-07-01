@@ -128,8 +128,11 @@ something to relocate.
 
 ### RQ2 — does the relaxation improve results? (Phase 1, minimal train + eval)
 
-Only if RQ1 passes. Add K registers (start K=4, the DINOv2 saturation point; ablate
-{0,1,4,8}) to the self-attn stream. Train the register embeddings + a small
+Only if RQ1 passes. Add K registers to the self-attn stream — and note the DiT
+sweet spot is **not** the DINOv2 K=4: the DSR ablation (see § Related research) puts
+it near **36 registers inserted at block ~8** (early-to-middle depth), non-monotonic,
+with K=4 only a floor and K=100 a regression. So treat both **K and insertion depth**
+as the ablation axes (K∈{4,16,36,64}, start-block∈{0,8,16}), not K alone. Train the register embeddings + a small
 attention-projection LoRA (QKV) on the normal FM objective so the frozen base can
 learn to attend to them. Evaluate two things, both against a matched no-register run:
 
@@ -219,8 +222,62 @@ an honest, useful negative: RQ1-fail redirects to a data-prior fix, RQ2-fail say
 sink wasn't the border's cause, RQ3-fail says headroom belongs in the base, not an
 adapter.
 
+## Related research
+
+**Taming Outlier Tokens in Diffusion Transformers** (Wu, Wang, Fu, L.-C. Chen, Gan,
+Wei; Rice + Apple; arXiv:2605.05206, May 2026) is direct prior art for the general
+mechanism and should be read before starting. It introduces **Dual-Stage Registers
+(DSR)** — register tokens in *both* a ViT-based encoder and the diffusion transformer.
+The DiT half ("diffusion registers": a few trainable, non-decoded tokens learned
+jointly with the generator, stripped at inference) is the RQ1→RQ2 intervention,
+already validated across SiT, JiT, RAE, VAE-latent and pixel-space DiTs. It **de-risks
+our premise** rather than threatening it — several load-bearing assumptions here are
+now measured facts, not hopes:
+
+- **RQ1 premise confirmed.** Outlier/attention-sink tokens *do* arise inside DiT
+  generators, not just ViT encoders — the phenomenon we set out to prove exists.
+- **RQ2 direction confirmed, with hyperparameters.** Trained diffusion registers
+  consistently improve generation (e.g. RAE-SigLIP2 FID 5.89→5.33, VAE-SiT
+  16.05→14.47, GenEval 0.426→0.466; ~4× faster convergence). Sweet spot **~36
+  registers at block ~8**, non-monotonic in both count and depth — folded into RQ2
+  above.
+- **"Strip the sink" is a dead end.** Masking high-norm tokens does *not* help
+  (their Tab. 1): the outlier is a *symptom of corrupted local patch semantics*, not
+  the cause. This upgrades our "removing a load-bearing sink can hurt" risk from a
+  hedge to a measured result — registers must *absorb/restore*, never remove.
+
+**What DSR does not do — and where this proposal still adds signal:**
+
+- **No bridge to a real, named failure mode.** DSR observes outliers as an *awkward
+  pattern in latent/attention norm maps* and optimizes distributional scores (FID,
+  GenEval). It never connects the sink to a *specific, visible, nameable* generation
+  defect. Our whole angle — **is the sink the unprompted white/black border?** — and
+  the border-rate metric is untouched by them. That the pattern is real in latent
+  space is exactly the grounding that makes the border-correlation worth testing:
+  they proved the mechanism exists; we ask what it *costs the user*.
+- **No frozen-base cheap-adoption regime (RQ3).** Every DiT register in DSR is trained
+  *jointly with the generator from scratch* (ImageNet 80–800 epochs; 10k steps @
+  batch 2048 for T2I). Retrofitting a **frozen pretrained DiT** (Anima's setting) with
+  registers on a **few-hundred-step adapter budget** is unaddressed — RQ3 is the
+  genuinely open, Anima-relevant question, and DSR's from-scratch "4× faster" says
+  nothing about it.
+
+**One finding that pushes back on our temporal story (fold into the RQ1 probe).** DSR
+reports DiT outliers concentrate in **intermediate layers** and *strengthen as noise
+decreases* — strongest at low noise (t≈0.1, late denoising), weakest at high noise.
+That is the **opposite σ direction** to our "sink commits at high σ / early, in the
+σ≈0.8 layout-commit band" hypothesis. Either the norm-outlier and the layout-commit
+are distinct phenomena, or the early-commit border story is wrong. So the RQ1 probe
+must sweep **layer-depth × σ**, not just high σ, and be honestly prepared to find a
+late-σ / intermediate-layer signature — in which case the border-commit-early
+mechanism needs revising even if registers still help.
+
 ## References
 
+- Wu, Wang, Fu, Chen, Gan, Wei, *Taming Outlier Tokens in Diffusion Transformers*
+  (arXiv:2605.05206, 2026) — Dual-Stage Registers; the DiT-generator prior art above
+  (register count/depth sweet spot, masking-fails result, intermediate-layer / low-
+  noise outlier localization).
 - `docs/proposal/tag_headroom_commitment_sigma.md` — the σ≈0.8 bulk-commitment finding
   and confound-grid discipline this builds on.
 - `bench/cross_attn_drive/` — `how_to_observe.md`, `attn_contribution.py`,
