@@ -13,12 +13,12 @@
 
 ## Test candidates: repa tau scheduling, and flow shift to 2
 
-output_name = "anima_turbo_R_KL"
+output_name = "anima_turbo_S"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 6000
+iterations = 7200
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -46,9 +46,9 @@ base_loss = "dpdmd"
 
 [network]
 student_rank = 96
-student_alpha = 224
+student_alpha = 212
 fake_rank = 96
-fake_alpha = 224
+fake_alpha = 212
 attn_mode = "flash"
 # Per-step expert: split the student into K = student_steps up-heads off a
 # shared down-proj, head k serving denoise step k. Removes the diversity↔quality
@@ -93,7 +93,7 @@ grad_step = "random"
 [optim]
 student_lr = 1e-5
 fake_lr = 2e-5
-fake_steps_per_student_step = 5
+fake_steps_per_student_step = 4
 fake_warmup_steps = 50
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
@@ -112,7 +112,7 @@ detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 [sampling]
 t_distribution = "uniform"      # "uniform" or "sigmoid"
 sigmoid_scale = 1.0
-flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
+flow_shift = 2.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
 
 # Mean-variance regularization (lever B / paper Eq. 7; proposal §3.B, run S2).
 #
@@ -183,14 +183,14 @@ weight = 0.0                    # λ on the Gram align loss. 0 = off; first live
 layer = 8                       # DiT block tap (matches LoRA-family REPA)
 encoder = "pe_spatial"          # sidecar {stem}_anima_{encoder}.safetensors next to the TE cache
 every_n = 2                     # run the term every N student steps (amortization; ~0.08 partial fwd/step)
-# timestep_weighting = 0.0      # σ-emphasis g (signed). 0 = uniform τ. g>0 → high-σ (REPA is cheap
-#                               # cond-utilization on near-noise — wasted); g<0 → low/mid-σ (where DP-DMD
-#                               # contests alignment). σ-structure diagnosis points at g<0 (try -1 .. -2).
-# spatial_norm = true           # iREPA target standardization (the validated LoRA operating point)
-# target_dog = true             # turn the DoG band-pass on
-# dog_sigma1_div = 16.0         # low-pass σ1 = min(gh,gw)/16 (Phase-0 sweet spot min/16–32)
-# dog_sigma2_div = 0.0          # σ2 = min(gh,gw)/div; 0 = off (single low-pass)
-# dog_norm_std = 0.0            # post band-pass std; 0 = empirical per-batch std
+timestep_weighting = -1        # σ-emphasis g (signed). 0 = uniform τ. g>0 → high-σ (REPA is cheap
+                               # cond-utilization on near-noise — wasted); g<0 → low/mid-σ (where DP-DMD
+                               # contests alignment). σ-structure diagnosis points at g<0 (try -1 .. -2).
+spatial_norm = false           # iREPA target standardization (the validated LoRA operating point)
+target_dog = true             # turn the DoG band-pass on
+dog_sigma1_div = 16.0         # low-pass σ1 = min(gh,gw)/16 (Phase-0 sweet spot min/16–32)
+dog_sigma2_div = 0.0          # σ2 = min(gh,gw)/div; 0 = off (single low-pass)
+dog_norm_std = 0.0            # post band-pass std; 0 = empirical per-batch std
 
 # Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1).
 #
@@ -214,12 +214,12 @@ weight = 0.0                    # λ on the soft-rank loss. 0 = off; first live 
 k = 2                           # shuffled-caption negatives per firing (chance 1/3 at k=2)
 every_n = 4                     # fire every N student steps (amortization; ≈ +k/N no_grad fwd/step)
 softness = 0.1                  # soft-rank temperature τ (smaller = closer to the hard integer rank)
-pool_size = 128                 # cross-step caption pool capacity (≈ pool_size MiB VRAM); must be >= k
+pool_size = 2                 # cross-step caption pool capacity (≈ pool_size MiB VRAM); must be >= k
 warmup_ratio = 1.0              # fill this fraction of the pool before firing (1.0 = full; ≈ pool_size steps @ B=1)
 
 # Logging / checkpoints.
 [io]
-save_every = 750
+save_every = 1200
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 750
+validate_every_n_steps = 1200
