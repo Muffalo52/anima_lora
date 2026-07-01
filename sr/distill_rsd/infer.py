@@ -43,8 +43,8 @@ def load_lr(path, device, scale):
 
 
 @torch.no_grad()
-def _sample_tile(cfg, diff, vqgan, student, hr_t, offset, device, amp=True):
-    """One tile: reflect-pad to `offset` (Swin needs dims % lq_size), encode -> 1-step
+def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True):
+    """One tile: reflect-pad to `align` (Swin needs dims % lq_size), encode -> 1-step
     student -> decode -> crop back. In/out 1x3xHxW in [-1,1].
 
     Heavy matmuls run under bf16 autocast by default (matches training's --amp, ~2x
@@ -56,7 +56,7 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, offset, device, amp=True):
     bf16 keeps them bf16 too — GroupNorm still reduces in fp32 internally, so it's safe.
     The student stays under autocast (matches training)."""
     h, w = hr_t.shape[2:]
-    ph, pw = (-h) % offset, (-w) % offset
+    ph, pw = (-h) % align, (-w) % align
     if ph or pw:
         hr_t = F.pad(hr_t, (0, pw, 0, ph), mode="reflect")
     ctx = torch.autocast("cuda", dtype=torch.bfloat16) if amp else nullcontext()
@@ -71,21 +71,33 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, offset, device, amp=True):
 
 
 @torch.no_grad()
-def student_sr(cfg, diff, vqgan, student, lq_img, device, offset=64, chop=512, amp=True):
+def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=None,
+               chop=512, tile_batch=1, amp=True):
     """1-step student SR on an HR-sized (upsampled-LR) tensor 1x3xHxW in [-1,1].
 
     The student is spatially same-resolution (the x4 lives in the residual-shift, not a
     spatial upscale), so we tile with sf=1. Large images are chopped into overlapping
     `chop`-px tiles and overlap-averaged (ImageSpliterTh) — both for VRAM and because the
-    Swin attention is built for the lq_size grid."""
+    Swin attention is built for the lq_size grid.
+
+    `align` is the Swin pad-alignment (each tile is reflect-padded to a multiple of it);
+    `overlap` is the seam overlap that sets the tile stride (`chop - overlap`) and is
+    decoupled from `align` so small tiles are possible (default = align).
+
+    `tile_batch` stacks that many tiles into one forward (ImageSpliterTh.extra_bs) — small
+    tiles underfill the GPU one-at-a-time, so batching amortizes launch/overhead for a big
+    speedup; VRAM scales ~linearly with it, so it's a card-specific cap. Every tile is
+    exactly chop×chop (chop is an align multiple), so the batch stacks with no ragged pad."""
+    if overlap is None:
+        overlap = align
     H, W = lq_img.shape[2:]
     if H > chop or W > chop:
-        spliter = ImageSpliterTh(lq_img, chop, stride=chop - offset, sf=1)
+        spliter = ImageSpliterTh(lq_img, chop, stride=chop - overlap, sf=1, extra_bs=tile_batch)
         for pch, info in spliter:
-            spliter.update(_sample_tile(cfg, diff, vqgan, student, pch, offset, device, amp), info)
+            spliter.update(_sample_tile(cfg, diff, vqgan, student, pch, align, device, amp), info)
         img = spliter.gather()
     else:
-        img = _sample_tile(cfg, diff, vqgan, student, lq_img, offset, device, amp)
+        img = _sample_tile(cfg, diff, vqgan, student, lq_img, align, device, amp)
     return ((img[0].permute(1, 2, 0).cpu().numpy() + 1) * 127.5).round().clip(0, 255).astype(np.uint8)
 
 
@@ -98,7 +110,19 @@ def main():
     ap.add_argument("--eval", action="store_true", help="score vs teacher+bicubic on Phase-0 set")
     ap.add_argument("--in_dir", default=str(REPO / "sr" / "data" / "lr_eval"))
     ap.add_argument("--out_dir", default=str(REPO / "output" / "sr" / "rsd" / "infer"))
-    ap.add_argument("--chop", type=int, default=1024, help="tile size (px) for large images; must be a multiple of the align stride. 2048 single-tiles the 512->2048 eval (no overlap-redundancy ~2.2x compute saving); lower it (e.g. 1024) if VRAM-bound")
+    ap.add_argument("--chop", type=int, default=256, help="tile size (px) for large images; must be a multiple of the align stride. 2048 single-tiles the 512->2048 eval (no overlap-redundancy ~2.2x compute saving); lower it (e.g. 1024) if VRAM-bound")
+    ap.add_argument("--overlap", type=int, default=64,
+                    help="tile seam overlap in px (default = the Swin align stride, currently 256). "
+                         "Sets the tile stride = chop - overlap, which must be > 0 — so lowering it "
+                         "is what lets you use a --chop at or near the align stride (e.g. --chop 256 "
+                         "--overlap 128). Independent of Swin alignment; only --chop must be a "
+                         "multiple of the align stride. Smaller overlap = fewer redundant tiles but "
+                         "less seam blending.")
+    ap.add_argument("--tile_batch", type=int, default=8,
+                    help="stack this many chop-tiles into one forward (default 1 = serial). Small "
+                         "tiles underfill the GPU one-at-a-time; batching amortizes launch overhead "
+                         "for a big speedup. VRAM scales ~linearly, so tune to the card (e.g. "
+                         "--chop 256 --tile_batch 8).")
     ap.add_argument("--no_bf16", action="store_true", help="disable bf16 autocast (inference matches training's --amp by default; ~2x slower + 2x VRAM if set)")
     ap.add_argument("--weights", choices=["ema", "student"], default="ema",
                     help="ema = smoothed (best late); student = raw (better for EARLY ckpts, "
@@ -147,6 +171,14 @@ def main():
     align = int(scale) * int(cfg.model.params.window_size) * (2 ** (n_levels - 1))
     if args.chop % align:
         raise SystemExit(f"--chop {args.chop} must be a multiple of {align} (sf×window×2^{n_levels-1})")
+    overlap = args.overlap if args.overlap is not None else align
+    if not 0 <= overlap < args.chop:
+        raise SystemExit(f"--overlap {overlap} must be in [0, chop={args.chop}) so the tile "
+                         f"stride (chop - overlap) is > 0 (chop == overlap => zero stride)")
+    if args.tile_batch < 1:
+        raise SystemExit(f"--tile_batch {args.tile_batch} must be >= 1")
+    print(f"tiling: chop={args.chop} overlap={overlap} stride={args.chop - overlap} "
+          f"align={align} tile_batch={args.tile_batch}")
 
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     in_dir = Path(args.in_dir)
@@ -161,8 +193,8 @@ def main():
     pbar = tqdm(lr_paths, desc="student SR", unit="img")
     for lr_path in pbar:
         lq_t, _ = load_lr(lr_path, dev, scale)
-        sr = student_sr(cfg, diff, vqgan, student, lq_t, dev, offset=align,
-                        chop=args.chop, amp=not args.no_bf16)
+        sr = student_sr(cfg, diff, vqgan, student, lq_t, dev, align=align, overlap=overlap,
+                        chop=args.chop, tile_batch=args.tile_batch, amp=not args.no_bf16)
         Image.fromarray(sr).save(out_dir / lr_path.name)
         row = {"stem": lr_path.stem}
         if musiq is not None:
