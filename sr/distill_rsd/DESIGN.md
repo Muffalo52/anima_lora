@@ -35,6 +35,31 @@ signal becomes **"1-step student beats the v2 teacher perceptually"** (the paper
 central claim: RSD LPIPS 0.273 < teacher 0.360; MUSIQ 65.9 > 59.9 on RealSR) rather
 than hitting the exact published digits.
 
+## Official release reconciliation (2026-07-01)
+
+The RSD authors released code (ICML 2026). It ships the **orchestration only** —
+`trainer.py` / `sampler.py` / `main_distill.py` / config / data pipeline — and **omits the
+entire `models/` package** (the DMD-core `training_student_losses` / `training_fake_losses`,
+`UNetModelSwinGanWrapper`, and the noise-consuming UNet `forward`). SinSR (the base repo)
+supplies only `UNetModelSwin` + `create_gaussian_diffusion`, not those RSD additions — so the
+generator-gradient form and exact node timesteps remain unverifiable from public code. What
+*is* observable (config + `trainer.py`) confirmed most of this reconstruction; two mechanisms
+diverged and are now selectable (both default to backward-compatible behavior except SiD):
+
+- **SiD normalization** (`train.py --sid_denom`): official (`trainer.py:1836`) divides the
+  per-sample DMD loss by `|teacher_x0 − student_x0| + 1e-8`. Our original divided by
+  `|z_t − teacher_x0|` floored 0.05. Default is now `student` (official); `input` keeps the old form.
+- **Noise injection** (`--noise_mode`): official (`sampler.py:79`) widens the first input conv
+  by `noise_channels=1` and **concats** eps; ours adds a separate 3-ch `noise_proj` after block0.
+  Default stays `add` (existing checkpoints load); `concat` matches the release but changes the
+  first-conv shape (old ckpts won't load into it). Both are zero-init ⇒ identical to teacher at step 0.
+
+Confirmed matching (config): K=5, lr 5e-5, AdamW(0.9,0.95), wd 0, EMA 0.999, 3000 iters,
+λ_gan 3e-3, λ_lpips 2.0, κ=2.0, exp-0.3/15-step/xstart, image-space LPIPS, w_t weighting off
+(`normalize_generator_loss_by_t_power_ten: False`). Deliberate deltas retained: **v2 teacher**
+(vs paper's v1) and **art + light degradation** (vs ImageNet + Real-ESRGAN). Our `dc_loss`
+color term is an addition (official `mse_loss` is off).
+
 ## Forward process (ResShift, from `gaussian_diffusion.py`, verified)
 
 - `q_sample(x0, y0, t)`: `x_t = η_t·(y0 − x0) + x0 + κ·√η_t·ε`  (Eq 4; `e0=y0−x0`).

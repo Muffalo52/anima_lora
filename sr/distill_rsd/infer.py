@@ -19,7 +19,7 @@ from tqdm import tqdm
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
-from rsd_models import TEACHER_CKPT, predict_x0  # noqa: E402
+from rsd_models import TEACHER_CKPT, make_eps, predict_x0  # noqa: E402
 from utils.util_image import ImageSpliterTh  # noqa: E402  (resshift path added by rsd_models)
 
 REPO = M.REPO
@@ -65,7 +65,7 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, offset, device, amp=True):
     z_T = z_y + diff.kappa * torch.randn_like(z_y)
     tT = torch.full((z_y.shape[0],), diff.num_timesteps - 1, device=device, dtype=torch.long)
     with ctx:
-        z0 = predict_x0(diff, student, z_T, z_y, tT, torch.randn_like(z_y))
+        z0 = predict_x0(diff, student, z_T, z_y, tT, make_eps(student, z_y))
     img = vqgan.decode(z0.to(vdt), force_not_quantize=True).clamp(-1, 1)
     return img[:, :, :h, :w].float()
 
@@ -119,11 +119,15 @@ def main():
         # native bf16 VAE — halves the full-res GroupNorm activations that autocast would
         # otherwise keep in fp32 (the VRAM peak). Codebook is unused (force_not_quantize).
         vqgan = vqgan.to(torch.bfloat16)
-    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, pretrained=False)
     sd = torch.load(ckpt, map_location="cpu")
+    # rebuild the noise-injection arch the ckpt was trained with (ckpt_meta from train.py;
+    # old ckpts predate it -> default to the "add" reconstruction).
+    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, pretrained=False,
+                                noise_mode=sd.get("noise_mode", "add"),
+                                noise_channels=sd.get("noise_channels"))
     key = args.weights if args.weights in sd else ("ema" if "ema" in sd else None)
     student.load_state_dict(sd[key] if key else sd, strict=True)
-    print(f"weights: {key or 'raw'}")
+    print(f"weights: {key or 'raw'} | noise_mode: {student.noise_mode}({student.noise_channels}ch)")
     student.eval()
     if args.compile:
         # Bump the recompile ceiling: dynamic=True still specializes on a few discrete

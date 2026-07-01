@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
 from data import ArtSRDataset  # noqa: E402
-from rsd_models import TEACHER_CKPT, predict_x0  # noqa: E402
+from rsd_models import TEACHER_CKPT, make_eps, predict_x0  # noqa: E402
 
 
 @torch.no_grad()
@@ -61,6 +61,18 @@ def main():
     ap.add_argument("--ema", type=float, default=0.999)
     ap.add_argument("--nodes", type=int, nargs="+", default=[4, 8, 12, 14],
                     help="N multistep timestep nodes (0-indexed in [0,T-1])")
+    ap.add_argument("--sid_denom", choices=["student", "input"], default="student",
+                    help="SiD per-sample normalization denominator for the DMD gradient. "
+                         "'student' = |teacher_x0 - student_x0| + 1e-8 (matches official RSD "
+                         "release, trainer.py:1836); 'input' = |z_t - teacher_x0| floored 0.05 "
+                         "(this reconstruction's original form).")
+    ap.add_argument("--noise_mode", choices=["add", "concat"], default="add",
+                    help="student/fake noise injection. 'add' = zero-init 3ch conv added after "
+                         "block0 (default, back-compatible with existing checkpoints); 'concat' = "
+                         "widen the first conv by noise_channels and concat eps (matches official "
+                         "RSD release — changes the first-conv shape, so old ckpts won't load).")
+    ap.add_argument("--noise_channels", type=int, default=None,
+                    help="injected-noise channel count (default 3 for add, 1 for concat/official)")
     ap.add_argument("--amp", action="store_true", help="bf16 autocast")
     ap.add_argument("--no_grad_ckpt", action="store_true",
                     help="disable Swin gradient checkpointing on student/fake (on by "
@@ -82,9 +94,10 @@ def main():
     sf_scale = cfg.diffusion.params.scale_factor
 
     print("building nets...")
+    gen_kw = dict(noise_mode=args.noise_mode, noise_channels=args.noise_channels)
     teacher = M.build_teacher(cfg, str(TEACHER_CKPT), dev)
-    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt)
-    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt)
+    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt, **gen_kw)
+    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt, **gen_kw)
     disc = M.DiscHead().to(dev)
     vqgan = M.build_autoencoder(cfg, dev)
     diff = M.build_diffusion(cfg)
@@ -92,6 +105,9 @@ def main():
     ema = copy.deepcopy(student).eval()
     for p in ema.parameters():
         p.requires_grad_(False)
+    # provenance for inference (rebuilds the matching noise-injection arch) + A/B tracking
+    ckpt_meta = {"noise_mode": student.noise_mode, "noise_channels": student.noise_channels,
+                 "sid_denom": args.sid_denom}
 
     import lpips
     lp = lpips.LPIPS(net="vgg").to(dev).eval()
@@ -139,7 +155,7 @@ def main():
             opt_f.zero_grad(set_to_none=True)
             gt, lq = next_batch(); B = gt.shape[0]
             z0, z_y = encode(gt, lq)
-            t_n = rand_t(B, nodes); eps = torch.randn_like(z0)
+            t_n = rand_t(B, nodes); eps = make_eps(student, z0)
             with torch.no_grad(), autocast():
                 z_tn = diff.q_sample(z0, z_y, t_n)
                 z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)
@@ -160,7 +176,7 @@ def main():
         for _ in range(args.grad_accum):
             gt, lq = next_batch(); B = gt.shape[0]
             z0, z_y = encode(gt, lq)
-            t_n = rand_t(B, nodes); eps = torch.randn_like(z0)
+            t_n = rand_t(B, nodes); eps = make_eps(student, z0)
             z_tn = diff.q_sample(z0, z_y, t_n)
             with autocast():
                 z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)
@@ -170,22 +186,26 @@ def main():
                 x0_teacher = predict_x0(diff, teacher, z_t, z_y, t)
                 x0_fakep = predict_x0(diff, fake, z_t, z_y, t, eps)
                 # DMD/SiD per-sample normalization (App C, "loss normalization … SiD"):
-                # divide by a TEACHER-derived magnitude — the residual the teacher still
-                # removes, ‖z_t − f*_x0‖ (DESIGN) — NOT by the (fake−teacher) diff's own
-                # norm. Self-normalizing flattens the distribution-matching signal (every
-                # sample gets a unit push regardless of how wrong it is) and, lacking a
-                # real floor, amplifies critic noise to unit scale once fake≈teacher.
-                # Floor 0.05 mirrors turbo_dmd's norm_floor (scripts/distill_turbo).
+                # divide the (fake−teacher) push by a TEACHER-derived magnitude — NOT by the
+                # (fake−teacher) diff's own norm (self-normalizing flattens the
+                # distribution-matching signal so every sample gets a unit push regardless of
+                # how wrong it is, and amplifies critic noise once fake≈teacher).
                 grad = (x0_fakep - x0_teacher).float()
-                denom = (z_t.float() - x0_teacher.float()).abs().mean(
-                    dim=[1, 2, 3], keepdim=True).clamp_min(0.05)
+                if args.sid_denom == "student":
+                    # official RSD release (trainer.py:1836): |teacher_x0 − student_x0| + 1e-8
+                    denom = (x0_teacher.float() - z0_hat.detach().float()).abs().mean(
+                        dim=[1, 2, 3], keepdim=True) + 1e-8
+                else:
+                    # original reconstruction: ‖z_t − f*_x0‖ floored 0.05 (turbo_dmd norm_floor)
+                    denom = (z_t.float() - x0_teacher.float()).abs().mean(
+                        dim=[1, 2, 3], keepdim=True).clamp_min(0.05)
                 grad = grad / denom
             L_theta = 0.5 * F.mse_loss(z0_hat.float(), (z0_hat.float() - grad).detach())
             # single-step LPIPS path from z_T ~ N(z_y, kappa^2)
             z_TT = z_y + diff.kappa * torch.randn_like(z_y)
             tT = torch.full((B,), T - 1, device=dev, dtype=torch.long)
             with autocast():
-                z0_single = predict_x0(diff, student, z_TT, z_y, tT, torch.randn_like(z_y))
+                z0_single = predict_x0(diff, student, z_TT, z_y, tT, make_eps(student, z_y))
                 x0_img = vqgan.decode(z0_single.float(), force_not_quantize=True).clamp(-1, 1)
                 L_lpips = lp(x0_img, gt).mean()
                 L_dc = dc_loss(x0_img.float(), gt.float())
@@ -208,14 +228,14 @@ def main():
             with open(log_path, "a") as f:
                 f.write(json.dumps(line) + "\n")
         if step > 0 and step % args.save_every == 0:
-            torch.save({"ema": ema.state_dict(), "student": student.state_dict(), "step": step},
-                       save_dir / f"rsd_student_{step}.pth")
+            torch.save({"ema": ema.state_dict(), "student": student.state_dict(), "step": step,
+                        **ckpt_meta}, save_dir / f"rsd_student_{step}.pth")
         if args.max_steps and step + 1 >= args.max_steps:
             print(f"max_steps {args.max_steps} hit — stopping (smoke).")
             break
 
-    torch.save({"ema": ema.state_dict(), "student": student.state_dict(), "step": args.iters},
-               save_dir / "rsd_student_final.pth")
+    torch.save({"ema": ema.state_dict(), "student": student.state_dict(), "step": args.iters,
+                **ckpt_meta}, save_dir / "rsd_student_final.pth")
     print(f"done. saved to {save_dir}")
 
 
