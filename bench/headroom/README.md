@@ -154,3 +154,71 @@ fuller experiment (block-8 insertion + K≈36 + QKV unfreeze) or if an Anima
 per-image quality reward appears (`sink_intervention.py` remains the reopener).
 See memory `project_headroom_registers_rq1_falsified` and
 `project_headroom_registers_rq3_negative`.
+
+## Follow-up (2026-07-02): RQ2 proxies on the trained arms — the "different images" are LoRA drift
+
+The trained arms re-plan matched-seed images heavily even untuned, which looked
+like register promise. `register_rq2_proxies.py` ran the two RQ2 proxy tests on
+the frozen RQ3 checkpoints (base / armA / armB, matched seed, repro+control
+prompts × 3 seeds, 1024/28/cfg4), with arm A (fixed-zero registers + same
+QKV-LoRA) as the **LoRA-drift control**, plus direct base-vs-arm image L1:
+
+| cond | patch_sink_ratio | clamp pix L1 (med) | re-plan vs base (L1) |
+|---|---|---|---|
+| base | 14.5 | 0.158 | — |
+| armA | 14.2 | **0.057** | 0.13–0.24 |
+| armB | 12.9 | 0.074 | 0.13–0.20 |
+
+(sink_ratio ~14.5 here vs 23.85 in `register_eval` is prompt-dependence —
+repro/control vs plain/scene/portrait — the outlier structure is the same.)
+
+- **The re-plan is NOT register content.** Arm A — effectively LoRA-only —
+  re-plans matched-seed images as much as (slightly more than) arm B. The
+  visual difference between trained arms and base is generic QKV-LoRA drift.
+- **Proxy (b) negative.** Clamp sensitivity (`sink_intervention` clamp on the
+  trained model) drops in BOTH arms — and *more* in arm A. The drop is what
+  400 steps of FM training on a QKV-LoRA does, not off-canvas load relocation.
+  `clamp_frac` is ~equal across conditions, so it's not "fewer tokens clamped".
+- **Proxy (a) noise-dominated.** Per-patch Laplacian detail at (ex-)sink
+  locations spans 4 orders of magnitude across rows; at re-plan L1 ~0.15 the
+  composition churn swamps any local recovery. No arm-B-specific recovery.
+- The only surviving register-specific signal remains the small, consistent
+  sink-ratio drop (armB −1.3 to −2 vs base; armA −0.3) — which translates into
+  nothing measurable downstream.
+
+⇒ **Strengthens the RQ3 negative:** at the LoRA budget nothing register-specific
+reaches pixels. Reopen conditions unchanged (K≈36 @ block 8 + unfrozen QKV, or a
+per-image quality reward). Run: `results/20260702-0659-rq2_proxies/`.
+
+### Arm L addendum (same day): arm A is a LESION, not a control — eyeball tally
+
+Eyeballing the run above found something the pixel metrics missed: **arm A
+systematically collapses framing** (3/3 broken headless extreme-crops on repro,
+1/3 face-crop on the "full body visible" control), while arm B stays coherent.
+Since arm A ≠ neutral LoRA-only (its 16 zero-content registers all project to
+the identical bias-derived key = a uniform attention-mass drain the LoRA trains
+around), we trained the missing **arm L** = true LoRA-only, K=0 (`--arm A
+--num_registers 0`; seed-identical LoRA init/data order to arm A) and evaluated
+it alone (`--only armL`; matched seeds make cross-run image comparison valid).
+Runs: `results/20260702-0715-rq3_armL/` + `results/20260702-0725-rq2_armL_only/`.
+
+Coherent-framing tally on repro (which carries the muddy `cropped` tag):
+**base 2/3 · armA 0/3 · armB 3/3 · armL 3/3.** Arm L re-plans vs base just as
+much as the other arms (L1 0.14–0.23) and matches armB's clamp sensitivity
+(0.076 vs 0.074; armA's lower 0.057 reflects its degenerate flat close-ups, not
+extra relocation). Arm L's sink ratio 14.2 ≈ base 14.5 ≫ armB 12.9.
+
+Adjudication:
+- **"arm B ≫ arm A" = the zero-register LESION hurts, not "registers help".**
+  Arm B ≈ arm L ≈ base in coherence; registers-with-content are merely harmless
+  at this budget, with no benefit over plain QKV-LoRA.
+- The lesion is itself a mechanistic finding: injecting a content-free
+  uniform-key mass drain specifically breaks **crop/framing (global layout)** —
+  causal support for the sink-owns-layout-bookkeeping reading, and for DSR's
+  registers-must-carry-content (Theory 2 over Theory 1). Never ship fixed-zero
+  registers.
+- Arm B's small sink-ratio drop (12.9 vs armL 14.2) is now the ONLY cleanly
+  register-specific effect — LoRA-controlled — and still downstream-inert.
+- Meta-lesson: matched-seed "quality" eyeballs need a framing/coherence check,
+  not just pixel L1 / Laplacian medians — a coherent-looking wrong crop is
+  invisible to both.

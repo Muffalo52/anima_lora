@@ -138,17 +138,20 @@ class RegisterAdapter(nn.Module):
             # x_padded: (B, 1, seq, 1, D)
             B = x_padded.shape[0]
             seq = x_padded.shape[2]
-            reg = adapter.register.to(dtype=x_padded.dtype, device=x_padded.device)
-            reg = reg.view(1, 1, adapter.K, 1, adapter.D).expand(B, -1, -1, -1, -1)
-            x_ext = torch.cat([x_padded, reg], dim=2)  # (B, 1, seq+K, 1, D)
+            if adapter.K > 0:
+                reg = adapter.register.to(dtype=x_padded.dtype, device=x_padded.device)
+                reg = reg.view(1, 1, adapter.K, 1, adapter.D).expand(B, -1, -1, -1, -1)
+                x_ext = torch.cat([x_padded, reg], dim=2)  # (B, 1, seq+K, 1, D)
 
-            rope = block_kwargs.get("rope_cos_sin")
-            if rope is not None:
-                cos, sin = rope  # each (seq, 1, 1, D_head)
-                pad_shape = (adapter.K,) + tuple(cos.shape[1:])
-                cos_ext = torch.cat([cos, cos.new_ones(pad_shape)], dim=0)
-                sin_ext = torch.cat([sin, sin.new_zeros(pad_shape)], dim=0)
-                block_kwargs = {**block_kwargs, "rope_cos_sin": (cos_ext, sin_ext)}
+                rope = block_kwargs.get("rope_cos_sin")
+                if rope is not None:
+                    cos, sin = rope  # each (seq, 1, 1, D_head)
+                    pad_shape = (adapter.K,) + tuple(cos.shape[1:])
+                    cos_ext = torch.cat([cos, cos.new_ones(pad_shape)], dim=0)
+                    sin_ext = torch.cat([sin, sin.new_zeros(pad_shape)], dim=0)
+                    block_kwargs = {**block_kwargs, "rope_cos_sin": (cos_ext, sin_ext)}
+            else:  # K=0 — LoRA-only arm, the register-free drift control
+                x_ext = x_padded
 
             out = adapter._orig_run_blocks(
                 x_ext,
@@ -165,15 +168,20 @@ class RegisterAdapter(nn.Module):
             # show it move — track the top-k/median outlier ratio too.
             with torch.no_grad():
                 pt = out[:, :, :seq, :, :].float().norm(dim=-1).flatten()  # (seq,)
-                rt = out[:, :, seq:, :, :].float().norm(dim=-1).flatten()  # (K,)
                 med = pt.median().clamp_min(1e-6)
                 k = max(1, int(0.002 * pt.numel()))  # ~top 0.2% = the sink set
                 topk_patch = pt.topk(k).values.mean()
                 adapter.last_patch_norm = pt.mean().item()
-                adapter.last_reg_norm = rt.mean().item()
                 adapter.last_patch_sink_ratio = (topk_patch / med).item()
-                adapter.last_reg_max = rt.max().item()
-                adapter.last_reg_ratio = (rt.max() / med).item()
+                if adapter.K > 0:
+                    rt = out[:, :, seq:, :, :].float().norm(dim=-1).flatten()  # (K,)
+                    adapter.last_reg_norm = rt.mean().item()
+                    adapter.last_reg_max = rt.max().item()
+                    adapter.last_reg_ratio = (rt.max() / med).item()
+                else:
+                    adapter.last_reg_norm = 0.0
+                    adapter.last_reg_max = 0.0
+                    adapter.last_reg_ratio = 0.0
             return out[:, :, :seq, :, :]  # strip registers before unpatchify
 
         anima._run_blocks = wrapped_run_blocks

@@ -1,357 +1,212 @@
-# Headroom (register) tokens — give the DiT non-emitting scratch so it stops paying in canvas
+# Headroom (register) tokens — Phase 2: real-budget adoption sweep on the frozen base
 
-**One-liner:** Append a few learnable, non-decoded **register tokens** to the DiT's
-self-attention stream so the model has an off-canvas place to park the global
-state / attention-sink it currently manufactures *in pixels* — the leading
-hypothesis for unprompted white/black borders. Diagnose first (does the base even
-seek headroom?), then ask whether the relaxation helps, then whether a few-hundred-
-step budget can get the base to *adopt* it.
+**One-liner:** The cheap-adapter register retrofit failed (RQ3 negative at K=16 /
+400 steps / rank-8 QKV-LoRA), but the failure was measured at a **single untested
+ablation point** and training turns out to cost ~2 it/s on the eager bench harness
+— so the DSR sweet-spot configuration (K≈36, mid-block insertion, unfrozen QKV,
+~4000 steps) is a **~35–60 min-per-arm sweep, not a "different, more expensive
+experiment."** This doc specifies that sweep: adoption-gated, drift-controlled,
+framing-checked.
 
-Status: **RQ1 FALSIFIED (2026-07-01) — border-specific line CLOSED.** Phase-0 ran
-(`bench/headroom/sink_probe.py` + `bench/headroom/border_toggle.py`). The base DiT
-*does* manufacture a strong self-attn sink — a ~26× high-norm outlier token, mid-layer,
-high-σ, self-attn-written (the DSR/ViT phenomenon is real on Anima) — **but the sink is
-decoupled from the border.** See "## RQ1 result" below. RQ2/RQ3 are moot for the border
-hypothesis; a general-quality register experiment (DSR's actual claim) remains
-*theoretically* open but is out of scope here and no longer distinguished from DSR.
+Status: **rewritten 2026-07-02** after Phase-0 / Phase-0.5 / RQ2-proxy results
+(full detail: `bench/headroom/README.md`; original border-hypothesis design in git
+history of this file). Memory: [[project_headroom_registers_rq1_falsified]],
+[[project_headroom_registers_rq3_negative]].
 
-## RQ1 result (Phase 0) — the border is a text-controllable data prior, not a rendered sink
+## Settled facts this design stands on
 
-Falsified on the decisive test. Method: instrument the block stream for per-token
-residual activation norm ‖x‖ (the canonical high-norm-outlier sink signature), split
-self- vs cross-attn contribution, resolved over **layer-depth × σ**; then a
-**matched-seed border toggle** — hold the noise fixed and flip the border via prompt.
+Everything below is measured on Anima, not hoped:
 
-- **The border is fully text-controllable.** A `black border, letterboxed` positive
-  *induces* a heavy frame on 5/5 previously-clean seeds; a border *negative* erases it
-  on 5/5 previously-bordering seeds (verified by eye + detector). The user's confirmed
-  `cropped` reproducer bordered on only ~1/6 seeds — `cropped` is a muddy proxy (means
-  "subject cut off," not "rendered bar"); explicit border tags are the clean lever.
-- **The self-attn sink does NOT track the border.** Across the full ON→OFF text toggle,
-  mid/hi ‖x‖ border-enrichment barely moves (clean 1.77× → induced-border 1.97×;
-  matched border-removal Δ inconsistent in sign, mean 0.14×; overall ON 1.92× vs OFF
-  1.75×, Δ=0.17× ≪ the 0.50× bar). The 26× outlier is present identically whether or
-  not a border renders — a constant background computation, not the border's cause.
-- **Interpretation.** A softmax attention sink is not erasable by a *text* negative;
-  text-controllability is the signature of a learned data prior (letterbox/matte baked
-  into training art). This is exactly this doc's own kill branch: *"the sink is not
-  co-located with borders ⇒ borders are a data-prior problem, not a relocatable sink;
-  the honest answer is crop-conditioning or border augmentation, not headroom."*
-- **σ-direction footnote settled.** The sink localizes to **mid (intermediate) layers**
-  (DSR's finding) and is strongest at **high σ** (this doc's timing) — each prior was
-  half-right; but since the sink is border-decoupled, neither timing matters for borders.
+1. **The border line is CLOSED (RQ1 falsified).** Unprompted borders are a
+   text-controllable data prior (induce 5/5 / erase 5/5 by prompt at fixed noise);
+   the sink is present identically with and without a border. Registers are not a
+   border fix; don't re-propose that bridge.
+2. **The DSR sink is real on Anima.** A sparse (~0.2% of tokens) ~14–24×
+   high-norm ‖x‖ outlier (magnitude is prompt-dependent — keep eval prompt sets
+   fixed), mid-layer, high-σ, self-attn-written. `bench/headroom/sink_probe.py`.
+3. **The sink is load-bearing and global.** Norm-clamping ~7 tokens re-plans the
+   whole image with no quality win (DSR Tab. 1 replicated). Registers must
+   *absorb*, never remove. `sink_intervention.py`.
+4. **No adoption at the cheap point.** K=16 registers + rank-8 QKV-LoRA on all 28
+   blocks, 400 steps: registers reach only ~1.1× median norm (sink needs ~14–24×);
+   patch sink barely moves (arm B −10%). `train_registers.py` / `register_eval.py`.
+5. **Fixed-zero registers are a LESION, not a control.** 16 zero-content tokens
+   share one bias-derived key = a uniform attention-mass drain; the LoRA trains
+   around it and **framing/crop collapses** (3/3 broken headless crops on the
+   repro prompt; 0/3 for LoRA-only and learnable-register arms). Two lessons:
+   (a) causal evidence the self-attn mass economy owns **global layout** —
+   consistent with the sink being layout bookkeeping, and with DSR's Theory 2
+   (registers must carry content); (b) **never ship or control with fixed-zero
+   registers.** The honest drift control is **arm L** = LoRA-only, K=0 (supported:
+   `--num_registers 0`).
+6. **Everything else observed so far is generic LoRA drift.** Matched-seed
+   re-plan magnitude (~0.13–0.23 L1) and the clamp-sensitivity drop are identical
+   for LoRA-only and register arms. The only cleanly register-specific effect at
+   the cheap point is a small sink-ratio drop (armB 12.9 vs armL 14.2),
+   downstream-inert. Don't cite trained-arm visual change as register evidence.
+7. **Pixel metrics are blind to framing failures.** Point 5 was caught by eye,
+   not by pixel L1 / Laplacian medians. Every Phase-2 eval includes an explicit
+   matched-seed **framing/coherence montage** as a mandatory gate artifact.
 
-Redirect for the border defect: a data-side fix (crop/border-aware conditioning, border
-augmentation, or a border-suppressing negative at inference — which already works, see
-above), not an architectural headroom add.
+## The open question (and why it's now cheap)
 
-### Quality follow-up — is the sink load-bearing? (`bench/headroom/sink_intervention.py`)
+DSR's sweet spot — **~36 registers inserted at block ~8** (non-monotonic in both
+K and depth; K=4 a floor, K=100 a regression), trained **jointly with unfrozen
+attention** — is untested on a frozen pretrained base. Our negative sits at
+(K=16, insert-at-entry, rank-8 LoRA, 400 steps) — plausibly under-provisioned on
+*every* axis at once, and the reachability argument (a rank-8 LoRA cannot rewire
+where softmax mass flows against a baked-in ~20× attractor) points at unfrozen
+QKV as the axis most likely to matter.
 
-DSR's *actual* claim is about quality, not borders, so we asked it directly. Anima has
-no per-image quality reward (CMMD is distribution-level; Null-TTA closed on exactly this
-gap), and the sink is in *every* generation, so we can't correlate or compare
-with/without. Instead: the DSR masking test — clamp the mid-layer outlier tokens' norm
-to 4×median during generation (matched seed) and eyeball base-vs-clamp.
+The bench harness trains at ~2 it/s (eager native-flatten, grad-ckpt,
+`use_reentrant=False`), so **4000 steps ≈ 35–60 min per arm**; a six-arm sweep is
+~4–6 GPU-hours. That converts RQ3-at-the-sweet-spot from "deferred" to "run it."
 
-Result: the sink is **load-bearing and global.** Clamping just **~0.16 % of tokens
-(~7 of 4200)** re-plans the *whole* image (16 % pixel L1 on the complex prompt, change
-spread *off* the sink patches at conc 0.70×; near-identical 5 % on the simple prompt).
-Quality is **roughly preserved** — one coherent image traded for another comparable one,
-with minor new artifacts (a malformed hand, faint speckles); no free quality win, no
-collapse. This **replicates DSR Tab. 1** (masking the outlier doesn't help — it's a
-symptom/carrier, not a removable defect) on Anima.
+## Phase-2 sweep design
 
-Implication: registers would have to *absorb* the sink, not remove it, and whether that
-nets a quality gain is a Phase-1 training question **gated on a quality metric Anima
-lacks**. The general-quality register line is therefore train-and-pray with no gate and
-no longer distinct from DSR — **shelved unless an Anima per-image quality reward appears.**
+### Arms (each 4000 steps, seed 0, same data recipe as Phase-0.5)
 
----
+| arm | K | insertion | attention surface | what it isolates |
+|---|---|---|---|---|
+| **L4k** | 0 | — | QKV-LoRA r8, all blocks | **drift control at matched budget** — every comparison is vs this, not vs base |
+| **B4k** | 16 | entry | QKV-LoRA r8, all blocks | pure steps axis (10× the Phase-0.5 arm B) |
+| **K36-b8** | 36 | block 8 | QKV-LoRA r8, blocks ≥8 | DSR sweet spot at LoRA reachability |
+| **K36-b8-r32** | 36 | block 8 | QKV-LoRA r32, blocks ≥8 | rank/reachability axis |
+| **K36-b8-QKV** | 36 | block 8 | **unfrozen qkv_proj**, mid blocks (~8–18) | max reachability — the arm the negative most likely mispriced |
+| **K36-b8-aux** *(optional)* | 36 | block 8 | QKV-LoRA r8 | assisted relocation: mid-block patch-outlier-norm penalty (see below) |
 
-Original design follows (superseded by the result above). Design-only; the Phase-0
-gate was a pure observation over the existing base DiT.
+Notes:
+- **Register lr decoupled from LoRA lr.** Registers are fresh embeddings competing
+  with a ~20× attractor; give them their own (higher) lr group — e.g. registers
+  1e-2, LoRA 1e-4~1e-3. lr 1e-3 was fine for 400 steps; at 4000 steps watch for
+  drift/divergence (checkpoint + montage every ~500 steps; keep the best by gate,
+  not the last — cf. the turbo non-monotonic-checkpoint lesson).
+- **K36-b8-QKV sizing:** qkv_proj is ~12.6M params/block; mid-only (11 blocks)
+  ≈ 139M trainable → fp32 Adam states ~1.7GB. Fits alongside the frozen bf16 DiT
+  with grad-ckpt. Do NOT unfreeze all 28 blocks in this pass.
+- **The aux arm changes the question.** An explicit relocation pressure (penalize
+  top-0.2% patch ‖x‖ at mid blocks, never penalize register norm) abandons
+  "adoption for free" — it asks instead "does *forced* relocation preserve
+  framing/quality?" Run it only if the unforced arms fail the adoption gate but
+  the QKV arm shows partial movement; report it as forced, not as adoption.
 
-- Planned bench: `bench/headroom/sink_probe.py` (new; Phase-0 — sigma-resolved,
-  self-attn-split per-token activation-norm map over the patch grid; is there a
-  relocatable sink, and does it sit on borders / low-information regions?).
-- Planned network: a register-token option in `networks/` (new; Phase-1 — K learned
-  tokens concatenated into the self-attn sequence, rope-exempt, stripped before
-  unpatchify/decode). **Not a LoRA** — an architectural capacity add; the trainable
-  surface is the register embeddings + a small attention-projection LoRA so the
-  frozen base can learn to read/write them.
-- Premise sources: `docs/proposal/tag_headroom_commitment_sigma.md` (the σ≈0.8 bulk-
-  commitment finding this builds on, and its confound-grid discipline),
-  `bench/cross_attn_drive/` (the commitment-σ / knockout probes and `how_to_observe.md`
-  this extends from "which *tag* commits when" to "where does the *sink* live"),
-  the ViT-registers result (*Vision Transformers Need Registers*, Darcet et al.) as
-  the external mechanism, CLAUDE.md § "Text encoder padding" (padding-as-attention-
-  sink — the same phenomenon one modality over) and § "The DiT operates on 5D
-  latents" / "Free-fit native-shape bucketing" (the boundary + compile invariants any
-  token-count change must obey).
-- Priors this design must obey (be honest up front): the **per-σ reweight graveyard**
-  ([[project_sigma_reshape_no_win]]) — global per-σ guidance reweights are a no-win
-  line here, so this must be a *capacity add*, not a reweight; and the **base-owned
-  ceiling** ([[project_x0_contradiction_bench]]) — x̂₀-wander/complexity is ~90% base-
-  owned and caption-level fixes don't move it, so if borders are pure data prior a
-  frozen-base+LoRA register add may not reach them. RQ1 exists to tell these apart
-  *before* any training.
+### Metrics and gates (in order; each gates the next)
 
-## The claim being made precise
+1. **Adoption gate (primary, metric-free, training-time + eval).** The relocation
+   crossover: register max-‖x‖/median rising toward sink magnitude while
+   patch top-0.2%/median falls. Log both ratios in the train history (currently
+   only mean norms are logged — add `patch_sink_ratio`/`reg_ratio` per log step),
+   and probe at **multiple depths** at eval (blocks ~8/14/20, not just 14 —
+   insertion at 8 changes where a register-sink could form).
+   **Pass:** any arm reaches reg_ratio ≥ ~5× median with patch sink ratio down
+   ≥ 30% vs **L4k** (not vs base). **Fail all arms ⇒ the frozen-base register
+   line closes for real** — "headroom belongs in the base" confirmed at the DSR
+   sweet spot and 10× budget; that is the publishable negative and the line ends.
+2. **Framing/coherence montage (mandatory guard, by eye).** Matched-seed grid
+   (repro + control + the register_eval prompt trio, ≥3 seeds) for every arm vs
+   L4k. Any systematic framing collapse ⇒ that arm is lesioned regardless of its
+   ratios (the arm-A lesson). This is the artifact the pixel metrics can't replace.
+3. **Benefit proxies (only for arms passing 1+2).** The RQ2 proxies vs L4k:
+   (a) clamp-sensitivity (`sink_intervention` on the trained arm — relocation
+   predicts a *register-specific* drop beyond L4k's drift level); (b) ex-sink
+   per-patch Laplacian recovery (secondary — known noisy under re-planning);
+   (c) **CMMD** distribution-level tiebreak (the existing paired PE-Core MMD²
+   infra) + blind eyeball at real 28-step / CFG-4 settings.
+   **Pass:** a register-specific sensitivity drop and no regression on the
+   montage/CMMD. "Relocated but nothing improves" is itself a clean result:
+   *the sink is adoptable but not quality-limiting on Anima* — distinguishing
+   Anima from DSR's ImageNet DiTs.
 
-Softmax attention must sum to 1: every query spends its full attention mass
-somewhere. When nothing is a good match, the mass piles into a **sink** — a token
-that absorbs leftover attention. ViTs were shown to *manufacture* sinks by hijacking
-the lowest-information patches (uniform background), turning them into a high-norm
-global scratchpad and degrading those patches locally (*Vision Transformers Need
-Registers*). Dedicated register tokens — extra learnable sequence slots, discarded
-at output — gave the model an off-canvas scratchpad; the artifacts moved into the
-registers and the patch tokens recovered.
+### Discipline
 
-In an **encoder** the artifact lives in the internal features and is invisible in any
-output. In a **generative DiT** the sink-bearing tokens are *decoded to pixels*, so
-the artifact leaks into the image. The precise hypothesis:
+- Every comparison is against **L4k** at matched steps; base is only the sink
+  reference. Never against arm A (lesion) or the 400-step arms (budget mismatch).
+- Fixed prompt set across all evals (sink magnitude is prompt-dependent).
+- Generation is seed-deterministic — reuse prior images where the condition is
+  unchanged; regenerate only new arms (`register_rq2_proxies.py --only`).
+- Keep the sink probes' bit-exactness habit: eager, no compile, matched seeds.
 
-> Unprompted uniform borders are the sink, rendered. A border is the lowest-frequency,
-> least locally-informative region on the canvas — exactly the profile of a token the
-> model would sacrifice as a spatial self-attention sink. Because low frequencies
-> commit early (§ below), the sink is baked into the layout at high σ and is
-> unremovable by low-σ refinement — which is why it survives to the final image.
+## Implementation deltas (small, all in `bench/headroom/`)
 
-Two facts make this concrete rather than analogy in *this* codebase:
+1. **Insert-at-block-b.** Registers currently concat at `_run_blocks` entry.
+   For b>0: concat (+ rope-row extension) via a `forward_pre_hook(with_kwargs)`
+   on block b, keep the existing strip-at-return. Blocks <b run at seq, ≥b at
+   seq+K — eager doesn't care; nothing AR-snaps.
+2. **Unfrozen-QKV arm.** Adapter variant whose trainable surface is the target
+   blocks' `qkv_proj` weights (fp32 master copies, restore-on-remove), no LoRA.
+3. **Dual lr groups** (register vs attention surface) in `train_registers.py`.
+4. **Richer train history**: log `patch_sink_ratio` / `reg_ratio` (already
+   computed in the adapter) per log step, so the crossover is visible mid-run.
+5. **Checkpoint every ~500 steps** + a tiny fixed-seed montage render per
+   checkpoint (rank by gate, not by step count).
+6. *(aux arm only)* top-0.2% patch-norm penalty at mid blocks, weight swept
+   coarsely; never applied to registers.
 
-1. **We already measured the "commits early" half.** `tag_headroom_commitment_sigma`
-   + the `cross_attn_drive` probes established that **bulk content locks by σ≈0.8**,
-   with only a thin tail of localized text-driven features committing through
-   σ∈[0.6,0.8]. A border is bulk-frequency structure → it commits in the early band,
-   consistent with "set at high σ, frozen by low σ."
-2. **We already ship a load-bearing sink.** CLAUDE.md's text-encoder invariant —
-   *zero-padded positions act as attention sinks in cross-attention softmax; trimming
-   them produces black images* — is the identical mechanism on the text axis. Empty,
-   information-free positions turn out to be computationally load-bearing. The border
-   hypothesis is that same mechanism on the **image (self-attention)** axis.
-
-The intended intervention is **at commit-time**: registers are present at high σ, so
-when self-attn is establishing the low-frequency layout and looking for a sink, it
-finds off-canvas slots and never allocates a border. It is deliberately *not* a low-σ
-fix (there is no SNR budget left there — the graveyard prior) and deliberately *not*
-a per-σ guidance reweight ([[project_sigma_reshape_no_win]]) — it is added capacity.
-
-## Why the penalty asymmetry should make the model adopt them
-
-ViT registers were **never supervised** — no loss says "store global state here."
-They got used because they were the cheaper place to dump under the *existing*
-objective: patch tokens carry a local-fidelity penalty (masked-modeling / local
-losses want each to retain its own content), registers carry none. Gradient descent
-migrated the scratchpad to the tax-free slots.
-
-The same asymmetry holds for a DiT and is the reason to believe this transfers rather
-than being wishful:
-
-- **Emitted image tokens are penalized on pixels** — the flow-matching loss lands on
-  exactly those tokens; sacrificing one to a uniform border costs loss on that region.
-- **Registers are not decoded** — no pixel target, no penalty.
-
-So the gradient pressure to offload the self-attn sink off-canvas exists for free.
-The open question is not *whether the pressure exists* but *whether a short adapter
-budget on a base that never had registers can act on it* — which is RQ3, and the
-honest risk of the whole program (DINOv2 adoption emerged only with scale + long
-training).
-
-## The three research questions, as gated phases
-
-### RQ1 — does the base seek headroom? (Phase 0, bench-only, no training)
-
-Falsify the premise before building anything. `bench/headroom/sink_probe.py`: hook
-the block forward (the **DAVE block-forward hook**, `library/inference/corrections/dave.py`,
-already taps the block stream) and dump **per-token activation / attention-mass norms
-across the denoising trajectory**, un-flattened back onto the patch grid. Two extra
-axes make it discriminating:
-
-- **Sigma-resolved.** Do high-norm sink tokens appear **at high σ (≈0.8–0.95),
-  co-timed with the layout commit** measured in `tag_headroom_commitment_sigma`? A
-  sink that only appears late (or never as a norm outlier, just as painted pixels)
-  is *not* the mechanism.
-- **Self-attn-split.** The sink signature must be in **self-attention** (image→image
-  entropy collapsing onto a few tokens), not cross-attention (image→text). Reuse the
-  `attn_contribution.py` / `attn_evolution.py` readouts from `cross_attn_drive`.
-
-Correlate sink-token location with (a) low-information / border regions of the final
-image and (b) the σ≈0.8 commit band.
-
-**Kill criterion:** no high-norm sink tokens, **or** the sink is not co-located with
-borders / low-information regions, **or** it lives in cross-attn, **or** it onsets
-late. Any of these ⇒ borders are a data-prior / VAE-edge problem, not a relocatable
-sink; the register line closes and the honest answer is "wants crop-conditioning or
-border augmentation, not headroom." **Pass:** a high-σ, self-attn, border-co-located
-high-norm sink exists — the base is manufacturing a scratchpad in pixels and there is
-something to relocate.
-
-### RQ2 — does the relaxation improve results? (Phase 1, minimal train + eval)
-
-Only if RQ1 passes. Add K registers to the self-attn stream — and note the DiT
-sweet spot is **not** the DINOv2 K=4: the DSR ablation (see § Related research) puts
-it near **36 registers inserted at block ~8** (early-to-middle depth), non-monotonic,
-with K=4 only a floor and K=100 a regression. So treat both **K and insertion depth**
-as the ablation axes (K∈{4,16,36,64}, start-block∈{0,8,16}), not K alone. Train the register embeddings + a small
-attention-projection LoRA (QKV) on the normal FM objective so the frozen base can
-learn to attend to them. Evaluate two things, both against a matched no-register run:
-
-- **Border-artifact rate (primary, near-detector-free).** Fraction of border pixels
-  that are near-uniform white/black on a prompt set that requests **no** border,
-  measured directly on decoded pixels — plus its internal correlate, the RQ1 sink-norm
-  on border tokens, which should *fall* if the register absorbed it.
-- **No general regression.** CMMD (distribution-level, not per-image — the metric
-  trap) plus a blind eyeball grid at real 28-step SDE / target CFG for saturation,
-  pose, and composition. The point is a *relaxation*, so the bar is "borders down,
-  nothing else worse," validated by eye, not a scalar alone.
-
-**Gate:** measurable border reduction with the sink-norm moving into the registers,
-and no quality/diversity regression on the grid. A "borders down but outputs blander"
-result is a **fail** — it would mean the register removed a load-bearing computation
-rather than relocating it.
-
-### RQ3 — can the base *adopt* it in a few hundred steps? (Phase 2, the hard gate)
-
-The real risk, measured as a **training-time trajectory**, not an endpoint. Log, over
-steps: register-token norm / attention-mass **rising** while border-token sink-norm
-**falls**. That crossover *is* adoption. Because RQ2's training surface is tiny
-(K·D register params + attention LoRA), the honest hope is a few hundred steps; the
-honest fear is that a frozen base whose attention never knew registers existed can't
-relocate a baked-in sink on that budget.
-
-**Gate:** the adoption crossover appears within the target budget (≈a few hundred
-steps) and is stable (registers don't collapse back to dead tokens, borders don't
-return). **If it doesn't:** the fallback is a fuller finetune — unfreeze attention QKV
-so the sink can actually move, or train registers into the base over a long schedule.
-That is a *different, more expensive experiment* and must be reported as such, not
-smuggled in. A negative here is a real, publishable result: "registers help but only
-above the LoRA budget," which directly informs whether headroom belongs in the base
-or in an adapter.
-
-## Integration wrinkles specific to this repo (do not hand-wave)
-
-- **Compile budget / free-fit coupling.** Registers add a constant K to every
-  sequence, so `_native_flatten`'s token-count key shifts by K and each tier's
-  `EDGE_TOKEN_BANDS` seq range must be widened by K. `train.py::_derive_token_budget`
-  and `compile_blocks(n_token_families=…)` derive the dynamo budget from the buckets
-  the caches populate — a constant offset is benign but must be threaded through, or
-  `compile_dynamic_seq` will graph-miss on every forward. K is fixed (not per-image),
-  so this stays one graph per tier.
-- **Rope exemption.** Registers are non-spatial; they must be **excluded from RoPE**
-  (like a CLS token), not assigned patch positions, in `networks/attention_dispatch.py`.
-  Getting this wrong gives them a spurious spatial location and defeats the point.
-- **Strip before decode.** Registers concat at the sequence level *after* patch-flatten
-  and must be dropped before unpatchify → VAE decode. Mind the 5D↔4D boundary
-  (CLAUDE.md § dim-2 singleton): the strip happens in the flattened `(B,1,seq,1,D)`
-  domain, before the grid is restored.
-- **Harness ordering.** Build via `library/runtime/harness.py::build_anima`
-  (load → apply → compile) — the register concat is part of "apply," so compile must
-  trace it, same rule as any adapter.
+K=0 (arm L) support already landed in `register_adapter.py`. The Phase-0.5
+harness invariants carry over unchanged: eager native-flatten, rope-exempt
+identity rows, strip before unpatchify, grad-ckpt `use_reentrant=False`
+([[project_unsloth_reentrant_drops_grad]]).
 
 ## Risks / priors (be honest)
 
-- **Base-owned ceiling** ([[project_x0_contradiction_bench]]). If borders are dominated
-  by the data prior (letterboxed/matted training art) rather than the sink mechanism,
-  a frozen-base register add won't move them — the sink is real but small next to the
-  prior. RQ1's border-vs-sink correlation is the guard; a weak correlation predicts a
-  weak RQ2 and we say so.
-- **Per-σ reweight graveyard** ([[project_sigma_reshape_no_win]]). This must not
-  degenerate into "boost/suppress something in a σ band." It is a capacity add; if the
-  only way to make it work turns out to be a σ-gated register gain, it inherits that
-  no-win result and should stop.
-- **Adoption may need scale** (the DINOv2 caveat, and RQ3 itself). The whole
-  mechanism emerged with long training on a from-scratch structure; the LoRA-budget
-  bet may simply lose. This is why RQ3 is a gate, not an afterthought.
-- **Registers could learn to do nothing.** A frozen base can leave the new tokens as
-  inert appendages the FM loss never routes into. RQ3's rising-register-norm signature
-  is exactly the check that adoption happened rather than the loss ignoring the new
-  capacity.
-- **Removing a load-bearing sink can hurt.** If the border sink is doing real global
-  bookkeeping and the register fails to absorb it cleanly, outputs get *worse*, not
-  border-free. RQ2's "no-regression" gate and the sink-norm-moves-into-registers
-  correlate are the guard against shipping a bland-but-borderless model.
+- **Adoption may need pretraining regardless.** The DINOv2/DSR caveat survives
+  every budget increase: the sink attractor was carved by the full pretraining
+  run, and 4k adapter steps may still lose. That outcome is the *point* of the
+  sweep — it converts "not at this cheap config" into "not on a frozen base,
+  period," with the sweet-spot config actually tested.
+- **No per-image quality reward exists** (the Null-TTA wall). The benefit gate
+  leans on register-specific *sensitivity* deltas, the montage, and CMMD — all
+  imperfect. A quality claim stronger than "no regression + relocation happened"
+  is not available and should not be made.
+- **Longer schedules can drift.** 4000 steps of lr-1e-3 LoRA on 500 images can
+  overfit/deform the model independent of registers; L4k absorbs this in every
+  comparison, and per-checkpoint montages catch it early.
+- **The aux arm can degenerate into norm-whack-a-mole.** Suppressing the outlier
+  without giving the computation somewhere to go is exactly the clamp experiment
+  (whole-image re-plans, no win). If the aux arm's registers don't light up while
+  patch norms fall, stop it.
+- **Per-σ reweight graveyard still applies** ([[project_sigma_reshape_no_win]]):
+  if an arm only "works" via a σ-gated register gain at inference, it inherits
+  that no-win result.
 
-## Success criterion
+## Kill / success criteria
 
-A sigma-resolved, self-attn-split demonstration that (1) the base manufactures a
-border-located attention sink at high σ (RQ1), (2) K non-decoded register tokens
-absorb that sink and measurably cut the unprompted-border rate with no quality or
-diversity regression (RQ2), and (3) the base adopts them — register norm up, border
-sink-norm down — within a few-hundred-step budget (RQ3). Any phase's gate failing is
-an honest, useful negative: RQ1-fail redirects to a data-prior fix, RQ2-fail says the
-sink wasn't the border's cause, RQ3-fail says headroom belongs in the base, not an
-adapter.
+- **Kill (line closes):** no arm — including unfrozen-QKV at K36/b8/4k — passes
+  the adoption gate. Write the negative into `docs/findings/`, keep the harness
+  (it's a general non-decoded-token bench rig), stop proposing frozen-base
+  registers on Anima.
+- **Success (Phase 3 exists):** an arm passes adoption + framing + shows a
+  register-specific sensitivity delta. Phase 3 = longer/bigger training of that
+  config, CMMD-powered A/B, and a decision on whether the mechanism merits a
+  base-model change (where DSR says it ultimately belongs).
 
 ## Related research
 
-**Taming Outlier Tokens in Diffusion Transformers** (Wu, Wang, Fu, L.-C. Chen, Gan,
-Wei; Rice + Apple; arXiv:2605.05206, May 2026) is direct prior art for the general
-mechanism and should be read before starting. It introduces **Dual-Stage Registers
-(DSR)** — register tokens in *both* a ViT-based encoder and the diffusion transformer.
-The DiT half ("diffusion registers": a few trainable, non-decoded tokens learned
-jointly with the generator, stripped at inference) is the RQ1→RQ2 intervention,
-already validated across SiT, JiT, RAE, VAE-latent and pixel-space DiTs. It **de-risks
-our premise** rather than threatening it — several load-bearing assumptions here are
-now measured facts, not hopes:
+**Taming Outlier Tokens in Diffusion Transformers** (Wu et al., arXiv:2605.05206
+— Dual-Stage Registers): the DiT-generator prior art. Confirms outlier sinks in
+DiT generators, register benefit (FID 16.05→14.47 VAE-SiT, ~4× faster
+convergence), the **~36-registers-at-block-8** non-monotonic sweet spot, and that
+masking the outlier doesn't help (symptom, not cause). What DSR does *not* cover
+— and where this sweep still adds signal — is the **frozen-pretrained-base
+retrofit regime**: every DSR register is trained jointly from scratch. Their
+"strengthens at low noise, intermediate layers" σ-profile matched our probe
+mid-layer finding; our sink is strongest at high σ — sweep evals should keep the
+σ-resolved readout rather than assuming either profile.
 
-- **RQ1 premise confirmed.** Outlier/attention-sink tokens *do* arise inside DiT
-  generators, not just ViT encoders — the phenomenon we set out to prove exists.
-- **RQ2 direction confirmed, with hyperparameters.** Trained diffusion registers
-  consistently improve generation (e.g. RAE-SigLIP2 FID 5.89→5.33, VAE-SiT
-  16.05→14.47, GenEval 0.426→0.466; ~4× faster convergence). Sweet spot **~36
-  registers at block ~8**, non-monotonic in both count and depth — folded into RQ2
-  above.
-- **"Strip the sink" is a dead end.** Masking high-norm tokens does *not* help
-  (their Tab. 1): the outlier is a *symptom of corrupted local patch semantics*, not
-  the cause. This upgrades our "removing a load-bearing sink can hurt" risk from a
-  hedge to a measured result — registers must *absorb/restore*, never remove.
-
-**What DSR does not do — and where this proposal still adds signal:**
-
-- **No bridge to a real, named failure mode.** DSR observes outliers as an *awkward
-  pattern in latent/attention norm maps* and optimizes distributional scores (FID,
-  GenEval). It never connects the sink to a *specific, visible, nameable* generation
-  defect. Our whole angle — **is the sink the unprompted white/black border?** — and
-  the border-rate metric is untouched by them. That the pattern is real in latent
-  space is exactly the grounding that makes the border-correlation worth testing:
-  they proved the mechanism exists; we ask what it *costs the user*.
-- **No frozen-base cheap-adoption regime (RQ3).** Every DiT register in DSR is trained
-  *jointly with the generator from scratch* (ImageNet 80–800 epochs; 10k steps @
-  batch 2048 for T2I). Retrofitting a **frozen pretrained DiT** (Anima's setting) with
-  registers on a **few-hundred-step adapter budget** is unaddressed — RQ3 is the
-  genuinely open, Anima-relevant question, and DSR's from-scratch "4× faster" says
-  nothing about it.
-
-**One finding that pushes back on our temporal story (fold into the RQ1 probe).** DSR
-reports DiT outliers concentrate in **intermediate layers** and *strengthen as noise
-decreases* — strongest at low noise (t≈0.1, late denoising), weakest at high noise.
-That is the **opposite σ direction** to our "sink commits at high σ / early, in the
-σ≈0.8 layout-commit band" hypothesis. Either the norm-outlier and the layout-commit
-are distinct phenomena, or the early-commit border story is wrong. So the RQ1 probe
-must sweep **layer-depth × σ**, not just high σ, and be honestly prepared to find a
-late-σ / intermediate-layer signature — in which case the border-commit-early
-mechanism needs revising even if registers still help.
+*Vision Transformers Need Registers* (Darcet et al.): the original emergent-sink
+/ register mechanism on ViT encoders.
 
 ## References
 
-- Wu, Wang, Fu, Chen, Gan, Wei, *Taming Outlier Tokens in Diffusion Transformers*
-  (arXiv:2605.05206, 2026) — Dual-Stage Registers; the DiT-generator prior art above
-  (register count/depth sweet spot, masking-fails result, intermediate-layer / low-
-  noise outlier localization).
-- `docs/proposal/tag_headroom_commitment_sigma.md` — the σ≈0.8 bulk-commitment finding
-  and confound-grid discipline this builds on.
-- `bench/cross_attn_drive/` — `how_to_observe.md`, `attn_contribution.py`,
-  `attn_evolution.py`, `knockout_diffmap.py`; the commitment-σ / attention-readout
-  machinery the Phase-0 sink probe extends.
-- `library/inference/corrections/dave.py` — the block-forward hook the norm probe
-  reuses as scaffold.
-- `library/runtime/harness.py::build_anima` — load→apply→compile harness the register
-  network must build on.
-- CLAUDE.md § "Text encoder padding" (padding-as-attention-sink, the same mechanism on
-  the text axis), § "The DiT operates on 5D latents", § "Free-fit native-shape
-  bucketing" (the compile/token-count invariants a fixed +K must respect).
-- *Vision Transformers Need Registers* (Darcet, Oquab, Mairal, Bojanowski) — the
-  external mechanism: emergent high-norm artifact tokens in low-information patches,
-  resolved by unsupervised, discarded-at-output register tokens.
-</content>
-</invoke>
+- `bench/headroom/README.md` — Phase-0/0.5/proxy results this rewrite compresses;
+  scripts: `sink_probe.py`, `border_toggle.py`, `sink_intervention.py`,
+  `register_adapter.py`, `train_registers.py`, `register_eval.py`,
+  `register_rq2_proxies.py`.
+- Runs: `results/20260701-*` (RQ1/RQ3), `results/20260702-0659-rq2_proxies/`,
+  `results/20260702-0715-rq3_armL/` + `20260702-0725-rq2_armL_only/` (arm L).
+- Memory: [[project_headroom_registers_rq1_falsified]],
+  [[project_headroom_registers_rq3_negative]].
+- CLAUDE.md § "Text encoder padding" (padding-as-attention-sink, same mechanism
+  on the text axis) — kept as motivating context.
+- Original border-hypothesis design + RQ1/RQ2/RQ3 phase gates: git history of
+  this file (pre-2026-07-02).
