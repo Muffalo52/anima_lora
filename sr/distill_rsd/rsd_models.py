@@ -73,9 +73,9 @@ class StochasticUNet(UNetModelSwin):
     """UNetModelSwin + a zero-init noise branch -> stochastic one-step generator.
 
     Two injection modes (both zero-init => bit-identical to the frozen teacher at step 0):
-      - "add" (this reconstruction's default): a separate zero-init conv `noise_proj`
+      - "add" (the original reconstruction): a separate zero-init conv `noise_proj`
         maps a 3-channel eps to the post-conv width and is ADDED after input_blocks[0].
-      - "concat" (matches the official RSD release, `sampler.py::_add_noise` /
+      - "concat" (train default; matches the official RSD release, `sampler.py::_add_noise` /
         `trainer.py:1426`): WIDEN input_blocks[0][0] by `noise_channels` (default 1) input
         planes, zero-init on the new slice, and CONCAT eps onto the [latent, lq] stack
         before the first conv. This is the published mechanism; kept behind a flag because

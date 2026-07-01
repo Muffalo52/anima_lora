@@ -66,11 +66,13 @@ def main():
                          "'student' = |teacher_x0 - student_x0| + 1e-8 (matches official RSD "
                          "release, trainer.py:1836); 'input' = |z_t - teacher_x0| floored 0.05 "
                          "(this reconstruction's original form).")
-    ap.add_argument("--noise_mode", choices=["add", "concat"], default="add",
-                    help="student/fake noise injection. 'add' = zero-init 3ch conv added after "
-                         "block0 (default, back-compatible with existing checkpoints); 'concat' = "
-                         "widen the first conv by noise_channels and concat eps (matches official "
-                         "RSD release — changes the first-conv shape, so old ckpts won't load).")
+    ap.add_argument("--noise_mode", choices=["add", "concat"], default="concat",
+                    help="student/fake noise injection. 'concat' = widen the first conv by "
+                         "noise_channels and concat eps (default; matches the official RSD "
+                         "release, sampler.py:79 — won the 500-iter A/B, MUSIQ 65.8 vs add 64.0); "
+                         "'add' = zero-init 3ch conv added after block0 (the original "
+                         "reconstruction; back-compatible with pre-concat checkpoints, which "
+                         "won't load into the widened concat conv).")
     ap.add_argument("--noise_channels", type=int, default=None,
                     help="injected-noise channel count (default 3 for add, 1 for concat/official)")
     ap.add_argument("--amp", action="store_true", help="bf16 autocast")

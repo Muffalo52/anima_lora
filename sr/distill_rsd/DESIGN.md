@@ -50,9 +50,12 @@ diverged and are now selectable (both default to backward-compatible behavior ex
   per-sample DMD loss by `|teacher_x0 − student_x0| + 1e-8`. Our original divided by
   `|z_t − teacher_x0|` floored 0.05. Default is now `student` (official); `input` keeps the old form.
 - **Noise injection** (`--noise_mode`): official (`sampler.py:79`) widens the first input conv
-  by `noise_channels=1` and **concats** eps; ours adds a separate 3-ch `noise_proj` after block0.
-  Default stays `add` (existing checkpoints load); `concat` matches the release but changes the
-  first-conv shape (old ckpts won't load into it). Both are zero-init ⇒ identical to teacher at step 0.
+  by `noise_channels=1` and **concats** eps; the original reconstruction added a separate 3-ch
+  `noise_proj` after block0. **Default is now `concat`** (the release form) — it won a 500-iter A/B
+  (`--weights student`, 30-img eval set): MUSIQ 65.8 (concat) vs 64.0 (add), both on the new
+  `student` denom. `add` stays available for the original arch. Both are zero-init ⇒ identical to
+  teacher at step 0. Back-compat is inference-side: `infer.py` rebuilds arch from ckpt meta
+  (`noise_mode`, `noise_channels`), so pre-concat checkpoints (no meta) still load as `add`.
 
 Confirmed matching (config): K=5, lr 5e-5, AdamW(0.9,0.95), wd 0, EMA 0.999, 3000 iters,
 λ_gan 3e-3, λ_lpips 2.0, κ=2.0, exp-0.3/15-step/xstart, image-space LPIPS, w_t weighting off
