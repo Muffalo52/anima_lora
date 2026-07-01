@@ -14,7 +14,7 @@ import torch.nn.functional as F
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
-from rsd_models import TEACHER_CKPT, predict_x0  # noqa: E402
+from rsd_models import TEACHER_CKPT, make_eps, predict_x0  # noqa: E402
 
 
 def main():
@@ -64,7 +64,7 @@ def main():
     print("fake-critic update...")
     z0, z_y = sample_latents()
     t_n = torch.tensor([N_NODES[0]] * B, device=dev).long()
-    eps = torch.randn_like(z0)
+    eps = make_eps(student, z0)
     with torch.no_grad():
         z_tn = diff.q_sample(z0, z_y, t_n)
         z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)  # student output (frozen here)
@@ -84,7 +84,7 @@ def main():
     print("generator update...")
     z0, z_y = sample_latents()
     t_n = torch.tensor([N_NODES[0]] * B, device=dev).long()
-    eps = torch.randn_like(z0)
+    eps = make_eps(student, z0)
     z_tn = diff.q_sample(z0, z_y, t_n)
     z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)        # grad
     t = torch.randint(0, T, (B,), device=dev).long()
@@ -98,7 +98,7 @@ def main():
     # LPIPS single-step path from t=T-1
     z_TT = z_y + diff.kappa * torch.randn_like(z_y)
     tT = torch.tensor([T - 1] * B, device=dev).long()
-    z0_single = predict_x0(diff, student, z_TT, z_y, tT, torch.randn_like(z_y))
+    z0_single = predict_x0(diff, student, z_TT, z_y, tT, make_eps(student, z_y))
     x0_img = vqgan.decode(z0_single, force_not_quantize=True).clamp(-1, 1)
     gt_img = torch.rand(B, 3, 256, 256, device=dev) * 2 - 1
     L_lpips = lp(x0_img, gt_img).mean()

@@ -72,17 +72,43 @@ def enable_grad_checkpointing(model):
 class StochasticUNet(UNetModelSwin):
     """UNetModelSwin + a zero-init noise branch -> stochastic one-step generator.
 
-    forward(x, timesteps, lq, eps): adds noise_proj(eps) after the first input conv.
-    encode_features(x, lq, t): returns the bottleneck feature map for the GAN head.
+    Two injection modes (both zero-init => bit-identical to the frozen teacher at step 0):
+      - "add" (this reconstruction's default): a separate zero-init conv `noise_proj`
+        maps a 3-channel eps to the post-conv width and is ADDED after input_blocks[0].
+      - "concat" (matches the official RSD release, `sampler.py::_add_noise` /
+        `trainer.py:1426`): WIDEN input_blocks[0][0] by `noise_channels` (default 1) input
+        planes, zero-init on the new slice, and CONCAT eps onto the [latent, lq] stack
+        before the first conv. This is the published mechanism; kept behind a flag because
+        it changes the first-conv shape (existing "add" checkpoints don't load into it).
+
+    forward(x, timesteps, lq, eps): injects eps per `noise_mode`.
+    encode_features(x, lq, t, eps): returns the bottleneck feature map for the GAN head.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, noise_mode="add", noise_channels=None, **kwargs):
         super().__init__(*args, **kwargs)
-        in_lat = self.input_blocks[0][0].out_channels  # post-conv width (160)
-        # eps has the latent's channel count (3); project to the post-conv width.
-        self.noise_proj = nn.Conv2d(3, in_lat, 3, padding=1)
-        nn.init.zeros_(self.noise_proj.weight)
-        nn.init.zeros_(self.noise_proj.bias)
+        self.noise_mode = noise_mode
+        # default channel count differs by mode: 3 (add, latent-shaped) vs 1 (concat, official)
+        self.noise_channels = noise_channels if noise_channels is not None \
+            else (1 if noise_mode == "concat" else 3)
+        conv = self.input_blocks[0][0]
+        if noise_mode == "add":
+            in_lat = conv.out_channels  # post-conv width (160)
+            self.noise_proj = nn.Conv2d(self.noise_channels, in_lat, 3, padding=1)
+            nn.init.zeros_(self.noise_proj.weight)
+            nn.init.zeros_(self.noise_proj.bias)
+        elif noise_mode == "concat":
+            # widen the first input conv: [in_ch] -> [in_ch + noise_channels], zero everywhere
+            # then copy the teacher's original in-planes back; the noise slice stays zero.
+            wide = nn.Conv2d(conv.in_channels + self.noise_channels, conv.out_channels,
+                             conv.kernel_size, padding=conv.padding)
+            with torch.no_grad():
+                nn.init.zeros_(wide.weight)
+                wide.weight[:, :conv.in_channels].copy_(conv.weight)
+                wide.bias.copy_(conv.bias)
+            self.input_blocks[0][0] = wide
+        else:
+            raise ValueError(f"noise_mode must be 'add' or 'concat', got {noise_mode!r}")
 
     def _embed_and_concat(self, x, timesteps, lq):
         emb = self.time_embed(
@@ -98,13 +124,25 @@ class StochasticUNet(UNetModelSwin):
         from models.unet import timestep_embedding
         return timestep_embedding(timesteps, self.model_channels)
 
+    def _inject_concat(self, h, eps):
+        """concat mode: append eps onto the [latent, lq] stack before the first conv."""
+        if self.noise_mode == "concat" and eps is not None:
+            h = torch.cat([h, eps.type(self.dtype)], dim=1)
+        return h
+
+    def _inject_add(self, h, ii, eps):
+        """add mode: add noise_proj(eps) after input_blocks[0]."""
+        if self.noise_mode == "add" and ii == 0 and eps is not None:
+            h = h + self.noise_proj(eps.type(self.dtype))
+        return h
+
     def forward(self, x, timesteps, lq=None, eps=None, mask=None):
         h, emb = self._embed_and_concat(x, timesteps, lq)
+        h = self._inject_concat(h, eps)
         hs = []
         for ii, module in enumerate(self.input_blocks):
             h = module(h, emb)
-            if ii == 0 and eps is not None:
-                h = h + self.noise_proj(eps.type(self.dtype))
+            h = self._inject_add(h, ii, eps)
             hs.append(h)
         h = self.middle_block(h, emb)
         for module in self.output_blocks:
@@ -118,13 +156,23 @@ class StochasticUNet(UNetModelSwin):
         if timesteps is None:
             timesteps = torch.zeros(x.shape[0], device=x.device, dtype=torch.long)
         h, emb = self._embed_and_concat(x, timesteps, lq)
+        h = self._inject_concat(h, eps)
         for ii, module in enumerate(self.input_blocks):
             h = module(h, emb)
-            if ii == 0 and eps is not None:
-                h = h + self.noise_proj(eps.type(self.dtype))
+            h = self._inject_add(h, ii, eps)
         # first sub-module of middle_block is the ResBlock -> bottleneck feats
         h = self.middle_block[0](h, emb)
         return h  # [B, 640, 8, 8]
+
+
+def make_eps(model, ref):
+    """Injection noise shaped for `model`'s mode: (B, model.noise_channels, H, W), like `ref`.
+
+    add mode wants 3 planes (latent-shaped), concat mode wants 1 (official). Use this for the
+    injected eps everywhere the student/fake is called — NOT for the residual-shift diffusion
+    noise (that stays latent-shaped, 3-ch, e.g. `z_T = z_y + kappa*randn_like(z_y)`)."""
+    return torch.randn(ref.shape[0], model.noise_channels, *ref.shape[2:],
+                       device=ref.device, dtype=ref.dtype)
 
 
 class DiscHead(nn.Module):
@@ -159,22 +207,34 @@ def build_teacher(cfg, ckpt_path, device, dtype=torch.float32):
 
 
 def build_generator(cfg, teacher_ckpt, device, dtype=torch.float32, grad_ckpt=False,
-                    pretrained=True):
-    """Student or fake: teacher weights + zero-init noise branch (strict=False).
+                    pretrained=True, noise_mode="add", noise_channels=None):
+    """Student or fake: teacher weights + zero-init noise branch.
 
+    noise_mode "add" (default) / "concat" (official RSD) — see StochasticUNet.
     grad_ckpt=True enables Swin-attention gradient checkpointing (training only) —
     large activation-memory save, bit-exact. Leave off for inference.
     pretrained=False skips loading the teacher ckpt (random init) — use when the caller
     immediately load_state_dict's a full student ckpt over it (avoids a wasted 174M read).
     """
-    model = _build_unet(cfg, StochasticUNet)
+    params = OmegaConf.to_container(cfg.model.params, resolve=True)
+    model = StochasticUNet(noise_mode=noise_mode, noise_channels=noise_channels, **params)
     if pretrained:
-        sd = torch.load(teacher_ckpt, map_location="cpu")
+        sd = _strip_module(torch.load(teacher_ckpt, map_location="cpu"))
         sd = sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
-        missing, unexpected = model.load_state_dict(_strip_module(sd), strict=False)
-        # only noise_proj.* should be missing from the ckpt
-        assert all("noise_proj" in m for m in missing), f"unexpected missing: {missing}"
-        assert not unexpected, f"unexpected keys: {unexpected}"
+        if model.noise_mode == "concat":
+            # teacher's first conv is narrower than our widened one; graft the teacher planes
+            # into the leading slice (noise slice stays zero-init) so load stays strict.
+            key = "input_blocks.0.0.weight"
+            tw = sd[key]
+            w = model.state_dict()[key].clone()   # zeros on the noise slice
+            w[:, :tw.shape[1]].copy_(tw)
+            sd = {**sd, key: w}
+            model.load_state_dict(sd, strict=True)
+        else:
+            missing, unexpected = model.load_state_dict(sd, strict=False)
+            # only noise_proj.* should be missing from the ckpt
+            assert all("noise_proj" in m for m in missing), f"unexpected missing: {missing}"
+            assert not unexpected, f"unexpected keys: {unexpected}"
     if grad_ckpt:
         enable_grad_checkpointing(model)
     return model.to(device, dtype)
