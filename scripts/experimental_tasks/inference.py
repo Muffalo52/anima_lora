@@ -664,6 +664,6 @@ def cmd_test_byg(extra):
     raise SystemExit(
         "exp-test-byg: BYG inference (source-concat patch install + ref encode) "
         "is not wired yet — see the P2 inference step in "
-        "docs/proposal/byg_unpaired_editing.md. Training (exp-byg) is functional; "
+        "bench/byg/README.md. Training (exp-byg) is functional; "
         "the trained checkpoint is a plain LoRA loadable via --lora_weight."
     )

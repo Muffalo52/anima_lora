@@ -1,6 +1,6 @@
 """Straight-Through Estimation blend for flow-matching cycle/reverse losses.
 
-BYG (`docs/proposal/byg_unpaired_editing.md`, paper arXiv 2606.03911 §4.3,
+BYG (`bench/byg/README.md`, paper arXiv 2606.03911 §4.3,
 Eq. 4) decouples *what a forward sees* from *what gradients flow through* when
 a loss wants clean conditioning but the only differentiable estimate is a
 blurry one-step prediction:

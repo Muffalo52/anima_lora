@@ -9,7 +9,8 @@ step and a parameter-free conditioning patch.
 
 - Paper: *Bootstrap Your Generator: Unpaired Visual Editing with Flow Matching*
   (Tewel, Atzmon, Chechik, Wolf; arXiv 2606.03911), Alg. 1.
-- Proposal / design rationale: `docs/proposal/byg_unpaired_editing.md`.
+- Design rationale + Phase-0 validation gate: `bench/byg/README.md`
+  (demoted from `docs/proposal/` 2026-07-02 — re-propose after the gate passes).
 - Code: `networks/methods/byg.py` (`BYGMethodAdapter` + `BYGConditioning`),
   `library/training/forward/ste.py`, `library/datasets/base.py` (sidecar loader),
   `scripts/byg/build_edit_tuples.py` (data), `configs/methods/byg.toml`.
@@ -251,5 +252,5 @@ escape hatch for methods whose objective isn't a single FM regression.
 - 🔜 **VLM tuples** (`--vlm`) — App. D.1 Qwen3-VL data for style edits, beyond
   the tag-swap color edits.
 
-See `docs/proposal/byg_unpaired_editing.md` for the full design and the P2
+See `bench/byg/README.md` for the full design and the P2
 inference plan.

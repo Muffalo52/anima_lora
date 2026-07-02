@@ -1,4 +1,69 @@
-# byg_unpaired_editing — Bootstrap Your Generator: unpaired instruction editing for Anima
+# bench/byg — BYG (Bootstrap Your Generator) unpaired instruction editing: validation gate + design reference
+
+> **Status (2026-07-02): demoted from `docs/proposal/` — validate before
+> re-proposing.** Training is built and functional (`make exp-byg`, see
+> `docs/experimental/byg.md`), but the method's supervision ceiling is
+> suspect on Anima specifically, and inference is not wired yet — so nothing
+> quality-relevant has been measured. This doc now lives with the bench: the
+> Phase-0 gate below decides whether the method earns a real proposal slot
+> (VLM data phase, promotion to `docs/methods/`) or gets shelved.
+
+## Why demoted — the supervision ceiling
+
+Strip the three tricks (bootstrap, cycle, STE routing) and the actual training
+signal is the DDS directional prior `v_tgt − v_src` — the velocity difference
+the **frozen base** predicts between source and target captions. BYG cannot
+teach an edit the base can't already express through captions; it repackages
+base caption-following as instruction-conditioning. Two settled repo findings
+cut against that signal being strong here:
+
+1. **Text drive is front-loaded** (`bench/cross_attn_drive/`,
+   `project_crossattn_drive_frontloaded`): caption-induced velocity difference
+   peaks at σ=1 and decays to a ~0.02 floor; below σ≈0.85 text mostly
+   *rescales* the base velocity. BYG samples `t ~ U(0,1)`, so `L_dir` is
+   plausibly low-SNR over most of the training distribution. The paper trained
+   FLUX — this substrate mismatch is unmeasured.
+2. **Base caption capability is the known bottleneck**
+   (`project_tag_boost_late_sigma_kill`, `project_lora_crossattn_learns_labeled_only`):
+   cross-attn only discriminates *labeled* tags. If the base can't tell
+   `p_src` from `p_tgt` for an edit type, the prior is noise for that type.
+
+Plus the paper-owned caveats: identity-collapse failure mode (four-loss
+balancing act), object removal structurally weak, headline evidence is manual
+best-of-4 + LLM-judge win-rates (soft) — the ablation table is the trustworthy
+part.
+
+## Phase-0 gate (in order — each step gates the next)
+
+1. **Prior-SNR probe** (cheap, before any training): measure
+   `‖v_tgt − v_src‖ / ‖v_src‖` across σ on real tag-swap tuples, reusing the
+   `bench/cross_attn_drive/` machinery. If the directional signal sits at the
+   rescale floor below σ≈0.85, the effective supervision is confined to the
+   first few steps of the rollout grid — quantify how much of `t ~ U(0,1)`
+   actually carries signal before spending training compute.
+2. **Wire inference** (`exp-test-byg`): install + prime the `BYGConditioning`
+   source-concat patch at generation time (mirrors the EasyControl KV-prefill
+   path). Without this, collapse-watch validation cannot run and training is
+   blind.
+3. **Tag-swap color-edit run** (~1–2k steps, hours on current hardware):
+   watch for (a) identity collapse (high source-pres, near-zero edit-success),
+   (b) `L_dir` stuck at chance (predicted by finding 1 above), (c) does a
+   color edit visibly happen at all.
+4. **Only if 3 passes**: commit to the VLM tuple phase (App. D.1, the style
+   edits that are the method's actual selling point) and re-propose.
+
+Existing probes in this dir: `grad_parity.py` (reentrant-checkpoint grad-drop
+regression guard, see `project_unsloth_reentrant_drops_grad`) and
+`y0_fidelity.py` (bootstrap-target ỹ_0 fidelity vs rollout NFE / warped σ grid).
+
+---
+
+Everything below is the original design rationale (formerly
+`docs/proposal/byg_unpaired_editing.md`), kept as reference for the built
+implementation (`networks/methods/byg.py`) and for the inference/VLM phases if
+the gate passes.
+
+## Original proposal — Bootstrap Your Generator: unpaired instruction editing for Anima
 
 A *training-based* instruction-editing adapter for the Anima DiT that needs
 **no paired (source, edited) data and no external reward model** — only

@@ -2,7 +2,7 @@
 
 Paper: *Bootstrap Your Generator: Unpaired Visual Editing with Flow Matching*
 (Tewel, Atzmon, Chechik, Wolf; arXiv 2606.03911). Proposal:
-``docs/proposal/byg_unpaired_editing.md``.
+``bench/byg/README.md``.
 
 BYG trains a **plain rank-64 LoRA** to follow edit instructions with *no paired
 (source, edited) data and no reward model* — only unpaired images plus
