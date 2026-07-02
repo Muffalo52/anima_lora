@@ -52,14 +52,16 @@ def cmd_lora(extra):
 def cmd_register(extra):
     """Register-token adapter on a FROZEN Anima DiT (docs/proposal/headroom_register_tokens.md).
 
-    DSR-style register tokens + a trained self-attn QKV surface
-    (``networks/methods/register.py`` / ``configs/methods/register.toml``). Ships
-    eager (the config forces ``torch_compile=false`` / ``blocks_to_swap=0``).
-    Override knobs via ``--network_args`` or the config, e.g.::
+    DSR-style register tokens inserted at ``insert_block`` (default 8 — DSR's
+    "starting block" sweet spot, Tab. 9) + a trained self-attn QKV surface
+    (``networks/methods/register.py`` / ``configs/methods/register.toml``).
+    Compile is supported (train.py widens the dynamic-seq bound by K); block
+    swap stays forced off. Override knobs via ``--network_args`` or the config::
 
-        make register                                     # K36 mid-block unfrozen QKV, arm B
+        make register                                     # K36 @ block 8, unfrozen QKV, arm B
         make register ARGS="--network_args num_registers=16 qkv_mode=lora"
         make register ARGS="--network_args num_registers=0"   # LoRA-only drift control (arm L)
+        make register ARGS="--network_args insert_block=0"    # entry insertion (RQ3 geometry)
 
     Inference is the ComfyUI node ``custom_nodes/comfyui-anima-register`` (kept
     live — register tokens can't merge into DiT weights)."""

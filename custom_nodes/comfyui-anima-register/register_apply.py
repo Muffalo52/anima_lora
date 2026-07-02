@@ -16,8 +16,10 @@ What it does, faithfully mirroring the training mechanism:
   per component and add it onto ``q_proj``/``k_proj``/``v_proj`` — a direct match,
   zero fusion logic. **This is the q/k/v fix.**
 * **Register tokens.** ``K`` learned tokens are concatenated onto the self-attn
-  sequence at the block-stack entry, carried through every block (they attend and
-  are attended to, and get a residual each block), and stripped before the final
+  sequence at block ``insert_block`` (DSR's "starting block"; 0 = stack entry —
+  the default for pre-``ss_insert_block`` checkpoints), carried through the
+  remaining blocks (they attend and are attended to, and get a residual each
+  block), and stripped before the final
   layer. Rope-exempt: the cosmos rope is a per-position ``(head_dim//2, 2, 2)``
   stack of 2×2 rotation matrices, so register rows get the **2×2 identity**
   (``[[1,0],[0,1]]``) — no rotation. Comfy keeps the ``(B,T,H,W,D)`` patch grid,
@@ -49,12 +51,15 @@ class RegisterComfyAdapter:
         self.qkv_mode = config.get("qkv_mode", "unfrozen")
         self.target_blocks = list(config["target_blocks"])
         self.scale = float(config.get("scale", 1.0))
+        self.insert_block = int(config.get("insert_block", 0))
         self.strength = float(strength)
         self._dm = None  # resident diffusion_model this was applied to (identity check)
 
         # Register embedding (arm B). Arm A / K=0 → no token injection.
         reg = state_dict.get("register")
-        self.register = reg if (reg is not None and self.K > 0 and self.arm == "B") else None
+        self.register = (
+            reg if (reg is not None and self.K > 0 and self.arm == "B") else None
+        )
 
         # Fold the QKV surface into one (inner, D) ΔW per component per block.
         self.deltas: dict[int, dict[str, torch.Tensor]] = {}
@@ -78,7 +83,7 @@ class RegisterComfyAdapter:
 
         reg = None
         if self.register is not None:
-            reg = (self.register.to(device=dev, dtype=dt) * self.strength)
+            reg = self.register.to(device=dev, dtype=dt) * self.strength
 
         deltas = {
             bi: {c: t.to(device=dev, dtype=dt) * self.strength for c, t in comp.items()}
@@ -109,6 +114,7 @@ class RegisterComfyAdapter:
         state = {
             "register": reg,
             "K": self.K if reg is not None else 0,
+            "insert_block": self.insert_block,
             "orig_forward": dm._forward,
             "orig_proj_fwd": orig_proj_fwd,
         }
@@ -135,7 +141,9 @@ def _identity_rope_rows(rope_blk: torch.Tensor, k: int) -> torch.Tensor:
     return eye.view(1, 1, 1, 1, 2, 2).expand(1, k, 1, d_half, 2, 2)
 
 
-def _register_forward(self, x, timesteps, context, fps=None, padding_mask=None, **kwargs):
+def _register_forward(
+    self, x, timesteps, context, fps=None, padding_mask=None, **kwargs
+):
     """MiniTrainDIT._forward with K register tokens injected around the block loop.
 
     Copies the comfy predict2 forward verbatim except for the three register
@@ -147,6 +155,7 @@ def _register_forward(self, x, timesteps, context, fps=None, padding_mask=None, 
     st = self._anima_register_state
     K = st["K"]
     reg = st["register"]
+    insert_block = st["insert_block"]
 
     orig_shape = list(x.shape)
     x = comfy.ldm.common_dit.pad_to_patch_size(
@@ -187,23 +196,32 @@ def _register_forward(self, x, timesteps, context, fps=None, padding_mask=None, 
         x_B_T_H_W_D = x_B_T_H_W_D.float()
 
     # --- register injection (native-flatten so appending K on the seq axis is
-    #     clean; valid for T==1 since adaLN modulation broadcasts over H,W) ---
+    #     clean; valid for T==1 since adaLN modulation broadcasts over H,W).
+    #     Registers enter at block `insert_block` (DSR's "starting block");
+    #     blocks before it run at the bare L. ---
     x_flat = x_B_T_H_W_D.reshape(B, 1, L, 1, D)
+    r = rope_ext = None
     if K > 0:
-        r = (reg.to(dtype=x_flat.dtype) * 1.0).view(1, 1, K, 1, D).expand(B, -1, -1, -1, -1)
-        x_flat = torch.cat([x_flat, r], dim=2)  # (B,1,L+K,1,D)
+        r = reg.to(dtype=x_flat.dtype).view(1, 1, K, 1, D).expand(B, -1, -1, -1, -1)
         rope = block_kwargs["rope_emb_L_1_1_D"]  # (1,L,1,D_half,2,2)
         rope_ext = torch.cat([rope, _identity_rope_rows(rope, K)], dim=1)
-        block_kwargs["rope_emb_L_1_1_D"] = rope_ext
+        if insert_block == 0:
+            x_flat = torch.cat([x_flat, r], dim=2)  # (B,1,L+K,1,D)
+            block_kwargs["rope_emb_L_1_1_D"] = rope_ext
 
-    for block in self.blocks:
+    for bi, block in enumerate(self.blocks):
+        if K > 0 and insert_block > 0 and bi == insert_block:
+            x_flat = torch.cat([x_flat, r], dim=2)  # (B,1,L+K,1,D)
+            block_kwargs["rope_emb_L_1_1_D"] = rope_ext
         x_flat = block(x_flat, t_embedding_B_T_D, context, **block_kwargs)
 
     x_flat = x_flat[:, :, :L, :, :]  # strip registers
     x_B_T_H_W_D = x_flat.reshape(B, T, H, W, D)
 
     x_B_T_H_W_O = self.final_layer(
-        x_B_T_H_W_D.to(context.dtype), t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D
+        x_B_T_H_W_D.to(context.dtype),
+        t_embedding_B_T_D,
+        adaln_lora_B_T_3D=adaln_lora_B_T_3D,
     )
     x_B_C_Tt_Hp_Wp = self.unpatchify(x_B_T_H_W_O)[
         :, :, : orig_shape[-3], : orig_shape[-2], : orig_shape[-1]

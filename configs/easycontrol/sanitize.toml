@@ -119,14 +119,14 @@ caption_dropout_rate = 1.0
 easycontrol_drop_p=0.0
 
 # activation_memory_budget = 0.4 with partitioner_aggressive_recomputation = false
-# peak vram 12.75gb, 1.37 sec
+# peak vram 14.5gb, 1.24 sec
 
-# activation_memory_budget = 0.7 with partitioner_aggressive_recomputation = false
-# peak vram 14.4gb, 1.27 sec
+# activation_memory_budget = 0.7 with partitioner_aggressive_recomputation = true
+# peak vram 14.2gb, 1.27 sec
 
-partitioner_recompute_views = false
-partitioner_aggressive_recomputation = false
-activation_memory_budget = 0.4
+# partitioner_recompute_views = true
+# partitioner_aggressive_recomputation = true
+activation_memory_budget = 0.7
 
 # Diff-weighted FM loss: the twins are near-identical outside the text/bubble
 # regions, so weight the per-pixel loss by ‖z_cond − z_target‖ (blurred, robust-

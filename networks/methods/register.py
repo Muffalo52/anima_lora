@@ -5,9 +5,17 @@ first-class `networks/methods/` adapter driven by `train.py --method register`.
 Same DSR mechanism (arXiv:2605.05206) retrofitted onto a frozen pretrained DiT:
 
 * K non-decoded **register tokens** concatenated onto the *self-attention*
-  sequence at the block-stack entry (`_run_blocks`), carried through every
-  block as a true residual-carrying scratchpad, stripped before unpatchify.
+  sequence at block ``insert_block`` (default 8 — DSR Tab. 9's sweet spot;
+  0 = stack entry), carried through the remaining blocks as a true
+  residual-carrying scratchpad, stripped before unpatchify. DSR's insertion
+  ablation (28-block DiT-XL, K=36): block 0 → FID 5.54, block 8 → 5.33,
+  block 16 → 5.49, block 24 → 5.68 (baseline 5.89) — "registers are most
+  useful when introduced in the early-to-middle part of the generator".
   Rope-exempt (identity cos/sin rows), so no attention-path seq-axis slicing.
+  Mid-stack insertion rides ``forward_pre_hook``s on blocks ≥ ``insert_block``
+  (concat at the insert block, rope swap on every later block — the rope tuple
+  is re-passed per block by ``_run_blocks``), eager and compile-safe (hooks run
+  at block ``__call__`` granularity, outside the compiled ``_forward``).
 * A trained self-attn QKV surface on the target blocks — either a low-rank
   LoRA (`qkv_mode="lora"`) or a full-rank ΔW (`qkv_mode="unfrozen"`, the DSR
   sweet-spot reachability arm, proposal `docs/proposal/headroom_register_tokens.md`).
@@ -34,9 +42,11 @@ Design notes that make this both train-side and ComfyUI-loadable:
 * **Kept-live, non-mergeable.** Register tokens cannot be baked into DiT
   weights; inference keeps the adapter live (mirrors EasyControl).
 
-Ships eager (`torch_compile = false` / `blocks_to_swap = 0` forced in the method
-config): the +K token-count threading through `compile_blocks()` /
-`_derive_token_budget` is out of scope for v1.
+Compile is supported: the constant +K seq growth is threaded through
+``compile_dynamic_seq`` by widening the mark_dynamic bound's *max* by K
+(``train.py`` reads ``network.extra_seq_tokens``; the min stays — blocks before
+``insert_block`` still run at the bare seq). Block swap stays forced off in the
+method config (mid-stack token surgery is unaudited against the offloader).
 """
 
 from __future__ import annotations
@@ -75,13 +85,37 @@ class _QKVSurface(nn.Module):
     concatenated as ``[Δq; Δk; Δv]`` to match its ``[q; k; v]`` layout.
     """
 
-    def __init__(self, in_dim: int, inner_dim: int, qkv_mode: str, rank: int):
+    def __init__(
+        self,
+        in_dim: int,
+        inner_dim: int,
+        qkv_mode: str,
+        rank: int,
+        down_init: str = "kaiming",
+        base_weight: Optional[torch.Tensor] = None,
+    ):
         super().__init__()
         self.qkv_mode = qkv_mode
         if qkv_mode == "lora":
-            # Shared down, per-component up. Up zero-init → no-op at step 0.
-            self.down = nn.Parameter(torch.empty(rank, in_dim))
-            nn.init.kaiming_uniform_(self.down, a=math.sqrt(5))
+            # Shared down, per-component up. Up zero-init → no-op at step 0
+            # regardless of the down init.
+            if down_init == "weight_svd":
+                # OrthoInit-style warm start: seed the shared down with the
+                # top-r RIGHT-singular directions of this block's frozen fused
+                # qkv weight (3·inner, D) — the principal input subspace across
+                # q/k/v jointly, which is exactly what a shared down reads.
+                # Init-only: the basis stays trainable, nothing is frozen.
+                w = base_weight.detach().float()
+                q = min(max(4 * rank, rank + 8), min(w.shape))
+                _, _, v = torch.svd_lowrank(w, q=q, niter=4)
+                self.down = nn.Parameter(v[:, :rank].T.contiguous())
+            elif down_init == "kaiming":
+                self.down = nn.Parameter(torch.empty(rank, in_dim))
+                nn.init.kaiming_uniform_(self.down, a=math.sqrt(5))
+            else:
+                raise ValueError(
+                    f"down_init must be 'kaiming' or 'weight_svd', got {down_init!r}"
+                )
             self.up_q = nn.Parameter(torch.zeros(inner_dim, rank))
             self.up_k = nn.Parameter(torch.zeros(inner_dim, rank))
             self.up_v = nn.Parameter(torch.zeros(inner_dim, rank))
@@ -93,7 +127,11 @@ class _QKVSurface(nn.Module):
     def forward(self, x: torch.Tensor, scale: float) -> torch.Tensor:
         if self.qkv_mode == "lora":
             d = F.linear(x, self.down)
-            dq, dk, dv = F.linear(d, self.up_q), F.linear(d, self.up_k), F.linear(d, self.up_v)
+            dq, dk, dv = (
+                F.linear(d, self.up_q),
+                F.linear(d, self.up_k),
+                F.linear(d, self.up_v),
+            )
             return torch.cat([dq, dk, dv], dim=-1) * scale
         return torch.cat(
             [F.linear(x, self.q), F.linear(x, self.k), F.linear(x, self.v)], dim=-1
@@ -116,6 +154,8 @@ class RegisterNetwork(AdapterNetworkBase):
         lora_rank: int = 8,
         lora_alpha: Optional[float] = None,
         target_blocks=None,
+        insert_block: int = 8,
+        down_init: str = "kaiming",
         init_std: float = 0.02,
         register_lr_scale: float = 100.0,
         multiplier: float = 1.0,
@@ -125,6 +165,11 @@ class RegisterNetwork(AdapterNetworkBase):
             raise ValueError(f"arm must be 'A' or 'B', got {arm!r}")
         if qkv_mode not in ("lora", "unfrozen"):
             raise ValueError(f"qkv_mode must be 'lora' or 'unfrozen', got {qkv_mode!r}")
+        if down_init != "kaiming" and qkv_mode != "lora":
+            raise ValueError(
+                f"down_init={down_init!r} only applies to qkv_mode='lora' "
+                f"(got qkv_mode={qkv_mode!r})"
+            )
         # Hide the frozen DiT from nn.Module registration so self.parameters()
         # stays adapter-only (the frozen-base trick, cf. EasyControl).
         object.__setattr__(self, "_dit", unet)
@@ -141,15 +186,30 @@ class RegisterNetwork(AdapterNetworkBase):
             self.register_buffer("register", torch.zeros(max(self.K, 0), self.D))
 
         n_blocks = len(unet.blocks)
+        self.insert_block = int(insert_block)
+        if not (0 <= self.insert_block < n_blocks):
+            raise ValueError(
+                f"insert_block must be in [0, {n_blocks}), got {self.insert_block}"
+            )
         self.target_blocks = _parse_target_blocks(target_blocks, n_blocks)
         self.lora_rank = int(lora_rank)
         alpha = lora_alpha if lora_alpha is not None else lora_rank
         self.scale = alpha / lora_rank if self.lora_rank else 1.0
 
-        inner_dim = unet.blocks[self.target_blocks[0]].self_attn.qkv_proj.out_features // 3
+        inner_dim = (
+            unet.blocks[self.target_blocks[0]].self_attn.qkv_proj.out_features // 3
+        )
+        self.down_init = down_init
         self.qkv = nn.ModuleDict(
             {
-                str(bi): _QKVSurface(self.D, inner_dim, qkv_mode, self.lora_rank)
+                str(bi): _QKVSurface(
+                    self.D,
+                    inner_dim,
+                    qkv_mode,
+                    self.lora_rank,
+                    down_init=down_init,
+                    base_weight=unet.blocks[bi].self_attn.qkv_proj.weight,
+                )
                 for bi in self.target_blocks
             }
         )
@@ -163,6 +223,9 @@ class RegisterNetwork(AdapterNetworkBase):
         self._orig_run_blocks = None
         self._orig_qkv_fwd: dict[int, object] = {}
         self._orig_native_flatten = None
+        self._hook_handles: list = []
+        # per-forward (reg, rope_ext) handed to the insert-block pre-hooks
+        self._inject = None
         # relocation-crossover readouts (training-time adoption gate; no-grad)
         self.last_reg_ratio: Optional[float] = None
         self.last_patch_sink_ratio: Optional[float] = None
@@ -196,6 +259,8 @@ class RegisterNetwork(AdapterNetworkBase):
             "ss_qkv_mode": self.qkv_mode,
             "ss_lora_rank": str(self.lora_rank),
             "ss_scale": str(self.scale),
+            "ss_insert_block": str(self.insert_block),
+            "ss_down_init": self.down_init,
             "ss_target_blocks": json.dumps(self.target_blocks),
             "ss_model_channels": str(self.D),
             "ss_num_blocks": str(len(self._dit.blocks)),
@@ -225,44 +290,90 @@ class RegisterNetwork(AdapterNetworkBase):
             # x_padded: (B, 1, seq, 1, D) under native-flatten.
             B = x_padded.shape[0]
             seq = x_padded.shape[2]
+            x_ext = x_padded
             if net.K > 0:
                 reg = net.register.to(dtype=x_padded.dtype, device=x_padded.device)
-                reg = (reg * net.multiplier).view(1, 1, net.K, 1, net.D).expand(
-                    B, -1, -1, -1, -1
+                reg = (
+                    (reg * net.multiplier)
+                    .view(1, 1, net.K, 1, net.D)
+                    .expand(B, -1, -1, -1, -1)
                 )
-                x_ext = torch.cat([x_padded, reg], dim=2)  # (B, 1, seq+K, 1, D)
+                rope_ext = None
                 rope = block_kwargs.get("rope_cos_sin")
                 if rope is not None:
                     cos, sin = rope  # each (seq, 1, 1, D_head)
                     pad_shape = (net.K,) + tuple(cos.shape[1:])
-                    cos_ext = torch.cat([cos, cos.new_ones(pad_shape)], dim=0)
-                    sin_ext = torch.cat([sin, sin.new_zeros(pad_shape)], dim=0)
-                    block_kwargs = {**block_kwargs, "rope_cos_sin": (cos_ext, sin_ext)}
-            else:  # K=0 — LoRA-only drift control
-                x_ext = x_padded
+                    rope_ext = (
+                        torch.cat([cos, cos.new_ones(pad_shape)], dim=0),
+                        torch.cat([sin, sin.new_zeros(pad_shape)], dim=0),
+                    )
+                if net.insert_block == 0:
+                    x_ext = torch.cat([x_padded, reg], dim=2)  # (B, 1, seq+K, 1, D)
+                    if rope_ext is not None:
+                        block_kwargs = {**block_kwargs, "rope_cos_sin": rope_ext}
+                else:
+                    # mid-stack insertion: the pre-hooks on blocks >= insert_block
+                    # concat/rope-swap; blocks before it run at the bare seq.
+                    net._inject = (reg, rope_ext)
 
-            out = net._orig_run_blocks(
-                x_ext,
-                t_embedding_B_T_D,
-                crossattn_emb,
-                attn_params,
-                capture_blocks=capture_blocks,
-                feature_sink=feature_sink,
-                stop_after_block=stop_after_block,
-                **block_kwargs,
-            )
+            try:
+                out = net._orig_run_blocks(
+                    x_ext,
+                    t_embedding_B_T_D,
+                    crossattn_emb,
+                    attn_params,
+                    capture_blocks=capture_blocks,
+                    feature_sink=feature_sink,
+                    stop_after_block=stop_after_block,
+                    **block_kwargs,
+                )
+            finally:
+                net._inject = None
             # relocation crossover (sparse sink → track top-0.2%/median outlier).
+            # Guarded on actual seq growth: an early-exit forward that stops
+            # before insert_block never received the registers.
             with torch.no_grad():
                 pt = out[:, :, :seq, :, :].float().norm(dim=-1).flatten()
                 med = pt.median().clamp_min(1e-6)
                 k = max(1, int(0.002 * pt.numel()))
                 net.last_patch_sink_ratio = (pt.topk(k).values.mean() / med).item()
-                if net.K > 0:
+                if net.K > 0 and out.shape[2] > seq:
                     rt = out[:, :, seq:, :, :].float().norm(dim=-1).flatten()
                     net.last_reg_ratio = (rt.max() / med).item()
             return out[:, :, :seq, :, :]  # strip registers before unpatchify
 
         anima._run_blocks = wrapped_run_blocks
+
+        # Mid-stack insertion (DSR "starting block"): concat at insert_block's
+        # entry, and swap in the extended rope on every block >= insert_block —
+        # _run_blocks re-passes the ORIGINAL rope tuple to each block, so the
+        # insert-block concat alone would leave later blocks with a seq-length
+        # rope against seq+K tokens. Pre-hooks run eagerly at block __call__,
+        # outside the compiled _forward, so this is compile-safe.
+        if self.K > 0 and self.insert_block > 0:
+            insert_at = self.insert_block
+
+            def make_pre_hook(bi):
+                def pre_hook(module, args, kwargs):
+                    inj = net._inject
+                    if inj is None:
+                        return None
+                    reg, rope_ext = inj
+                    x = args[0]
+                    if bi == insert_at:
+                        x = torch.cat([x, reg], dim=2)
+                    if rope_ext is not None and kwargs.get("rope_cos_sin") is not None:
+                        kwargs = {**kwargs, "rope_cos_sin": rope_ext}
+                    return (x,) + tuple(args[1:]), kwargs
+
+                return pre_hook
+
+            for bi in range(insert_at, len(anima.blocks)):
+                self._hook_handles.append(
+                    anima.blocks[bi].register_forward_pre_hook(
+                        make_pre_hook(bi), with_kwargs=True
+                    )
+                )
 
         # Additive split QKV surface on the target blocks. The delta is fp32;
         # under the training autocast F.linear runs it in the block dtype.
@@ -288,6 +399,9 @@ class RegisterNetwork(AdapterNetworkBase):
         anima._run_blocks = self._orig_run_blocks
         for bi, orig in self._orig_qkv_fwd.items():
             anima.blocks[bi].self_attn.qkv_proj.forward = orig
+        for h in self._hook_handles:
+            h.remove()
+        self._hook_handles = []
         anima._native_flatten = self._orig_native_flatten
         self._orig_qkv_fwd = {}
         self._applied = False
@@ -305,6 +419,8 @@ def _build(unet, network_dim, network_alpha, kwargs) -> RegisterNetwork:
         lora_rank=int(network_dim) if network_dim else 8,
         lora_alpha=float(network_alpha) if network_alpha else None,
         target_blocks=kwargs.get("target_blocks", "all"),
+        insert_block=int(kwargs.get("insert_block", 8)),
+        down_init=str(kwargs.get("down_init", "kaiming")),
         init_std=float(kwargs.get("init_std", 0.02)),
         register_lr_scale=float(kwargs.get("register_lr_scale", 100.0)),
     )
@@ -347,15 +463,26 @@ def create_network_from_weights(
             meta = f.metadata() or {}
             for k in f.keys():
                 weights_sd[k] = f.get_tensor(k)
+    rank = int(meta.get("ss_lora_rank", kwargs.get("lora_rank", 8)))
+    # scale = alpha/rank was stamped at save; rebuild alpha so lora-mode
+    # checkpoints trained with alpha != rank reload at the trained strength.
+    alpha = float(meta["ss_scale"]) * rank if "ss_scale" in meta else None
     net = RegisterNetwork(
         unet,
-        num_registers=int(meta.get("ss_num_registers", kwargs.get("num_registers", 36))),
+        num_registers=int(
+            meta.get("ss_num_registers", kwargs.get("num_registers", 36))
+        ),
         arm=str(meta.get("ss_arm", kwargs.get("arm", "B"))),
         qkv_mode=str(meta.get("ss_qkv_mode", kwargs.get("qkv_mode", "unfrozen"))),
-        lora_rank=int(meta.get("ss_lora_rank", kwargs.get("lora_rank", 8))),
+        lora_rank=rank,
+        lora_alpha=alpha,
         target_blocks=json.loads(meta["ss_target_blocks"])
         if "ss_target_blocks" in meta
         else kwargs.get("target_blocks", "all"),
+        # pre-insert_block checkpoints trained with entry insertion — default 0.
+        insert_block=int(meta.get("ss_insert_block", kwargs.get("insert_block", 0))),
+        # down_init intentionally not restored — load_state_dict overwrites the
+        # init, and re-running the SVD at load time would be wasted work.
     )
     net.load_state_dict(weights_sd, strict=False)
     net.set_multiplier(float(multiplier))

@@ -79,7 +79,9 @@ def _load_adapter(path: str, strength: float) -> RegisterComfyAdapter:
         for k in f.keys():
             state_dict[k] = f.get_tensor(k)
     if "ss_num_registers" not in meta:
-        raise ValueError(f"{p} is not a register adapter (no ss_num_registers metadata)")
+        raise ValueError(
+            f"{p} is not a register adapter (no ss_num_registers metadata)"
+        )
 
     config = {
         "num_registers": int(meta["ss_num_registers"]),
@@ -87,6 +89,8 @@ def _load_adapter(path: str, strength: float) -> RegisterComfyAdapter:
         "qkv_mode": meta.get("ss_qkv_mode", "unfrozen"),
         "target_blocks": json.loads(meta["ss_target_blocks"]),
         "scale": float(meta.get("ss_scale", 1.0)),
+        # pre-insert_block checkpoints trained with entry insertion — default 0
+        "insert_block": int(meta.get("ss_insert_block", 0)),
     }
     log.info("loaded register adapter %s (%s)", p.name, config)
     return RegisterComfyAdapter(state_dict, config, strength=strength)
@@ -106,7 +110,10 @@ class AnimaRegisterAdapter:
             "optional": {
                 # Non-empty wins over the dropdown — for a path outside the roots.
                 "path_override": ("STRING", {"default": "", "multiline": False}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
+                "strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05},
+                ),
             },
         }
 
@@ -115,7 +122,9 @@ class AnimaRegisterAdapter:
     FUNCTION = "apply"
     CATEGORY = "anima"
 
-    def apply(self, model, adapter_name: str, path_override: str = "", strength: float = 1.0):
+    def apply(
+        self, model, adapter_name: str, path_override: str = "", strength: float = 1.0
+    ):
         sel = (path_override or "").strip() or adapter_name
         if sel == _NO_ADAPTERS:
             raise ValueError(
