@@ -49,6 +49,23 @@ def cmd_lora(extra):
     train("lora", extra)
 
 
+def cmd_register(extra):
+    """Register-token adapter on a FROZEN Anima DiT (docs/proposal/headroom_register_tokens.md).
+
+    DSR-style register tokens + a trained self-attn QKV surface
+    (``networks/methods/register.py`` / ``configs/methods/register.toml``). Ships
+    eager (the config forces ``torch_compile=false`` / ``blocks_to_swap=0``).
+    Override knobs via ``--network_args`` or the config, e.g.::
+
+        make register                                     # K36 mid-block unfrozen QKV, arm B
+        make register ARGS="--network_args num_registers=16 qkv_mode=lora"
+        make register ARGS="--network_args num_registers=0"   # LoRA-only drift control (arm L)
+
+    Inference is the ComfyUI node ``custom_nodes/comfyui-anima-register`` (kept
+    live — register tokens can't merge into DiT weights)."""
+    train("register", extra)
+
+
 def cmd_turbo(extra):
     """Turbo Anima — DP-DMD distillation (docs: docs/methods/turbo.md).
 

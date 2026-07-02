@@ -1,0 +1,62 @@
+# Anima Register Adapter — ComfyUI node
+
+Run a **register-token adapter** (DSR-style non-decoded self-attention tokens +
+trained self-attn QKV surface) on a stock Anima MODEL. Train one with
+`train.py --method register` (`networks/methods/register.py`,
+`configs/methods/register.toml`). This is the inference/eyeball vehicle for the
+`docs/proposal/headroom_register_tokens.md` line — there is no automated Anima
+quality reward, so a human-in-ComfyUI A/B is the quality gate.
+
+## Node
+
+| Node | In → Out | Purpose |
+|------|----------|---------|
+| **Anima Register Adapter** | `MODEL`, `adapter_name` (+ `path_override`, `strength`) → `MODEL` | Loads a register adapter and patches the model so a downstream KSampler runs with registers live. |
+
+`adapter_name` is a dropdown of register adapters discovered under `output/ckpt/`,
+`output/temp/`, or `bench/headroom/results/` (filtered by the `ss_num_registers`
+header, so unrelated safetensors don't show). `path_override` (STRING) loads one
+from anywhere. `strength` scales the register tokens + QKV ΔW (1.0 = as trained).
+
+## Wiring
+
+```
+UNETLoader ─► Anima Register Adapter ─► KSampler ─► VAEDecode
+```
+
+## Comfy-native (the q/k/v fix)
+
+The training-side adapter patches the DiT's **fused** `self_attn.qkv_proj` and
+wraps `_run_blocks`. ComfyUI's Anima runs `comfy.ldm.cosmos.predict2.MiniTrainDIT`,
+which has **split** `q_proj`/`k_proj`/`v_proj` and an inline block loop (no
+`_run_blocks`). So `register_apply.py` is a from-scratch reimplementation against
+the comfy backbone (the pattern the EasyControl node used — no vendored training
+code):
+
+* The checkpoint stores the QKV surface **already split** into q/k/v (a `lora`
+  mode is folded to a single `(inner, D)` ΔW per component on load), so each
+  delta adds directly onto its own projection — zero fusion logic.
+* Register tokens are concatenated on the self-attn sequence, carried through the
+  blocks, and stripped before the final layer. Comfy keeps the `(B,T,H,W,D)`
+  patch grid, so the forward is reimplemented to native-flatten to `(B,1,L+K,1,D)`
+  around the block loop (valid because Anima is image-only, `T==1`). Registers
+  are rope-exempt: the cosmos rope is a per-position `(head_dim//2, 2, 2)` stack
+  of 2×2 rotation matrices, so register rows get the **2×2 identity**.
+
+## Constraints
+
+* **Do NOT stack with the Block Compile node** — the register mechanism runs
+  eager; a compiled block graph is not supported.
+* Supports both trained arms: `qkv_mode="lora"` (low-rank) and `qkv_mode="unfrozen"`
+  (full-rank ΔW) — read from the checkpoint `ss_qkv_mode` metadata.
+* The adapter is (re)built and applied at the first sampling step against the
+  resident `diffusion_model`, so it survives ComfyUI's clone/reload/recompile.
+
+## Status
+
+The mechanism is verified headless — with K=0 and a zero QKV delta the
+reimplemented forward is **bit-exact** to comfy's original `MiniTrainDIT._forward`
+(the native-flatten reshape + rope handling round-trip losslessly), K>0 strips
+registers and changes the output, and the split q/k/v ΔW patch is live. Still
+smoke-test end-to-end against a live ComfyUI instance (real weights, one sampled
+image that decodes) before relying on it.

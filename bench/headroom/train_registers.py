@@ -21,6 +21,7 @@ Run:
 
 import argparse
 import glob
+import json
 import os
 import random
 import re
@@ -90,6 +91,21 @@ def main():
     p.add_argument("--num_registers", type=int, default=16)
     p.add_argument("--lora_rank", type=int, default=8)
     p.add_argument(
+        "--qkv_mode",
+        choices=["lora", "unfrozen"],
+        default="lora",
+        help="'lora' = low-rank QKV adapter (RQ3 budget); 'unfrozen' = full-rank "
+        "trainable ΔW on qkv_proj (proposal K36-b8-QKV, max reachability).",
+    )
+    p.add_argument(
+        "--register_lr",
+        type=float,
+        default=None,
+        help="Separate (usually higher, ~1e-2) lr for the register embeddings; "
+        "defaults to --lr. The registers must grow ~14-24x the median patch norm "
+        "to become sinks, which a shared LoRA-scale lr rarely reaches.",
+    )
+    p.add_argument(
         "--target_blocks",
         default="all",
         help="'all' or comma list of block indices for the QKV-LoRA (DSR sweet spot ~mid).",
@@ -139,12 +155,23 @@ def main():
         arm=args.arm,
         lora_rank=args.lora_rank,
         target_blocks=tb,
+        qkv_mode=args.qkv_mode,
     ).to(device=device, dtype=torch.bfloat16)
     adapter.apply_to()
     # keep adapter params in fp32 for stable Adam
     for prm in adapter.trainable_parameters():
         prm.data = prm.data.float()
-    opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=args.lr, weight_decay=0.0)
+    reg_lr = args.register_lr if args.register_lr is not None else args.lr
+    if args.register_lr is not None and adapter.register_parameters():
+        groups = [
+            {"params": adapter.qkv_parameters(), "lr": args.lr},
+            {"params": adapter.register_parameters(), "lr": reg_lr},
+        ]
+        opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=0.0)
+    else:
+        opt = torch.optim.AdamW(
+            adapter.trainable_parameters(), lr=args.lr, weight_decay=0.0
+        )
 
     pairs = build_pairs(
         args.data_root, args.max_images, args.seed, args.max_latent_tokens
@@ -152,8 +179,9 @@ def main():
     if not pairs:
         raise SystemExit(f"no cached latent+te pairs under {args.data_root}")
     print(
-        f"arm={args.arm} K={args.num_registers} rank={args.lora_rank} "
-        f"blocks={len(tb)} trainable={adapter.num_trainable():,} pairs={len(pairs)}"
+        f"arm={args.arm} qkv_mode={args.qkv_mode} K={args.num_registers} "
+        f"rank={args.lora_rank} blocks={len(tb)} lr={args.lr} reg_lr={reg_lr} "
+        f"trainable={adapter.num_trainable():,} pairs={len(pairs)}"
     )
 
     out_dir = make_run_dir("headroom", args.label or f"train_arm{args.arm}")
@@ -201,24 +229,45 @@ def main():
         if step % args.log_every == 0 or step == args.max_steps - 1:
             rn, pn = adapter.last_reg_norm, adapter.last_patch_norm
             ratio = rn / pn if pn else float("nan")
+            psr = adapter.last_patch_sink_ratio  # topk-patch / median (the sink)
+            rr = adapter.last_reg_ratio  # max register / median patch (adoption)
             row = {
                 "step": step,
                 "loss": round(loss.item(), 5),
                 "reg_norm": round(rn, 2),
                 "patch_norm": round(pn, 2),
                 "reg_over_patch": round(ratio, 4),
+                "patch_sink_ratio": round(psr, 3) if psr is not None else None,
+                "reg_ratio": round(rr, 3) if rr is not None else None,
             }
             history.append(row)
             print(
                 f"[{step:4d}] loss={row['loss']:.5f} reg_norm={rn:.1f} "
-                f"patch_norm={pn:.1f} reg/patch={ratio:.4f}"
+                f"patch_norm={pn:.1f} reg/patch={ratio:.4f} "
+                f"sink={row['patch_sink_ratio']} reg_ratio={row['reg_ratio']}"
             )
         step += 1
 
-    # save adapter (fp32 trainable tensors) + config
+    # save adapter (fp32 trainable tensors) + config. safetensors is the
+    # canonical/ComfyUI-loadable artifact (config JSON-encoded into the header
+    # metadata, which only takes str values); .pt kept for back-compat with the
+    # bench eval consumers (register_eval.py).
     ckpt = {"config": adapter.config(), "arm": args.arm}
-    sd = {k: v.detach().cpu() for k, v in adapter.state_dict().items()}
+    sd = {
+        k: v.detach().cpu().to(torch.float32).contiguous()
+        for k, v in adapter.state_dict().items()
+    }
     torch.save({"state_dict": sd, "meta": ckpt}, out_dir / "adapter.pt")
+    from safetensors.torch import save_file
+
+    save_file(
+        sd,
+        str(out_dir / "adapter.safetensors"),
+        metadata={
+            "format": "anima-register-v1",
+            "anima_register_config": json.dumps(adapter.config()),
+        },
+    )
 
     crossover = None
     if len(history) >= 2:

@@ -45,6 +45,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class RegisterAdapter(nn.Module):
@@ -57,10 +58,13 @@ class RegisterAdapter(nn.Module):
         lora_alpha: Optional[float] = None,
         target_blocks: Optional[list[int]] = None,
         init_std: float = 0.02,
+        qkv_mode: str = "lora",
     ) -> None:
         super().__init__()
         if arm not in ("A", "B"):
             raise ValueError(f"arm must be 'A' or 'B', got {arm!r}")
+        if qkv_mode not in ("lora", "unfrozen"):
+            raise ValueError(f"qkv_mode must be 'lora' or 'unfrozen', got {qkv_mode!r}")
         # Hide the DiT from nn.Module registration (a list is not a Module) so
         # self.parameters() stays adapter-only and doesn't drag in the frozen DiT.
         self._anima_box = [anima]
@@ -77,17 +81,31 @@ class RegisterAdapter(nn.Module):
         if target_blocks is None:
             target_blocks = list(range(n_blocks))
         self.target_blocks = list(target_blocks)
+        self.qkv_mode = qkv_mode
         self.lora_rank = int(lora_rank)
         self.scale = (lora_alpha if lora_alpha is not None else lora_rank) / lora_rank
 
+        # The self-attn QKV surface is trained one of two ways on the target
+        # blocks. **lora** = low-rank additive adapter (cheap, the RQ3 budget).
+        # **unfrozen** = a full-rank trainable ΔW carried as a separate fp32
+        # parameter (base weight stays frozen — same reachability as unfreezing
+        # qkv_proj, but zero-init so it's a step-0 no-op and merges cleanly).
+        # This is the proposal's K36-b8-QKV arm ("max reachability — the arm the
+        # negative most likely mispriced"), docs/proposal/headroom_register_tokens.md.
         self.lora = nn.ModuleDict()
+        self.qkv_delta = nn.ParameterDict()
         for bi in self.target_blocks:
             qkv = anima.blocks[bi].self_attn.qkv_proj
-            down = nn.Linear(qkv.in_features, self.lora_rank, bias=False)
-            up = nn.Linear(self.lora_rank, qkv.out_features, bias=False)
-            nn.init.kaiming_uniform_(down.weight, a=math.sqrt(5))
-            nn.init.zeros_(up.weight)  # LoRA is a no-op until trained
-            self.lora[str(bi)] = nn.ModuleDict({"down": down, "up": up})
+            if qkv_mode == "lora":
+                down = nn.Linear(qkv.in_features, self.lora_rank, bias=False)
+                up = nn.Linear(self.lora_rank, qkv.out_features, bias=False)
+                nn.init.kaiming_uniform_(down.weight, a=math.sqrt(5))
+                nn.init.zeros_(up.weight)  # LoRA is a no-op until trained
+                self.lora[str(bi)] = nn.ModuleDict({"down": down, "up": up})
+            else:  # unfrozen: full-rank ΔW, zero-init (no-op at step 0)
+                self.qkv_delta[str(bi)] = nn.Parameter(
+                    torch.zeros(qkv.out_features, qkv.in_features)
+                )
 
         self._applied = False
         self._orig_run_blocks = None
@@ -106,10 +124,18 @@ class RegisterAdapter(nn.Module):
 
     # -- trainable surface ---------------------------------------------------
     def trainable_parameters(self):
-        params = [p for p in self.lora.parameters()]
+        params = list(self.lora.parameters()) + list(self.qkv_delta.parameters())
         if self.arm == "B":
             params.append(self.register)
         return params
+
+    def register_parameters(self):
+        """The register embedding(s) only — for a per-group (higher) lr."""
+        return [self.register] if self.arm == "B" else []
+
+    def qkv_parameters(self):
+        """The QKV-adapter surface only (LoRA or full-rank ΔW)."""
+        return list(self.lora.parameters()) + list(self.qkv_delta.parameters())
 
     def num_trainable(self) -> int:
         return sum(p.numel() for p in self.trainable_parameters())
@@ -186,19 +212,33 @@ class RegisterAdapter(nn.Module):
 
         anima._run_blocks = wrapped_run_blocks
 
-        # self-attn QKV-LoRA on the target blocks
+        # self-attn QKV adapter on the target blocks (LoRA or full-rank ΔW).
+        # ΔW is fp32; under the training autocast F.linear runs it in the block
+        # dtype, matching the LoRA path (whose fp32 Linear weights autocast too).
         for bi in self.target_blocks:
             qkv = anima.blocks[bi].self_attn.qkv_proj
             self._orig_qkv_fwd[bi] = qkv.forward
-            lora = self.lora[str(bi)]
 
-            def make_fwd(orig, lora):
-                def fwd(x):
-                    return orig(x) + lora["up"](lora["down"](x)) * adapter.scale
+            if self.qkv_mode == "lora":
+                lora = self.lora[str(bi)]
 
-                return fwd
+                def make_fwd(orig, lora):
+                    def fwd(x):
+                        return orig(x) + lora["up"](lora["down"](x)) * adapter.scale
 
-            qkv.forward = make_fwd(qkv.forward, lora)
+                    return fwd
+
+                qkv.forward = make_fwd(qkv.forward, lora)
+            else:
+                delta = self.qkv_delta[str(bi)]
+
+                def make_fwd_unfrozen(orig, delta):
+                    def fwd(x):
+                        return orig(x) + F.linear(x, delta)
+
+                    return fwd
+
+                qkv.forward = make_fwd_unfrozen(qkv.forward, delta)
 
         self._applied = True
         return self
@@ -219,6 +259,7 @@ class RegisterAdapter(nn.Module):
         return {
             "num_registers": self.K,
             "arm": self.arm,
+            "qkv_mode": self.qkv_mode,
             "lora_rank": self.lora_rank,
             "target_blocks": self.target_blocks,
             "scale": self.scale,

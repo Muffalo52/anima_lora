@@ -1,0 +1,64 @@
+# Register-token adapter — DSR-style register tokens + trained self-attn QKV
+# surface on a FROZEN Anima DiT. Promoted from bench/headroom/ into a first-class
+# method: `train.py --method register` (network at networks/methods/register.py).
+#
+# Mechanism (docs/proposal/headroom_register_tokens.md, Phase-2 sweep):
+#   - K non-decoded register tokens concatenated on the self-attn sequence,
+#     carried through every block, stripped before unpatchify (rope-exempt).
+#   - a trained QKV surface on the mid blocks — full-rank ΔW (qkv_mode=unfrozen,
+#     the "max reachability" arm) or low-rank LoRA (qkv_mode=lora).
+#
+# Defaults are the proposal's K36-b8-QKV sweet-spot arm. arm=B (LEARNABLE
+# registers) is the only shippable arm; arm=A (fixed-zero) is a lesion/control,
+# and num_registers=0 is the honest LoRA-only drift control (arm L). Never ship
+# arm A.
+#
+# Uses base.toml's default LoRA dataset blueprint (standard training data) — no
+# inline blueprint needed. Kept-live at inference (register tokens can't merge
+# into DiT weights); see the ComfyUI node custom_nodes/comfyui-anima-register/.
+
+network_module = "networks.methods.register"
+
+# Register-adapter knobs (parsed by create_network in register.py).
+network_args = [
+    "num_registers=36",       # DSR sweet spot (K=4 floor, K=100 regresses)
+    "arm=B",                  # B = learnable registers (shippable). A = lesion.
+    "qkv_mode=unfrozen",      # full-rank ΔW on qkv_proj (max reachability). or "lora".
+    "target_blocks=8-18",     # mid blocks — DSR inserts at ~block 8
+    "register_lr_scale=100",  # registers get 100× the base lr (see below)
+    "init_std=0.02",
+]
+
+# LoRA rank/alpha — only consumed when qkv_mode=lora; ignored for unfrozen.
+network_dim = 8
+network_alpha = 8
+
+# Base (QKV-surface) lr; the register embeddings train at lr × register_lr_scale
+# (1e-4 × 100 = 1e-2) — they must grow ~14–24× the median patch norm to become
+# sinks, which a shared LoRA-scale lr rarely reaches (proposal §metrics).
+learning_rate = 1e-4
+
+# Proposal targets ~4000 steps/arm; tune epochs to your dataset size. Keep the
+# best checkpoint by the framing/adoption gate, not the last (turbo non-monotonic
+# lesson) — sample + eyeball every save.
+max_train_epochs = 8
+save_every_n_epochs = 2
+checkpointing_epochs = 2
+
+caption_dropout_rate = 0.1
+cache_llm_adapter_outputs = true
+
+# --- Forced hardware requirements (method wins over preset on overlap) -------
+# Compile IS supported: the register mechanism appends a constant K tokens to the
+# self-attn sequence, and train.py widens the dynamic-seq mark_dynamic bound by K
+# (via network.extra_seq_tokens) so the single compiled block graph covers L+K.
+# compile_dynamic_seq auto-enables under torch_compile.
+torch_compile = true
+# No grad checkpointing (the user's chosen fast path — also sidesteps the
+# mark_dynamic/detach_variable recompute hazard entirely). Flip on + raise
+# blocks_to_swap for a low-VRAM card. Block swap stays off: mid-stack token
+# surgery in the wrapped _run_blocks isn't audited against the swap offloader.
+gradient_checkpointing = false
+blocks_to_swap = 0
+
+output_name = "anima_register"

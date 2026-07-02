@@ -118,6 +118,16 @@ easycontrol_cond_noise_max = 0.0
 caption_dropout_rate = 1.0
 easycontrol_drop_p=0.0
 
+# activation_memory_budget = 0.4 with partitioner_aggressive_recomputation = false
+# peak vram 12.75gb, 1.37 sec
+
+# activation_memory_budget = 0.7 with partitioner_aggressive_recomputation = false
+# peak vram 14.4gb, 1.27 sec
+
+partitioner_recompute_views = false
+partitioner_aggressive_recomputation = false
+activation_memory_budget = 0.4
+
 # Diff-weighted FM loss: the twins are near-identical outside the text/bubble
 # regions, so weight the per-pixel loss by ‖z_cond − z_target‖ (blurred, robust-
 # scaled, floor outside the edit region, per-image mean-normalized). Concentrates

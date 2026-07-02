@@ -1681,6 +1681,13 @@ class AnimaTrainer:
             n_token_families, seq_range = getattr(
                 self, "_compile_token_budget", (None, None)
             )
+            # Token-adding adapters (register tokens) grow every forward's seq by a
+            # constant K, so shift the dynamic-seq mark_dynamic bound by K or the
+            # compiled block's bound is violated (ConstraintViolationError). The
+            # family COUNT is unchanged (K is added uniformly), so n stays.
+            extra_seq = int(getattr(network, "extra_seq_tokens", 0) or 0)
+            if extra_seq and seq_range is not None:
+                seq_range = (seq_range[0] + extra_seq, seq_range[1] + extra_seq)
             compile_blocks_for_training(
                 unet,
                 network,

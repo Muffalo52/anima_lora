@@ -27,6 +27,8 @@ Run:
 """
 
 import argparse
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -100,8 +102,29 @@ class MidBlockProbe:
         return ps, rr
 
 
+def _load_blob(path: str) -> dict:
+    """Return {"state_dict", "meta": {"config"}} for either .safetensors or .pt."""
+    p = Path(path)
+    if p.suffix == ".safetensors":
+        from safetensors import safe_open
+
+        sd = {}
+        with safe_open(str(p), framework="pt", device="cpu") as f:
+            meta = f.metadata() or {}
+            for k in f.keys():
+                sd[k] = f.get_tensor(k)
+        return {"state_dict": sd, "meta": {"config": json.loads(meta["anima_register_config"])}}
+    return torch.load(str(p), map_location="cpu", weights_only=False)
+
+
+def _label_for(path: str) -> str:
+    """Readable condition label from the run dir (strip the YYYYMMDD-HHMM- stamp)."""
+    parent = Path(path).parent.name
+    return re.sub(r"^\d{8}-\d{4}-", "", parent) or Path(path).stem
+
+
 def load_adapter(anima, path: str, device) -> RegisterAdapter:
-    blob = torch.load(path, map_location="cpu", weights_only=False)
+    blob = _load_blob(path)
     cfg = blob["meta"]["config"]
     adapter = RegisterAdapter(
         anima,
@@ -109,10 +132,11 @@ def load_adapter(anima, path: str, device) -> RegisterAdapter:
         arm=cfg["arm"],
         lora_rank=cfg["lora_rank"],
         target_blocks=cfg["target_blocks"],
+        qkv_mode=cfg.get("qkv_mode", "lora"),
     ).to(device=device, dtype=torch.bfloat16)
     missing, unexpected = adapter.load_state_dict(blob["state_dict"], strict=False)
     if missing or unexpected:
-        print(f"  load {Path(path).parent.name}: missing={len(missing)} unexpected={len(unexpected)}")
+        print(f"  load {_label_for(path)}: missing={len(missing)} unexpected={len(unexpected)}")
     return adapter
 
 
@@ -120,8 +144,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     add_common_args(p)
     add_model_args(p)
-    p.add_argument("--adapter_a", required=True, help="arm-A adapter.pt")
-    p.add_argument("--adapter_b", required=True, help="arm-B adapter.pt")
+    p.add_argument(
+        "--adapters",
+        nargs="+",
+        default=None,
+        help="one or more adapter.safetensors/.pt to compare against base "
+        "(each labeled by its run dir). Supersedes --adapter_a/--adapter_b.",
+    )
+    p.add_argument("--adapter_a", default=None, help="(legacy) arm-A adapter")
+    p.add_argument("--adapter_b", default=None, help="(legacy) arm-B adapter")
     p.add_argument("--seeds", type=int, default=4)
     p.add_argument("--size", type=int, default=1024)
     p.add_argument("--infer_steps", type=int, default=24)
@@ -153,7 +184,13 @@ def main():
 
     mid = args.mid_block if args.mid_block >= 0 else len(anima.blocks) // 2
 
-    conditions = [("base", None), ("armA", args.adapter_a), ("armB", args.adapter_b)]
+    if args.adapters:
+        adapter_paths = args.adapters
+    elif args.adapter_a or args.adapter_b:
+        adapter_paths = [x for x in (args.adapter_a, args.adapter_b) if x]
+    else:
+        p.error("provide --adapters PATH [PATH ...] (or legacy --adapter_a/--adapter_b)")
+    conditions = [("base", None)] + [(_label_for(x), x) for x in adapter_paths]
     out_dir = make_run_dir("headroom", args.label or "reg_eval")
     img_dir = out_dir / "images"
     if args.save_images:
@@ -207,25 +244,31 @@ def main():
     base_ps = summary["base"]["patch_sink_ratio"]
     verdict = {
         "mid_block": mid,
-        "patch_sink_drop_armA": round(base_ps - summary["armA"]["patch_sink_ratio"], 4),
-        "patch_sink_drop_armB": round(base_ps - summary["armB"]["patch_sink_ratio"], 4),
-        "reg_ratio_armA": summary["armA"]["reg_ratio"],
-        "reg_ratio_armB": summary["armB"]["reg_ratio"],
+        "patch_sink_drop_vs_base": {
+            name: round(base_ps - summary[name]["patch_sink_ratio"], 4)
+            for name, ap in conditions if ap is not None
+        },
+        "reg_ratio": {
+            name: summary[name]["reg_ratio"] for name, ap in conditions if ap is not None
+        },
     }
 
     write_result(out_dir, script=__file__, args=args,
                  metrics={"summary": summary, "verdict": verdict, "rows": rows},
                  label=args.label)
 
+    width = max(6, *(len(n) for n, _ in conditions))
     print("\n=== RELOCATION CROSSOVER (mid block %d) ===" % mid)
-    print(f"{'cond':6} {'patch_sink_ratio':>17} {'reg_ratio':>10} {'border':>8}")
+    print(f"{'cond':{width}} {'patch_sink_ratio':>17} {'reg_ratio':>10} {'border':>8}")
     for name, _ in conditions:
         s = summary[name]
-        print(f"{name:6} {s['patch_sink_ratio']:>17} {s['reg_ratio']:>10} {s['border_score']:>8}")
-    print(f"\npatch-sink drop vs base:  armA {verdict['patch_sink_drop_armA']:+.4f}   "
-          f"armB {verdict['patch_sink_drop_armB']:+.4f}")
-    print(f"register absorption:      armA {verdict['reg_ratio_armA']:.3f}   "
-          f"armB {verdict['reg_ratio_armB']:.3f}")
+        print(f"{name:{width}} {s['patch_sink_ratio']:>17} {s['reg_ratio']:>10} {s['border_score']:>8}")
+    print("\npatch-sink drop vs base / register absorption (reg_ratio):")
+    for name, ap in conditions:
+        if ap is None:
+            continue
+        print(f"  {name:{width}}  drop {verdict['patch_sink_drop_vs_base'][name]:+.4f}   "
+              f"reg_ratio {verdict['reg_ratio'][name]:.3f}")
     print("saved:", out_dir)
 
 

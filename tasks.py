@@ -78,6 +78,12 @@ COMMANDS = {
         training.cmd_lora,
         "LoRA family (lora|tlora|hydralora via configs/methods/lora.toml)",
     ),
+    "register": (
+        training.cmd_register,
+        "Register-token adapter on a frozen DiT (DSR registers + self-attn QKV "
+        "surface; configs/methods/register.toml). Kept-live at inference via the "
+        "comfyui-anima-register node.",
+    ),
     "lora-gui": (
         training.cmd_lora_gui,
         "Train from a self-contained configs/gui-methods/<variant>.toml "
