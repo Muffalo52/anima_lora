@@ -1643,6 +1643,22 @@ class AnimaTrainer:
 
         self.post_process_network(args, accelerator, network, text_encoders, unet)
 
+        # Token-adding adapters (register tokens) do mid-stack token surgery
+        # via block pre-hooks — unaudited against the block-swap offloader
+        # (cf. [[project_blockswap_extra_forwards_gradcache]] for how the
+        # offloader desyncs on unexpected per-step forward patterns).
+        if (
+            int(getattr(network, "extra_seq_tokens", 0) or 0) > 0
+            and args.blocks_to_swap is not None
+            and args.blocks_to_swap > 0
+        ):
+            logger.warning(
+                "Register tokens + blocks_to_swap>0 is unaudited — the "
+                "mid-stack token insertion pre-hooks have not been validated "
+                "against the block-swap offloader. Prefer blocks_to_swap=0 "
+                "(use block compile for memory instead)."
+            )
+
         # apply network to unet and text_encoder
         train_unet = not args.network_train_text_encoder_only
         train_text_encoder = self.is_train_text_encoder(args)

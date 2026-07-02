@@ -154,9 +154,7 @@ def create_network(
         # replaces the spatial_norm block in relational target preprocess (no head).
         # Default-on under use_repa (Phase-0 winner; A/B-validated band-pass) — opt
         # out with repa_target_dog=false to fall back to spatial_norm/raw target.
-        network._repa_target_dog = _as_bool(
-            kwargs.get("repa_target_dog"), default=True
-        )
+        network._repa_target_dog = _as_bool(kwargs.get("repa_target_dog"), default=True)
         network._repa_dog_sigma1_div = float(
             kwargs.get("repa_dog_sigma1_div", 16.0) or 16.0
         )
@@ -575,6 +573,22 @@ def create_network_from_weights(
             f"{len(channel_scales_dict)} modules with baked-in inv_scale"
         )
 
+    # Register tokens (LoRA + registers trained jointly): K comes from the
+    # dot-free ``register_tokens`` key's shape; the insert block leaves no
+    # tensor footprint so it rides the ``ss_register_insert_block`` metadata
+    # stamp (stamped by save_weights whenever K > 0).
+    num_registers = 0
+    register_insert_block = 8
+    _reg_tokens = weights_sd.get("register_tokens")
+    if _reg_tokens is not None:
+        num_registers = int(_reg_tokens.shape[0])
+        register_insert_block = int(file_metadata.get("ss_register_insert_block", 8))
+        logger.info(
+            f"Detected register tokens in checkpoint: K={num_registers}, "
+            f"insert_block={register_insert_block} — network stays kept-live "
+            "(registers cannot merge into DiT weights)."
+        )
+
     # σ-router names: a module has σ routing iff router.weight width > rank (the
     # excess is the σ feature slice). Empty when sigma_feature_dim_detected is None.
     sigma_router_names: List[str] = []
@@ -820,6 +834,8 @@ def create_network_from_weights(
         freq_router_mode=chimera_freq_router_mode,
         freq_router_tau=chimera_freq_router_tau,
         content_router_layer_norm=chimera_content_router_layer_norm,
+        num_registers=num_registers,
+        register_insert_block=register_insert_block,
     )
 
     network = LoRANetwork(text_encoders, unet, cfg, multiplier=multiplier)

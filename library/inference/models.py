@@ -37,6 +37,24 @@ def _is_hydra_moe(path: str) -> bool:
         return False
 
 
+def _has_register_tokens(path: str) -> bool:
+    """Cheap header peek: does this LoRA carry a ``register_tokens`` key?
+
+    LoRA-family checkpoints trained with ``num_registers > 0`` hold K DSR
+    register tokens that ride the self-attn sequence — they can't fold into a
+    static weight merge, so the network must stay live (same treatment as
+    P-GRAFT: ``create_network_from_weights`` + ``apply_to`` dynamic hooks; the
+    register injection installs in ``LoRANetwork.apply_to``).
+    """
+    from safetensors import safe_open
+
+    try:
+        with safe_open(path, framework="pt") as f:
+            return "register_tokens" in f.keys()
+    except Exception:
+        return False
+
+
 def _has_te_keys(path: str) -> bool:
     """Cheap header peek: does this safetensors LoRA carry any ``lora_te_*`` keys?
 
@@ -103,6 +121,7 @@ def attach_adapters(
     pgraft_mode: bool,
     hydra_mode: bool,
     step_expert_mode: bool = False,
+    register_mode: bool = False,
 ) -> None:
     """Attach LoRA-family adapters that ride as dynamic forward hooks.
 
@@ -117,14 +136,28 @@ def attach_adapters(
     ``pgraft_mode`` / ``hydra_mode`` are passed in (not recomputed) because the
     caller already derives them to decide whether to skip the static merge.
     """
-    # P-GRAFT: attach LoRA as dynamic hooks (can be toggled mid-denoising)
-    if pgraft_mode and not hydra_mode:
+    # P-GRAFT / register tokens: attach LoRA as dynamic hooks. P-GRAFT wants
+    # the toggle; register-token checkpoints CAN'T merge (K sequence-riding
+    # tokens), so both skip the static merge and keep the network live.
+    if (pgraft_mode or register_mode) and not hydra_mode:
+        from safetensors import safe_open
         from networks import lora_anima
 
-        logger.info("P-GRAFT: Loading LoRA as dynamic hooks (not static merge)")
+        logger.info(
+            "%s: Loading LoRA as dynamic hooks (not static merge)",
+            "P-GRAFT" if pgraft_mode else "register tokens",
+        )
         for lora_weight_path in args.lora_weight:
+            # Metadata carries ss_register_insert_block (and the three-axis
+            # stamps) — load_file() drops __metadata__, so read it separately.
+            with safe_open(lora_weight_path, framework="pt") as f:
+                lora_metadata = dict(f.metadata() or {})
             lora_sd = load_file(lora_weight_path)
-            lora_sd = {k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")}
+            lora_sd = {
+                k: v
+                for k, v in lora_sd.items()
+                if k.startswith("lora_unet_") or k == "register_tokens"
+            }
 
             multiplier = (
                 args.lora_multiplier
@@ -138,6 +171,7 @@ def attach_adapters(
                 text_encoders=[],
                 unet=model,
                 weights_sd=lora_sd,
+                metadata=lora_metadata,
                 for_inference=True,
             )
             network.apply_to([], model, apply_text_encoder=False, apply_unet=True)
@@ -179,7 +213,9 @@ def attach_adapters(
                 logger.info("HydraLoRA: chimera file — dual-pool routing wired")
             else:
                 lora_sd = {
-                    k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")
+                    k: v
+                    for k, v in lora_sd.items()
+                    if k.startswith("lora_unet_") or k == "register_tokens"
                 }
 
             multiplier = (
@@ -316,12 +352,33 @@ def load_dit_model(
         and len(args.lora_weight) > 0
     )
 
-    # load LoRA weights (skip static merge for P-GRAFT, HydraLoRA moe, and
-    # per-step-expert turbo — all three ride dynamic hooks instead)
+    # Register tokens (LoRA trained with num_registers > 0): the K
+    # sequence-riding tokens can't fold into a static merge — force the
+    # dynamic-hook route (LoRANetwork.apply_to installs the injection).
+    register_mode = False
+    if (
+        not step_expert_mode
+        and args.lora_weight is not None
+        and len(args.lora_weight) > 0
+    ):
+        register_flags = [_has_register_tokens(p) for p in args.lora_weight]
+        if any(register_flags):
+            if len(args.lora_weight) > 1:
+                raise ValueError(
+                    "A register-token LoRA must be loaded alone (one "
+                    "--lora_weight). Its registers are kept-live sequence "
+                    "tokens — composing with statically-merged LoRAs in one "
+                    "invocation is untested."
+                )
+            register_mode = True
+
+    # load LoRA weights (skip static merge for P-GRAFT, HydraLoRA moe,
+    # register tokens, and per-step-expert turbo — all ride dynamic hooks)
     if (
         not pgraft_mode
         and not hydra_mode
         and not step_expert_mode
+        and not register_mode
         and args.lora_weight is not None
         and len(args.lora_weight) > 0
     ):
@@ -371,6 +428,7 @@ def load_dit_model(
         pgraft_mode=pgraft_mode,
         hydra_mode=hydra_mode,
         step_expert_mode=step_expert_mode,
+        register_mode=register_mode,
     )
 
     if getattr(args, "compile", False):

@@ -127,6 +127,7 @@ def pool_dit_tokens_to_grid(
     patch: int,
     gh: int,
     gw: int,
+    trim_tail: int = 0,
 ) -> torch.Tensor:
     """Captured block output → ``(B, gh*gw, D)`` fp32 tokens on the encoder grid.
 
@@ -134,10 +135,17 @@ def pool_dit_tokens_to_grid(
     native-flatten ``(B,1,seq,1,D)``): both flatten to the same row-major
     ``(B, N_dit, D)``, which is verified against the latent patch grid and
     adaptive-avg-pooled down to the encoder ``(gh, gw)`` grid.
+
+    ``trim_tail`` drops that many trailing tokens before the grid check —
+    register tokens (``num_registers`` on the LoRA family) are appended at the
+    END of the self-attn sequence and are non-decoded scratchpad state, not
+    patch content, so they must not enter the alignment loss.
     """
     b = captured.shape[0]
     d_dit = captured.shape[-1]
     tokens = captured.reshape(b, -1, d_dit)
+    if trim_tail > 0:
+        tokens = tokens[:, :-trim_tail]
 
     h_lat, w_lat = latent_hw
     h_dit, w_dit = h_lat // patch, w_lat // patch
@@ -344,6 +352,8 @@ class REPAMethodAdapter(MethodAdapter):
         self._dog_norm_std = 0.0
         # Timestep reweighting of the alignment term (0 = uniform = legacy path).
         self._timestep_weighting = 0.0
+        # Trailing register tokens to drop from the capture (0 = none).
+        self._trim_tokens = 0
         # Optimizer-step clock: train micro-batches, converted with
         # gradient_accumulation_steps at the anneal gate.
         self._train_micro_steps = 0
@@ -392,6 +402,24 @@ class REPAMethodAdapter(MethodAdapter):
         self._timestep_weighting = float(
             getattr(net, "_repa_timestep_weighting", 0.0) or 0.0
         )
+
+        # Register tokens (LoRA + registers): when the capture layer is at or
+        # past the register insert block, the block output carries K extra
+        # trailing scratchpad tokens that must be trimmed before grid pooling
+        # (pool_dit_tokens_to_grid would otherwise fail its patch-grid check).
+        reg_k = int(getattr(net, "extra_seq_tokens", 0) or 0)
+        reg_insert = int(
+            getattr(getattr(net, "cfg", None), "register_insert_block", 0) or 0
+        )
+        self._trim_tokens = reg_k if (reg_k > 0 and self._layer >= reg_insert) else 0
+        if self._trim_tokens:
+            logger.info(
+                "REPA: trimming %d register tokens off the block-%d capture "
+                "(registers enter at block %d).",
+                self._trim_tokens,
+                self._layer,
+                reg_insert,
+            )
 
         if self._mode == "absolute" and getattr(net, "repa_head", None) is None:
             raise ValueError(
@@ -553,7 +581,12 @@ class REPAMethodAdapter(MethodAdapter):
             pe = pe[:, 1:, :]  # drop CLS → (B, gh*gw, d_enc)
 
         dit_tok = pool_dit_tokens_to_grid(
-            self._captured, (h_lat, w_lat), self._patch, gh, gw
+            self._captured,
+            (h_lat, w_lat),
+            self._patch,
+            gh,
+            gw,
+            trim_tail=self._trim_tokens,
         )  # (B, gh*gw, D) fp32
 
         w = None

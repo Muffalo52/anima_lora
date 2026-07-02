@@ -60,6 +60,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from networks.methods.base import AdapterNetworkBase
+from networks.register_injection import RegisterInjector
 
 
 def _parse_target_blocks(spec, n_blocks: int) -> list[int]:
@@ -219,16 +220,16 @@ class RegisterNetwork(AdapterNetworkBase):
         # (train.py::_widen_seq_range_for_network reads this). 0 for arm L (K=0).
         self.extra_seq_tokens = self.K
 
+        # Shared injection machinery (run_blocks wrap + mid-stack pre-hooks +
+        # adoption metrics) — also driven by the LoRA family's num_registers.
+        self._injector = RegisterInjector(
+            num_registers=self.K,
+            insert_block=self.insert_block,
+            get_scaled_tokens=lambda: self.register * self.multiplier,
+        )
+
         self._applied = False
-        self._orig_run_blocks = None
         self._orig_qkv_fwd: dict[int, object] = {}
-        self._orig_native_flatten = None
-        self._hook_handles: list = []
-        # per-forward (reg, rope_ext) handed to the insert-block pre-hooks
-        self._inject = None
-        # relocation-crossover readouts (training-time adoption gate; no-grad)
-        self.last_reg_ratio: Optional[float] = None
-        self.last_patch_sink_ratio: Optional[float] = None
 
     # -- trainer-facing protocol --------------------------------------------
     def get_trainable_params(self):
@@ -266,114 +267,26 @@ class RegisterNetwork(AdapterNetworkBase):
             "ss_num_blocks": str(len(self._dit.blocks)),
         }
 
+    # Relocation-crossover readouts (training-time adoption gate; no-grad),
+    # computed by the shared injector each forward.
+    @property
+    def last_reg_ratio(self) -> Optional[float]:
+        return self._injector.last_reg_ratio
+
+    @property
+    def last_patch_sink_ratio(self) -> Optional[float]:
+        return self._injector.last_patch_sink_ratio
+
     # -- apply / remove ------------------------------------------------------
     def apply_to(self, text_encoders, unet, apply_text_encoder=True, apply_unet=True):
         if self._applied:
             return
         anima = unet
-        self._orig_native_flatten = anima._native_flatten
-        anima._native_flatten = True  # eager native-flatten path
-
         net = self
-        self._orig_run_blocks = anima._run_blocks
 
-        def wrapped_run_blocks(
-            x_padded,
-            t_embedding_B_T_D,
-            crossattn_emb,
-            attn_params,
-            capture_blocks=None,
-            feature_sink=None,
-            stop_after_block=None,
-            **block_kwargs,
-        ):
-            # x_padded: (B, 1, seq, 1, D) under native-flatten.
-            B = x_padded.shape[0]
-            seq = x_padded.shape[2]
-            x_ext = x_padded
-            if net.K > 0:
-                reg = net.register.to(dtype=x_padded.dtype, device=x_padded.device)
-                reg = (
-                    (reg * net.multiplier)
-                    .view(1, 1, net.K, 1, net.D)
-                    .expand(B, -1, -1, -1, -1)
-                )
-                rope_ext = None
-                rope = block_kwargs.get("rope_cos_sin")
-                if rope is not None:
-                    cos, sin = rope  # each (seq, 1, 1, D_head)
-                    pad_shape = (net.K,) + tuple(cos.shape[1:])
-                    rope_ext = (
-                        torch.cat([cos, cos.new_ones(pad_shape)], dim=0),
-                        torch.cat([sin, sin.new_zeros(pad_shape)], dim=0),
-                    )
-                if net.insert_block == 0:
-                    x_ext = torch.cat([x_padded, reg], dim=2)  # (B, 1, seq+K, 1, D)
-                    if rope_ext is not None:
-                        block_kwargs = {**block_kwargs, "rope_cos_sin": rope_ext}
-                else:
-                    # mid-stack insertion: the pre-hooks on blocks >= insert_block
-                    # concat/rope-swap; blocks before it run at the bare seq.
-                    net._inject = (reg, rope_ext)
-
-            try:
-                out = net._orig_run_blocks(
-                    x_ext,
-                    t_embedding_B_T_D,
-                    crossattn_emb,
-                    attn_params,
-                    capture_blocks=capture_blocks,
-                    feature_sink=feature_sink,
-                    stop_after_block=stop_after_block,
-                    **block_kwargs,
-                )
-            finally:
-                net._inject = None
-            # relocation crossover (sparse sink → track top-0.2%/median outlier).
-            # Guarded on actual seq growth: an early-exit forward that stops
-            # before insert_block never received the registers.
-            with torch.no_grad():
-                pt = out[:, :, :seq, :, :].float().norm(dim=-1).flatten()
-                med = pt.median().clamp_min(1e-6)
-                k = max(1, int(0.002 * pt.numel()))
-                net.last_patch_sink_ratio = (pt.topk(k).values.mean() / med).item()
-                if net.K > 0 and out.shape[2] > seq:
-                    rt = out[:, :, seq:, :, :].float().norm(dim=-1).flatten()
-                    net.last_reg_ratio = (rt.max() / med).item()
-            return out[:, :, :seq, :, :]  # strip registers before unpatchify
-
-        anima._run_blocks = wrapped_run_blocks
-
-        # Mid-stack insertion (DSR "starting block"): concat at insert_block's
-        # entry, and swap in the extended rope on every block >= insert_block —
-        # _run_blocks re-passes the ORIGINAL rope tuple to each block, so the
-        # insert-block concat alone would leave later blocks with a seq-length
-        # rope against seq+K tokens. Pre-hooks run eagerly at block __call__,
-        # outside the compiled _forward, so this is compile-safe.
-        if self.K > 0 and self.insert_block > 0:
-            insert_at = self.insert_block
-
-            def make_pre_hook(bi):
-                def pre_hook(module, args, kwargs):
-                    inj = net._inject
-                    if inj is None:
-                        return None
-                    reg, rope_ext = inj
-                    x = args[0]
-                    if bi == insert_at:
-                        x = torch.cat([x, reg], dim=2)
-                    if rope_ext is not None and kwargs.get("rope_cos_sin") is not None:
-                        kwargs = {**kwargs, "rope_cos_sin": rope_ext}
-                    return (x,) + tuple(args[1:]), kwargs
-
-                return pre_hook
-
-            for bi in range(insert_at, len(anima.blocks)):
-                self._hook_handles.append(
-                    anima.blocks[bi].register_forward_pre_hook(
-                        make_pre_hook(bi), with_kwargs=True
-                    )
-                )
+        # Register-token injection (run_blocks wrap + mid-stack pre-hooks) —
+        # shared with the LoRA family via RegisterInjector.
+        self._injector.apply(anima)
 
         # Additive split QKV surface on the target blocks. The delta is fp32;
         # under the training autocast F.linear runs it in the block dtype.
@@ -396,13 +309,9 @@ class RegisterNetwork(AdapterNetworkBase):
         if not self._applied:
             return
         anima = self._dit
-        anima._run_blocks = self._orig_run_blocks
+        self._injector.remove()
         for bi, orig in self._orig_qkv_fwd.items():
             anima.blocks[bi].self_attn.qkv_proj.forward = orig
-        for h in self._hook_handles:
-            h.remove()
-        self._hook_handles = []
-        anima._native_flatten = self._orig_native_flatten
         self._orig_qkv_fwd = {}
         self._applied = False
 

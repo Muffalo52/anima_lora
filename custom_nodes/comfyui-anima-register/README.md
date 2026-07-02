@@ -24,6 +24,26 @@ from anywhere. `strength` scales the register tokens + QKV ΔW (1.0 = as trained
 UNETLoader ─► Anima Register Adapter ─► KSampler ─► VAEDecode
 ```
 
+## LoRA-family checkpoints (LoRA + registers)
+
+A LoRA trained with `num_registers > 0` in a lora-family TOML (see
+`configs/methods/lora.toml` §Register tokens) saves standard `lora_unet_*`
+keys plus one top-level `register_tokens` tensor and
+`ss_num_registers` / `ss_register_insert_block` stamps. The node detects that
+layout and applies **both halves**: the LoRA ΔW via ComfyUI's standard weight
+patcher (incl. `inv_scale` folding for channel-scaled checkpoints) and the
+registers via the eager register forward — no separate LoRA loader needed:
+
+```
+UNETLoader ─► Anima Register Adapter ─► KSampler ─► VAEDecode
+                (ΔW + registers, one .safetensors)
+```
+
+**Do NOT also load the same file through a LoRA loader** — the ΔW would apply
+twice. One `strength` scales both halves, matching in-repo inference's single
+`--lora_multiplier`. Registers at strength 0 still occupy K sequence slots
+(zero-token attention-sink lesion), matching training semantics.
+
 ## Comfy-native (the q/k/v fix)
 
 The training-side adapter patches the DiT's **fused** `self_attn.qkv_proj` and

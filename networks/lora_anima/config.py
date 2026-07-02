@@ -369,6 +369,22 @@ class LoRANetworkCfg:
     # SmoothQuant-style per-channel input pre-scaling
     channel_scales_dict: Optional[Dict[str, torch.Tensor]] = None
 
+    # DSR-style learnable register tokens trained jointly with the LoRA
+    # (docs/proposal/headroom_register_tokens.md; shared machinery with the
+    # standalone register method via networks/register_injection.py). K tokens
+    # enter the self-attn sequence at block ``register_insert_block`` (DSR's
+    # "starting block" — Tab. 9 sweet spot 8, 0 = stack entry), ride to the
+    # end of the stack, and are stripped before unpatchify. 0 = off (default).
+    # Registers can't merge into DiT weights → the checkpoint becomes
+    # kept-live at inference (is_mergeable() False, static merge refused).
+    num_registers: int = 0
+    register_insert_block: int = 8
+    # Registers get their own optimizer group at unet_lr × this scale — they
+    # must grow ~14–24× the median patch norm to become sinks, which a
+    # LoRA-scale lr rarely reaches (proposal §metrics).
+    register_lr_scale: float = 100.0
+    register_init_std: float = 0.02
+
     verbose: bool = False
 
     @classmethod
@@ -649,7 +665,10 @@ class LoRANetworkCfg:
         # would silently ignore it. Fail loudly instead of no-op'ing. T-LoRA
         # (use_timestep_mask) is fine — it stays on LoRAModule.
         if down_init != "kaiming" and (
-            use_ortho or use_ortho_init or use_moe_style is not False or use_chimera_hydra
+            use_ortho
+            or use_ortho_init
+            or use_moe_style is not False
+            or use_chimera_hydra
         ):
             raise ValueError(
                 f"down_init={down_init!r} only applies to plain LoRA, but a "
@@ -685,6 +704,15 @@ class LoRANetworkCfg:
         reg_dims = _parse_kv_pairs(reg_dims_str, is_int=True) if reg_dims_str else None
         reg_lrs_str = kwargs.get("network_reg_lrs")
         reg_lrs = _parse_kv_pairs(reg_lrs_str, is_int=False) if reg_lrs_str else None
+
+        # DSR register tokens (LoRA + registers trained jointly). Bounds of
+        # register_insert_block are validated at network build (needs n_blocks).
+        num_registers = int(kwargs.get("num_registers", 0) or 0)
+        if num_registers < 0:
+            raise ValueError(f"num_registers must be >= 0, got {num_registers}")
+        register_insert_block = int(kwargs.get("register_insert_block", 8))
+        register_lr_scale = float(kwargs.get("register_lr_scale", 100.0))
+        register_init_std = float(kwargs.get("register_init_std", 0.02))
 
         verbose = _as_bool(kwargs.get("verbose"))
 
@@ -747,6 +775,10 @@ class LoRANetworkCfg:
             chimera_expert_diag=chimera_expert_diag,
             step_expert_K=step_expert_K,
             channel_scales_dict=channel_scales_dict,
+            num_registers=num_registers,
+            register_insert_block=register_insert_block,
+            register_lr_scale=register_lr_scale,
+            register_init_std=register_init_std,
             verbose=verbose,
         )
 
@@ -788,6 +820,10 @@ class LoRANetworkCfg:
         freq_router_tau: float = 1.0,
         content_router_layer_norm: bool = True,
         step_expert_K: int = 0,
+        # Register tokens: K sniffed from the ``register_tokens`` key's shape,
+        # insert block from the ``ss_register_insert_block`` metadata stamp.
+        num_registers: int = 0,
+        register_insert_block: int = 8,
     ) -> "LoRANetworkCfg":
         """Build cfg from a checkpoint key-sniff (warm-start / inference path).
 
@@ -893,4 +929,6 @@ class LoRANetworkCfg:
             freq_router_tau=float(freq_router_tau),
             content_router_layer_norm=bool(content_router_layer_norm),
             step_expert_K=int(step_expert_K),
+            num_registers=int(num_registers),
+            register_insert_block=int(register_insert_block),
         )

@@ -1,8 +1,16 @@
 """Anima register-token adapter — ComfyUI inference node (consolidated).
 
 One node: takes a stock Anima ``MODEL`` + a register ``adapter.safetensors``
-(trained by ``train.py --method register`` / ``networks/methods/register.py``)
 and returns a patched ``MODEL`` a normal KSampler runs with the registers live.
+Two accepted layouts:
+
+* the standalone register method (``train.py --method register`` /
+  ``networks/methods/register.py``) — registers + trained QKV surface;
+* a LoRA-family checkpoint trained with ``num_registers > 0`` (one top-level
+  ``register_tokens`` tensor next to standard ``lora_unet_*`` keys) — this
+  node applies BOTH halves: the registers via the eager register forward and
+  the LoRA ΔW via ComfyUI's standard weight patching. Do NOT also load the
+  same file through a LoRA loader (the ΔW would apply twice).
 
 The adapter (see ``register_apply.py``) is comfy-native — it patches the split
 ``q_proj``/``k_proj``/``v_proj`` of ``MiniTrainDIT`` (no fused ``qkv_proj``) and
@@ -58,12 +66,53 @@ def _list_register_adapters() -> list[str]:
     return sorted(set(found))
 
 
-def _load_adapter(path: str, strength: float) -> RegisterComfyAdapter:
+def _fold_inv_scale(lora_sd: dict) -> dict:
+    """Fold per_channel_scaling ``inv_scale`` into ``lora_down`` and drop it.
+
+    Mirrors the Anima LoRA loader / ``LoRAModule.merge_to``: the trained
+    forward is ``F.linear(x * inv_scale, down)``, so ``down *= inv_scale``
+    column-wise before handing the dict to ComfyUI's patcher (which would
+    otherwise warn on the unknown ``.inv_scale`` suffix and apply a delta
+    off by ``s_norm`` per input column). Returns a new dict.
+    """
+    inv_keys = [k for k in lora_sd if k.endswith(".inv_scale")]
+    if not inv_keys:
+        return lora_sd
+    out = dict(lora_sd)
+    for inv_key in inv_keys:
+        prefix = inv_key[: -len(".inv_scale")]
+        down_key = f"{prefix}.lora_down.weight"
+        inv_scale = out.pop(inv_key)
+        down = out.get(down_key)
+        if down is None or down.dim() != 2:
+            continue
+        out[down_key] = down.float() * inv_scale.float().unsqueeze(0)
+    return out
+
+
+def _apply_lora_half(model, lora_sd: dict, strength: float) -> None:
+    """Apply the ``lora_unet_*`` half via ComfyUI's standard weight patching."""
+    import comfy.lora
+    import comfy.lora_convert
+
+    lora_sd = _fold_inv_scale(lora_sd)
+    key_map = comfy.lora.model_lora_keys_unet(model.model, {})
+    loaded = comfy.lora.load_lora(comfy.lora_convert.convert_lora(lora_sd), key_map)
+    model.add_patches(loaded, strength)
+
+
+def _load_adapter(
+    path: str, strength: float
+) -> tuple[RegisterComfyAdapter, dict | None]:
     """Load a register ``.safetensors`` into a ready-to-apply adapter.
 
     The checkpoint carries the split QKV surface + ``ss_*`` config in the header
     metadata (written by ``AdapterNetworkBase.save_weights`` / register's
     ``metadata_fields``).
+
+    Returns ``(register_adapter, lora_sd)`` — ``lora_sd`` is the standard
+    ``lora_unet_*`` state dict for a LoRA-family checkpoint (``None`` for the
+    standalone register method, which has no LoRA half).
     """
     from safetensors import safe_open
 
@@ -83,17 +132,47 @@ def _load_adapter(path: str, strength: float) -> RegisterComfyAdapter:
             f"{p} is not a register adapter (no ss_num_registers metadata)"
         )
 
-    config = {
-        "num_registers": int(meta["ss_num_registers"]),
-        "arm": meta.get("ss_arm", "B"),
-        "qkv_mode": meta.get("ss_qkv_mode", "unfrozen"),
-        "target_blocks": json.loads(meta["ss_target_blocks"]),
-        "scale": float(meta.get("ss_scale", 1.0)),
-        # pre-insert_block checkpoints trained with entry insertion — default 0
-        "insert_block": int(meta.get("ss_insert_block", 0)),
-    }
-    log.info("loaded register adapter %s (%s)", p.name, config)
-    return RegisterComfyAdapter(state_dict, config, strength=strength)
+    lora_sd = None
+    if "ss_target_blocks" in meta:
+        # Standalone register method (`--method register`): registers + a
+        # trained QKV surface, keys `register` + `qkv.{bi}.*`.
+        config = {
+            "num_registers": int(meta["ss_num_registers"]),
+            "arm": meta.get("ss_arm", "B"),
+            "qkv_mode": meta.get("ss_qkv_mode", "unfrozen"),
+            "target_blocks": json.loads(meta["ss_target_blocks"]),
+            "scale": float(meta.get("ss_scale", 1.0)),
+            # pre-insert_block checkpoints trained with entry insertion — default 0
+            "insert_block": int(meta.get("ss_insert_block", 0)),
+        }
+    else:
+        # LoRA-family checkpoint trained with `num_registers > 0`: one
+        # top-level `register_tokens` tensor rides alongside standard
+        # `lora_unet_*` keys. The registers go through the eager register
+        # forward; the LoRA half is returned for standard weight patching
+        # (registers were trained jointly with the ΔW — apply both).
+        if "register_tokens" not in state_dict:
+            raise ValueError(
+                f"{p} stamps ss_num_registers but carries neither a register "
+                "method layout (ss_target_blocks) nor a `register_tokens` key"
+            )
+        lora_sd = {k: v for k, v in state_dict.items() if k != "register_tokens"}
+        state_dict = {"register": state_dict["register_tokens"]}
+        config = {
+            "num_registers": int(meta["ss_num_registers"]),
+            "arm": "B",
+            "qkv_mode": "unfrozen",
+            "target_blocks": [],  # no QKV surface — ΔW rides the lora_sd half
+            "scale": 1.0,
+            "insert_block": int(meta.get("ss_register_insert_block", 8)),
+        }
+    log.info(
+        "loaded register adapter %s (%s, lora_keys=%d)",
+        p.name,
+        config,
+        len(lora_sd) if lora_sd else 0,
+    )
+    return RegisterComfyAdapter(state_dict, config, strength=strength), lora_sd
 
 
 class AnimaRegisterAdapter:
@@ -133,14 +212,20 @@ class AnimaRegisterAdapter:
             )
 
         m = model.clone()
+        reg_adapter, lora_sd = _load_adapter(sel, strength)
+        # LoRA-family checkpoint: apply the ΔW half eagerly via ComfyUI's
+        # weight patcher (it participates in the normal patch/unpatch cycle);
+        # only the register injection needs the lazy re-apply below.
+        if lora_sd:
+            _apply_lora_half(m, lora_sd, strength)
 
         def unet_wrapper(apply_model, args):
             dm = m.model.diffusion_model
             adapter = getattr(dm, "_anima_register_adapter", None)
-            # (Re)build against the *current* resident diffusion_model if the hook
+            # (Re)apply against the *current* resident diffusion_model if the hook
             # was stranded (clone/reload/recompile swapped the module instance).
             if adapter is None or adapter.dm is not dm:
-                adapter = _load_adapter(sel, strength).apply(dm)
+                adapter = reg_adapter.apply(dm)
                 dm._anima_register_adapter = adapter
             return apply_model(args["input"], args["timestep"], **args["c"])
 

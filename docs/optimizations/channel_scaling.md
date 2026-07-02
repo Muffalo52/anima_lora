@@ -74,6 +74,8 @@ The current shipped defaults (`lora.toml` `use_ortho_init = true`, `chimera.toml
 
 The EasyControl cond LoRA (`networks/methods/easycontrol.py::_LoRAProj`) sees clean reference latents, not the noisy main stream, so its activation profile diverges from the main calibration: cosine(main, cond) is median 0.93 but p10 0.71 / min 0.56, and `output/calibration/cond_stream_profile.json` shows reusing the main file would make `mlp.layer2` dominance *worse* (negative transfer efficiency — block-7 layer2: 28× raw → 104× with the transferred scale). Hence the separate cond-specific calibration, wired 2026-06-09 and loaded by `_load_cond_channel_scales` with the same α from `channel_scaling_alpha`. Regenerate with `scripts/calibration/cond_stream_profile.py`.
 
+Unlike the LoRA family (see save/load below), the cond stream has no save-time bake — `inv_scale` ships in the EasyControl checkpoint as a persistent buffer. External consumers that aren't `inv_scale`-aware (e.g. the standalone `~/ComfyUI-EasyControl-KSamplerCompat` node) will mis-scale a channel-scaled checkpoint; in-repo inference pre-allocates and loads it correctly.
+
 ## Save / load
 
 `inv_scale` is included in `state_dict` next to `lora_down.weight` / `lora_up.weight` / `alpha`. The fused-attn split/refuse round-trip (`networks/lora_anima/loading.py`) treats it as a shared tensor — q/k/v of the same Linear see the same input so they share `inv_scale`. Hydra / Chimera / StackedExperts handle it via their per-pool stacked layouts.
