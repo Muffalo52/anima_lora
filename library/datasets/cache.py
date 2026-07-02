@@ -35,12 +35,11 @@ def _cached_collate_impl(batch):
     """Stack a list of per-sample :class:`CachedDataset` dicts into a batch dict.
 
     Self-describing: which optional features are present is read off the sample
-    dict's keys (``pooled_text`` / ``mask`` / ``repa_pe``), so there is no
-    collate-vs-dataset flag to keep in sync — whatever ``__getitem__`` emitted is
-    what gets stacked. ``idx`` stays a Python list (not a tensor); every other
-    present key is ``torch.stack``-ed (the per-resolution
-    :class:`BucketBatchSampler` guarantees uniform spatial dims so the stack
-    works at ``batch_size > 1``).
+    dict's keys (``pooled_text`` / ``mask``), so there is no collate-vs-dataset
+    flag to keep in sync — whatever ``__getitem__`` emitted is what gets stacked.
+    ``idx`` stays a Python list (not a tensor); every other present key is
+    ``torch.stack``-ed (the per-resolution :class:`BucketBatchSampler` guarantees
+    uniform spatial dims so the stack works at ``batch_size > 1``).
     """
     keys = batch[0].keys()
     out: dict = {
@@ -52,16 +51,6 @@ def _cached_collate_impl(batch):
         out["pooled_text"] = torch.stack([b["pooled_text"] for b in batch])
     if "mask" in keys:
         out["mask"] = torch.stack([b["mask"] for b in batch])  # [B, 1, H, W]
-    if "repa_pe" in keys:
-        # All-or-nothing per batch: a missing sidecar (None) — or a token-count
-        # mismatch across the batch (same latent bucket but different encoder
-        # aspect bucket, only possible at batch_size > 1) — collapses the value
-        # to None so the consumer skips the REPA term instead of crashing.
-        pe = [b["repa_pe"] for b in batch]
-        stackable = all(p is not None for p in pe) and (
-            len({tuple(p.shape) for p in pe}) == 1
-        )
-        out["repa_pe"] = torch.stack(pe) if stackable else None
     return out
 
 
@@ -70,8 +59,8 @@ def make_cached_collate():
 
     Returns a batch ``dict`` with keys ``idx`` / ``latents`` / ``crossattn_emb``
     plus whichever optional keys the dataset emits (``pooled_text`` when
-    ``need_pooled``, ``mask`` when ``mask_dir`` is set, ``repa_pe`` when
-    ``load_repa_pe``). Mirrors the string-keyed batch convention of the main
+    ``need_pooled``, ``mask`` when ``mask_dir`` is set). Mirrors the string-keyed
+    batch convention of the main
     ``train.py`` dataset (only ``latents`` shares a name — the cached reader
     hands back already-unpacked ``crossattn_emb``/``pooled_text`` rather than the
     Kohya ``text_encoder_outputs_list`` container).
@@ -151,8 +140,6 @@ class CachedDataset(torch.utils.data.Dataset):
         mask_dir: str | None = None,
         keep_list: set[str] | None = None,
         need_pooled: bool = True,
-        load_repa_pe: bool = False,
-        repa_pe_encoder: str = "pe_spatial",
     ):
         assert split in ("train", "val")
         self.data_dir = data_dir
@@ -169,13 +156,6 @@ class CachedDataset(torch.utils.data.Dataset):
         # ``mask_dir``: when set, emit a ``mask`` key — a latent-resolution
         # foreground mask in [0, 1]. See ``_resolve_mask_path``.
         self.mask_dir = mask_dir
-        # ``load_repa_pe`` (turbo_repa.md Phase 1): emit a ``repa_pe`` key — the
-        # ``{stem}_anima_{encoder}.safetensors`` patch tokens (fp32, CLS at
-        # index 0), or ``None`` when the sidecar is missing (the collate then
-        # skips the batch's REPA term). Constructor-set so the feature is
-        # visible at build time rather than a post-construction mutation.
-        self.load_repa_pe = load_repa_pe
-        self.repa_pe_encoder = repa_pe_encoder
         cached = discover_cached_pairs(data_dir)
 
         # Optional stem allow-list: when a keep_list of stems is supplied, drop
@@ -354,29 +334,7 @@ class CachedDataset(torch.utils.data.Dataset):
             out["pooled_text"] = pooled_text
         if self.mask_dir is not None:
             out["mask"] = self._load_mask(te_path, latents.shape[-2], latents.shape[-1])
-        if self.load_repa_pe:
-            out["repa_pe"] = self._load_repa_pe(te_path)
         return out
-
-    def _load_repa_pe(self, te_path: str) -> torch.Tensor | None:
-        """Cached ``{stem}_anima_{encoder}.safetensors`` patch tokens, or None.
-
-        The sidecar lives next to the TE cache (the common layout — candidate 1
-        of the train.py dataset's resolution chain; the distill loops read the
-        standard lora cache where TE and PE share a directory). Returns the
-        ``[T, d_enc]`` fp32 feature tensor with CLS still at index 0.
-        """
-        stem = os.path.basename(te_path).removesuffix(TE_CACHE_SUFFIX)
-        path = os.path.join(
-            os.path.dirname(te_path),
-            f"{stem}_anima_{self.repa_pe_encoder}.safetensors",
-        )
-        if not os.path.exists(path):
-            return None
-        from safetensors.torch import load_file
-
-        feats = load_file(path).get("image_features")
-        return feats.float() if feats is not None else None
 
     def _resolve_mask_path(self, te_path: str) -> str | None:
         """Map a TE cache path to its ``{stem}_mask.png``, or None if absent.

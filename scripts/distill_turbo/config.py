@@ -346,86 +346,6 @@ def build_argparser() -> argparse.ArgumentParser:
         "Default: TOML (gan.r1_weight, default 0).",
     )
 
-    # Turbo × REPA relational alignment (off by default).
-    parser.add_argument(
-        "--repa_weight",
-        type=float,
-        default=-1.0,
-        help="λ on the relational (Gram) alignment of student block features to "
-        "PE-Spatial on renoised REAL latents. 0 disables the whole path "
-        "(byte-identical DP-DMD). LoRA-validated scale: 0.05. Default: TOML "
-        "(repa.weight, default 0).",
-    )
-    parser.add_argument(
-        "--repa_layer",
-        type=int,
-        default=-1,
-        help="DiT block whose output the REPA term taps (matches LoRA REPA). "
-        "Default: TOML (repa.layer, default 8).",
-    )
-    parser.add_argument(
-        "--repa_every_n",
-        type=int,
-        default=-1,
-        help="Run the REPA term every N student steps (amortizes the extra "
-        "partial forward). Default: TOML (repa.every_n, default 4).",
-    )
-    parser.add_argument(
-        "--repa_encoder",
-        type=str,
-        default=None,
-        help="Vision-encoder sidecar the term aligns to "
-        "({stem}_anima_{encoder}.safetensors next to the TE cache). Default: "
-        "TOML (repa.encoder, default 'pe_spatial').",
-    )
-    parser.add_argument(
-        "--repa_spatial_norm",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="iREPA spatial standardization of the encoder target. Default: "
-        "TOML (repa.spatial_norm, default true).",
-    )
-    parser.add_argument(
-        "--repa_target_dog",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="REPA-DoG target band-pass (replaces spatial_norm's DC removal "
-        "with a broader low-band strip; the two are mutually exclusive and dog "
-        "wins). Default: TOML (repa.target_dog, default false).",
-    )
-    parser.add_argument(
-        "--repa_dog_sigma1_div",
-        type=float,
-        default=-1.0,
-        help="REPA-DoG low-pass σ₁ as min(gh,gw)/div (larger div = narrower "
-        "strip). Default: TOML (repa.dog_sigma1_div, default 16).",
-    )
-    parser.add_argument(
-        "--repa_dog_sigma2_div",
-        type=float,
-        default=-1.0,
-        help="REPA-DoG second σ₂ as min(gh,gw)/div (0 = single low-pass, σ₂ "
-        "off). Default: TOML (repa.dog_sigma2_div, default 0).",
-    )
-    parser.add_argument(
-        "--repa_dog_norm_std",
-        type=float,
-        default=-1.0,
-        help="REPA-DoG post band-pass std normalization (0 = empirical per-batch "
-        "std). Default: TOML (repa.dog_norm_std, default 0).",
-    )
-    parser.add_argument(
-        "--repa_timestep_weighting",
-        type=float,
-        default=None,
-        help="REPA σ-emphasis g (signed; 0 = uniform τ, legacy). g>0 weights "
-        "HIGH-σ (where REPA is cheap cond-utilization on near-noise — wasted); "
-        "g<0 weights LOW/mid-σ (where DP-DMD contests alignment — the lever the "
-        "σ-structure diagnosis points at). w(σ) integrates to 1 (shape-not-scale; "
-        "mirrors library/training/repa.py _timestep_weights). Negative is a valid "
-        "value (not the -1 sentinel). Default: TOML (repa.timestep_weighting, 0).",
-    )
-
     # Soft-rank caption-discrimination auxiliary (off by default).
     parser.add_argument(
         "--softrank_weight",
@@ -579,17 +499,6 @@ class TurboConfig:
     f_bin_num: int
     f_ratio_normalization: bool
 
-    # Turbo × REPA relational alignment on real data (turbo_repa.md Phase 1)
-    repa_weight: float
-    repa_layer: int
-    repa_encoder: str
-    repa_every_n: int
-    repa_spatial_norm: bool
-    repa_target_dog: bool
-    repa_dog_sigma1_div: float
-    repa_dog_sigma2_div: float
-    repa_dog_norm_std: float
-    repa_timestep_weighting: float
 
     # Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1)
     softrank_weight: float
@@ -745,43 +654,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     f_bin_num = int(_flatten(cfg, "f_distill.bin_num", 10))
     f_ratio_normalization = bool(_flatten(cfg, "f_distill.ratio_normalization", True))
 
-    # weight=0 keeps the whole REPA path off → byte-identical DP-DMD (no PE
-    # loading, no extra RNG draws, no extra forward).
-    repa_weight = float(_pick(args.repa_weight, cfg, "repa.weight", 0.0))
-    repa_layer = int(_pick(args.repa_layer, cfg, "repa.layer", 8))
-    repa_encoder = _pick(args.repa_encoder, cfg, "repa.encoder", "pe_spatial")
-    repa_every_n = int(_pick(args.repa_every_n, cfg, "repa.every_n", 4))
-    if args.repa_spatial_norm is None:
-        repa_spatial_norm = bool(_flatten(cfg, "repa.spatial_norm", True))
-    else:
-        repa_spatial_norm = bool(args.repa_spatial_norm)
-    # REPA-DoG band-pass replaces the spatial_norm DC-removal block when on (dog
-    # wins; same family — DoG at σ₁→0 is DC removal). repa_dog_target.md.
-    if args.repa_target_dog is None:
-        repa_target_dog = bool(_flatten(cfg, "repa.target_dog", False))
-    else:
-        repa_target_dog = bool(args.repa_target_dog)
-    repa_dog_sigma1_div = float(
-        _pick(args.repa_dog_sigma1_div, cfg, "repa.dog_sigma1_div", 16.0)
-    )
-    repa_dog_sigma2_div = float(
-        _pick(args.repa_dog_sigma2_div, cfg, "repa.dog_sigma2_div", 0.0)
-    )
-    repa_dog_norm_std = float(
-        _pick(args.repa_dog_norm_std, cfg, "repa.dog_norm_std", 0.0)
-    )
-    # g<0 is a valid value (low/mid-σ emphasis), so only None counts as "unset"
-    # here — the default -1/-1.0 sentinels would swallow a real g=-1.0.
-    repa_timestep_weighting = float(
-        _pick(
-            args.repa_timestep_weighting,
-            cfg,
-            "repa.timestep_weighting",
-            0.0,
-            sentinels=(None,),
-        )
-    )
-
     # weight=0 keeps the whole soft-rank path off → byte-identical DP-DMD (no
     # extra forwards, no extra RNG draws, no negatives loaded).
     softrank_weight = float(_pick(args.softrank_weight, cfg, "softrank.weight", 0.0))
@@ -927,55 +799,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         )
     if gan_loss_weight_gen < 0.0:
         raise ValueError(f"gan.weight_gen={gan_loss_weight_gen}: must be >= 0")
-    if repa_weight < 0.0:
-        raise ValueError(f"repa.weight={repa_weight}: must be >= 0")
-    if repa_weight > 0.0:
-        if repa_every_n < 1:
-            raise ValueError(f"repa.every_n={repa_every_n}: must be >= 1")
-        if int(args.blocks_to_swap) > 0:
-            # The feature tap's early exit leaves the tail blocks' offloader
-            # moves un-submitted (forward_mini_train_dit raises the same way);
-            # fail at config time with the actionable message.
-            raise ValueError(
-                "repa.weight > 0 requires blocks_to_swap=0 — the block-feature "
-                "tap is unsupported under block swap (turbo keeps the DiT "
-                "resident by default)."
-            )
-        if per_step_expert and bool(args.grad_ckpt):
-            # Same global-state × deferred-ckpt-recompute class as the view bug:
-            # the REPA forward re-routes the student head (nearest-τ) AFTER the
-            # rollout's checkpointed forwards but BEFORE their backward, so the
-            # step-g recompute would run the wrong head — silent corruption.
-            raise ValueError(
-                "repa.weight > 0 with per_step_expert AND --grad_ckpt: the REPA "
-                "head switch corrupts the rollout's checkpoint recompute. "
-                "Disable one of the three."
-            )
-        if repa_target_dog and repa_dog_sigma1_div <= 0.0:
-            raise ValueError(
-                f"repa.dog_sigma1_div={repa_dog_sigma1_div}: must be > 0 "
-                "(σ₁ = min(gh,gw)/div)."
-            )
-        # dog replaces spatial_norm's DC removal — they're mutually exclusive
-        # (same family; dog wins). Surface the effective target preprocessing.
-        target_desc = (
-            f"dog(σ1=min/{repa_dog_sigma1_div:g}, "
-            f"σ2={'off' if repa_dog_sigma2_div <= 0 else f'min/{repa_dog_sigma2_div:g}'}, "
-            f"norm_std={'empirical' if repa_dog_norm_std <= 0 else repa_dog_norm_std})"
-            if repa_target_dog
-            else f"spatial_norm={repa_spatial_norm}"
-        )
-        tw_desc = (
-            "τ=uniform"
-            if repa_timestep_weighting == 0.0
-            else f"τ_weight g={repa_timestep_weighting:+g} "
-            f"({'high-σ' if repa_timestep_weighting > 0 else 'low/mid-σ'})"
-        )
-        logger.info(
-            f"REPA (turbo×REPA relational alignment) ON: weight={repa_weight}, "
-            f"layer={repa_layer}, encoder={repa_encoder!r}, "
-            f"every_n={repa_every_n}, {target_desc}, {tw_desc}."
-        )
     if softrank_weight < 0.0:
         raise ValueError(f"softrank.weight={softrank_weight}: must be >= 0")
     if softrank_weight > 0.0:
@@ -1017,7 +840,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             f"(~{softrank_pool_size} MiB), warmup_ratio={softrank_warmup_ratio}."
         )
     if bool(args.grad_ckpt) and gan_loss_weight_gen > 0.0:
-        # Same view × deferred-ckpt-recompute hazard class as the REPA guard above.
+        # View × deferred-ckpt-recompute hazard: a forward that flips the global
+        # view after the rollout's checkpointed forwards corrupts their recompute.
         logger.warning(
             "--grad_ckpt with gan.weight_gen > 0: the rollout's checkpointed "
             "student forwards recompute after the GAN gen forward flipped the "
@@ -1203,16 +1027,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         f_ratio_ema_rate=f_ratio_ema_rate,
         f_bin_num=f_bin_num,
         f_ratio_normalization=f_ratio_normalization,
-        repa_weight=repa_weight,
-        repa_layer=repa_layer,
-        repa_encoder=repa_encoder,
-        repa_every_n=repa_every_n,
-        repa_spatial_norm=repa_spatial_norm,
-        repa_target_dog=repa_target_dog,
-        repa_dog_sigma1_div=repa_dog_sigma1_div,
-        repa_dog_sigma2_div=repa_dog_sigma2_div,
-        repa_dog_norm_std=repa_dog_norm_std,
-        repa_timestep_weighting=repa_timestep_weighting,
         softrank_weight=softrank_weight,
         softrank_k=softrank_k,
         softrank_every_n=softrank_every_n,
@@ -1270,12 +1084,6 @@ def snapshot_toml_text(c: TurboConfig, *, source_config: str | None = None) -> s
 _TB_KEYS = (
     "base_loss",
     "gan_loss_weight_gen",
-    "repa_weight",
-    "repa_target_dog",
-    "repa_dog_sigma1_div",
-    "repa_dog_sigma2_div",
-    "repa_dog_norm_std",
-    "repa_timestep_weighting",
     "softrank_weight",
     "f_div",
     "k_anchor",
