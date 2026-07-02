@@ -1417,9 +1417,12 @@ class AnimaTrainer:
                         ]
                     }
 
-            # Global --sample_ratio override (used by the `[half]` preset).
+            # Global --sample_ratio override (used by the `[half]` preset and
+            # the GUI's data-scope field). 1.0 is inert — base.toml ships it as
+            # the visible default, and skipping the no-op keeps any per-subset
+            # sample_ratio in a custom blueprint authoritative.
             sample_ratio = getattr(args, "sample_ratio", None)
-            if sample_ratio is not None:
+            if sample_ratio is not None and sample_ratio != 1.0:
                 for ds in user_config.get("datasets", []):
                     for sub in ds.get("subsets", []):
                         sub["sample_ratio"] = sample_ratio

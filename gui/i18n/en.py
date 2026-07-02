@@ -377,6 +377,7 @@ STRINGS: dict[str, str] = {
     "locked_by_preset": "Locked by preset (performance settings are fixed for this VRAM profile)",
     "lora_variants": "LoRA Variants",
     "variant": "Variant:",
+    "hardware_preset": "Hardware:",
     "apply_variant": "Apply",
     "apply_variant_tooltip": "Fill the form below with this variant's preset values. Nothing is saved until you click Save.",
     "show_guide": "Guide",

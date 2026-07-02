@@ -72,7 +72,9 @@ def test_unknown_key_warns(populated_parser, tmp_path: Path, caplog):
     with caplog.at_level(logging.WARNING):
         out = _flatten_toml({"a": {"network_ditm": 16}}, source=str(bogus))
     assert out == {"network_ditm": 16}
-    assert any("unknown key 'network_ditm'" in rec.getMessage() for rec in caplog.records)
+    assert any(
+        "unknown key 'network_ditm'" in rec.getMessage() for rec in caplog.records
+    )
     # line locator should include the line number
     assert any(":1:" in rec.getMessage() for rec in caplog.records)
 
@@ -81,9 +83,7 @@ def test_unknown_key_strict_raises(populated_parser, tmp_path: Path):
     bogus = tmp_path / "bogus.toml"
     bogus.write_text("network_ditm = 16\n")
     with pytest.raises(config_schema.ConfigSchemaError):
-        _flatten_toml(
-            {"a": {"network_ditm": 16}}, source=str(bogus), strict=True
-        )
+        _flatten_toml({"a": {"network_ditm": 16}}, source=str(bogus), strict=True)
 
 
 def test_off_list_choice_warns(populated_parser, caplog):
@@ -124,7 +124,8 @@ def test_method_configs_clean(populated_parser, method: str, caplog):
         offenders = [
             rec.getMessage()
             for rec in caplog.records
-            if rec.levelno >= logging.WARNING and rec.name.startswith("library.train_util")
+            if rec.levelno >= logging.WARNING
+            and rec.name.startswith("library.train_util")
         ]
         assert not offenders, f"{method} × {preset} warnings: {offenders}"
 
@@ -135,14 +136,45 @@ def test_method_configs_clean(populated_parser, method: str, caplog):
 
 
 def test_provenance_returned():
-    merged, provenance = load_method_preset(
-        "lora", "default", return_provenance=True
-    )
+    merged, provenance = load_method_preset("lora", "default", return_provenance=True)
     # base key
     assert provenance["network_module"] == "configs/base.toml"
     # method key
     assert provenance["network_dim"] == "configs/methods/lora.toml"
     assert set(provenance) == set(merged)
+
+
+def test_preset_gui_metadata_stripped():
+    """``[<preset>.gui]`` display metadata (label/group for the GUI Hardware
+    picker) must never reach the flat argparse merge."""
+    merged = load_method_preset("lora", "low_vram")
+    assert "gui" not in merged
+    for key in ("label", "group", "description", "order"):
+        assert key not in merged
+    # ...while the preset's real knobs still land.
+    assert merged["gradient_checkpointing"] is True
+    assert merged["unsloth_offload_checkpointing"] is True
+
+
+def test_hardware_preset_composes_with_gui_variant():
+    """The GUI's Hardware picker composes presets.toml[low_vram] with a clean
+    gui-methods variant (replaces the retired per-variant ``-8gb`` copies).
+    Regression guard: a variant file pinning the hardware keys would silently
+    defeat the preset (method wins over preset in the merge)."""
+    import toml as _toml
+
+    gui_dir = Path(__file__).resolve().parent.parent / "configs" / "gui-methods"
+    hw_keys = ("gradient_checkpointing", "unsloth_offload_checkpointing")
+    for path in sorted(gui_dir.glob("*.toml")):
+        data = _toml.loads(path.read_text(encoding="utf-8"))
+        for key in hw_keys:
+            assert key not in data, (
+                f"{path.name} pins {key}, which would defeat the Hardware "
+                "preset picker (method wins over preset in the merge)"
+            )
+    merged = load_method_preset("lora", "low_vram", methods_subdir="gui-methods")
+    assert merged["gradient_checkpointing"] is True
+    assert merged["unsloth_offload_checkpointing"] is True
 
 
 def _reparse_without_comments(text: str) -> dict:
@@ -157,9 +189,7 @@ def test_render_roundtrips_to_valid_toml(populated_parser):
     parser = train.setup_parser()
     config_schema.populate_schema(parser, extras=train.build_network_extras())
 
-    merged, provenance = load_method_preset(
-        "lora", "default", return_provenance=True
-    )
+    merged, provenance = load_method_preset("lora", "default", return_provenance=True)
     ns = argparse.Namespace(**merged)
     args = parser.parse_args(["--method", "lora", "--preset", "default"], namespace=ns)
 
@@ -177,13 +207,9 @@ def test_render_header_includes_method_and_preset(populated_parser):
     parser = train.setup_parser()
     config_schema.populate_schema(parser, extras=train.build_network_extras())
 
-    merged, provenance = load_method_preset(
-        "lora", "low_vram", return_provenance=True
-    )
+    merged, provenance = load_method_preset("lora", "low_vram", return_provenance=True)
     ns = argparse.Namespace(**merged)
-    args = parser.parse_args(
-        ["--method", "lora", "--preset", "low_vram"], namespace=ns
-    )
+    args = parser.parse_args(["--method", "lora", "--preset", "low_vram"], namespace=ns)
     rendered = _render_merged_toml(args, parser, provenance)
     assert "Method: lora" in rendered
     assert "Preset: low_vram" in rendered

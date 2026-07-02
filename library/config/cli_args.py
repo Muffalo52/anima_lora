@@ -1039,8 +1039,9 @@ def add_dataset_arguments(
         default=None,
         help=(
             "Global override applied to every subset's sample_ratio (0<r≤1). "
-            "Unset = use each subset's own value. Exposed here so presets like "
-            "`[half]` can propagate a single value across the dataset blueprint."
+            "Unset or 1.0 = use each subset's own value. Exposed here so "
+            "presets like `[half]` and the GUI data-scope field can propagate "
+            "a single value across the dataset blueprint."
         ),
     )
     parser.add_argument(

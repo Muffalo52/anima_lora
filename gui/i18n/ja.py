@@ -325,6 +325,7 @@ STRINGS: dict[str, str] = {
     "locked_by_preset": "プリセットによりロックされています (このVRAMプロファイルではパフォーマンス設定は固定されています)",
     "lora_variants": "LoRA バリアント",
     "variant": "バリアント:",
+    "hardware_preset": "ハードウェア:",
     "apply_variant": "適用",
     "apply_variant_tooltip": "このバリアントのプリセット値をフォームに反映します。「保存」をクリックするまで保存されません。",
     "show_guide": "ガイド",

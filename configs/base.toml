@@ -32,6 +32,15 @@ lora_cache_dir = "post_image_dataset/lora"
 # Same blueprint applies to validation enumeration.
 # path_pattern = "*"
 
+# Data scope — how much of the cached dataset a run trains on.
+# `sample_ratio` is a global per-subset override (1.0 = full dataset; the
+# CLI [half]/[quarter]/[tenth] presets set the same key). `artists_shard`
+# restricts training to one round-robin shard of the artist subdirectories,
+# format "k_N" (e.g. "1_4" = shard 1 of 4); "" = off. Mutually exclusive
+# with an explicit path_pattern.
+sample_ratio = 1.0
+artists_shard = ""
+
 # Multi-scale constant-token tiers (`target_res`) live in configs/preprocess.toml.
 # It's a preprocess knob that training mirrors, and — unlike this file — it is
 # preserved across `make update` (base.toml rides the code-file path and is

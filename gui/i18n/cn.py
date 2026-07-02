@@ -310,6 +310,7 @@ STRINGS: dict[str, str] = {
     "locked_by_preset": "由预设锁定 (此 VRAM 档位的性能设置是固定的)",
     "lora_variants": "LoRA 变体",
     "variant": "变体:",
+    "hardware_preset": "硬件:",
     "apply_variant": "应用",
     "apply_variant_tooltip": "用此变体的预设值填充下面的表单。点击「保存」前不会落盘。",
     "show_guide": "指南",

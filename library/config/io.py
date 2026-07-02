@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 
 _DATASET_CONFIG_SECTIONS = {"general", "datasets"}
 # Top-level TOML tables that exist to carry metadata for tooling (variant
-# registry for the GUI), not values for the argparse namespace. They're
-# stripped before flattening so their keys never reach the trainer / schema.
-_METADATA_CONFIG_SECTIONS = {"variant"}
+# registry for the GUI; ``[<preset>.gui]`` display metadata inside preset
+# sections), not values for the argparse namespace. They're stripped before
+# flattening so their keys never reach the trainer / schema.
+_METADATA_CONFIG_SECTIONS = {"variant", "gui"}
 _NON_FLAT_SECTIONS = _DATASET_CONFIG_SECTIONS | _METADATA_CONFIG_SECTIONS
 _SNAPSHOT_SUFFIX = ".snapshot.toml"
 _DUMP_SKIP_KEYS = {
@@ -420,8 +421,15 @@ def _resolve_preset(preset: str, configs_dir: str = "configs") -> tuple[dict, st
     Looks in ``configs/presets.toml`` first (built-in sections); falls back to
     ``configs/custom/<preset>.toml`` (one file per user-created preset, flat
     key=value with no section header — the filename is the preset name).
+
+    Metadata sub-tables (``[<preset>.gui]`` — display label/group for the GUI
+    preset picker) are stripped so they never reach the flat argparse merge.
     """
     configs_dir = str(resolve_under_home(configs_dir))
+
+    def _strip_meta(section: dict) -> dict:
+        return {k: v for k, v in section.items() if k not in _METADATA_CONFIG_SECTIONS}
+
     presets_path = os.path.join(configs_dir, "presets.toml")
     if os.path.exists(presets_path):
         with open(presets_path, "r", encoding="utf-8") as f:
@@ -431,7 +439,7 @@ def _resolve_preset(preset: str, configs_dir: str = "configs") -> tuple[dict, st
             if not isinstance(section, dict):
                 raise ValueError(f"Preset '{preset}' in {presets_path} is not a table")
             return (
-                dict(section),
+                _strip_meta(section),
                 presets_path,
                 f"{_display_path(presets_path)}[{preset}]",
             )
@@ -441,7 +449,7 @@ def _resolve_preset(preset: str, configs_dir: str = "configs") -> tuple[dict, st
             data = toml.load(f)
         if not isinstance(data, dict):
             raise ValueError(f"Custom preset {custom_path} is not a TOML table")
-        return data, custom_path, _display_path(custom_path)
+        return _strip_meta(data), custom_path, _display_path(custom_path)
     available: list[str] = []
     if os.path.exists(presets_path):
         with open(presets_path, "r", encoding="utf-8") as f:

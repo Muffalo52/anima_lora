@@ -773,6 +773,18 @@ def _widget(v: Any, key: str = "") -> QWidget:
         return _TargetResWidget(sel)
     if key == "sample_prompts":
         return _SamplePromptsLauncher(v)
+    if key == "sample_ratio":
+        # Data-scope quick-pick: the common ratios (the CLI [half]/[quarter]/
+        # [tenth] presets set the same key) plus free-typed values. Still one
+        # flat float key — _read's QComboBox branch coerces via the float orig.
+        w = QComboBox()
+        w.setEditable(True)
+        w.addItems(["1.0", "0.5", "0.25", "0.1"])
+        try:
+            w.setCurrentText(f"{float(v):g}")
+        except (TypeError, ValueError):
+            w.setCurrentText(str(v))
+        return _no_wheel(w)
     if key == "attn_mode":
         w = QComboBox()
         w.addItems(_ATTN_MODES)
@@ -832,7 +844,15 @@ def _read(w: QWidget, orig: Any = None) -> Any:
             if ln.strip() and not ln.strip().startswith("#")
         ]
     if isinstance(w, QComboBox):
-        return w.currentText()
+        txt = w.currentText()
+        # Editable numeric combos (sample_ratio) round-trip as their orig type;
+        # plain string combos (attn_mode, …) have string origs and fall through.
+        if isinstance(orig, float):
+            try:
+                return float(txt)
+            except ValueError:
+                pass
+        return txt
     if isinstance(w, QCheckBox):
         return w.isChecked()
     if isinstance(w, QSpinBox):

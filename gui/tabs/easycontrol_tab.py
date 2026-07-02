@@ -399,7 +399,7 @@ class EasyControlTab(ConfigTab):
         # Method variant: flush form edits so train.py reads the same TOML.
         if self._dirty:
             self._save_preset(silent=True)
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         if not confirm_resumable_checkpoint(self, merged):
             return
         # The variant stem IS the train.py method (EASYADAPTER read only at dispatch),
@@ -413,7 +413,7 @@ class EasyControlTab(ConfigTab):
         only to locate the output checkpoint for the resume prompt."""
         from library.config.io import load_method_preset
 
-        merged = dict(load_method_preset("easycontrol", self._IMPLICIT_PRESET))
+        merged = dict(load_method_preset("easycontrol", self._current_preset()))
         doc = tomllib.loads(
             (_DESCRIPTOR_DIR / f"{variant}.toml").read_text(encoding="utf-8")
         )
@@ -454,7 +454,7 @@ class EasyControlTab(ConfigTab):
         try:
             resp = gui_daemon.submit_training(
                 method="easycontrol",
-                preset=self._IMPLICIT_PRESET,
+                preset=self._current_preset(),
                 methods_subdir=None,
                 extra=extra,
             )
@@ -490,6 +490,7 @@ class EasyControlTab(ConfigTab):
         self.stop_btn.setEnabled(busy)
         self.method_combo.setEnabled(not busy)
         self.variant_combo.setEnabled(not busy)
+        self.preset_combo.setEnabled(not busy)
 
     def _restore_idle_ui(self):
         super()._restore_idle_ui()

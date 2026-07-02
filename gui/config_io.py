@@ -156,6 +156,33 @@ def list_presets() -> list[str]:
     return _lib_list_presets()
 
 
+def list_hardware_presets() -> list[tuple[str, dict]]:
+    """``(name, meta)`` for the presets the Hardware dropdown offers.
+
+    A presets.toml section opts in with a ``[<name>.gui]`` sub-table carrying
+    ``group = "hardware"`` (plus optional ``label`` / ``description`` /
+    ``order``); the sub-table is display metadata only — the trainer-side merge
+    strips it (see ``_METADATA_CONFIG_SECTIONS`` in ``library/config/io.py``).
+    Data-scope presets ([half] etc.) stay CLI-only: the GUI exposes
+    ``sample_ratio`` / ``artists_shard`` as plain form fields instead.
+    Sorted by ``order`` then name; falls back to ``[("default", {})]`` so the
+    dropdown never comes up empty."""
+    out: list[tuple[str, dict]] = []
+    if PRESETS_FILE.exists():
+        try:
+            data = toml.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+        except (toml.TomlDecodeError, OSError):
+            data = {}
+        for name, section in data.items():
+            if not isinstance(section, dict):
+                continue
+            meta = section.get("gui")
+            if isinstance(meta, dict) and meta.get("group") == "hardware":
+                out.append((name, meta))
+    out.sort(key=lambda item: (item[1].get("order", 100), item[0]))
+    return out or [("default", {})]
+
+
 def is_custom_preset(name: str) -> bool:
     return (CUSTOM_DIR / f"{name}.toml").exists()
 
@@ -219,6 +246,8 @@ _GROUPS = {
         "use_valid",
         "validation_split_num",
         "repeat_by_folder_name",
+        "sample_ratio",
+        "artists_shard",
         "training_comment",
     },
     "Samples": {
@@ -279,6 +308,8 @@ _BASIC = {
     "use_shuffled_caption_variants",
     "caption_dropout_rate",
     "masked_loss",
+    "sample_ratio",
+    "artists_shard",
     "gradient_checkpointing",
     "blocks_to_swap",
     "path_scope",

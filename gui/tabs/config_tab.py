@@ -56,11 +56,14 @@ from gui import (
     confirm_resumable_checkpoint,
     confirm_train_using_cache,
     default_lora_cache_dir,
+    get_setting,
     is_basic_field,
     lint_variant_configs,
     list_gui_variants,
+    list_hardware_presets,
     list_methods,
     merged_gui_variant_preset,
+    set_setting,
     remove_unknown_dataset_keys,
     variant_path,
 )
@@ -86,6 +89,8 @@ from gui.progress import (
 )
 
 _GUI_PATH_SCOPE_KEY = "path_scope"
+# gui_settings.json key holding the Hardware preset picked in the top bar.
+_HW_PRESET_SETTING = "hardware_preset"
 _FIELD_ORDER = {
     _GUI_PATH_SCOPE_KEY: 10,
     "source_image_dir": 11,
@@ -209,6 +214,30 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.new_variant_btn.setToolTip(t("new_variant_tooltip"))
         self.new_variant_btn.clicked.connect(self._create_variant)
         top.addWidget(self.new_variant_btn)
+
+        # Hardware preset picker — replaces the old per-variant "-8gb" file
+        # copies. Options are the presets.toml sections tagged
+        # ``[<name>.gui] group="hardware"``. The choice is a machine property:
+        # persisted in gui_settings.json (not the variant file) and fed into
+        # every base→preset→variant merge and daemon job submit.
+        self._preset_label = QLabel(t("hardware_preset"))
+        top.addWidget(self._preset_label)
+        self.preset_combo = QComboBox()
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        for name, meta in list_hardware_presets():
+            self.preset_combo.addItem(str(meta.get("label") or name), name)
+            desc = meta.get("description")
+            if desc:
+                self.preset_combo.setItemData(
+                    self.preset_combo.count() - 1, str(desc), Qt.ToolTipRole
+                )
+        saved_idx = self.preset_combo.findData(
+            str(get_setting(_HW_PRESET_SETTING, "default"))
+        )
+        if saved_idx >= 0:
+            self.preset_combo.setCurrentIndex(saved_idx)
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        top.addWidget(self.preset_combo)
 
         self._save_btn = QPushButton(t("save"))
         # Dirty look = the mixin's default "warning" variant (centralized).
@@ -405,9 +434,17 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # CLI / ComfyUI node submitted) so closing+reopening re-attaches.
         self._try_reattach()
 
-    # Preset selection isn't surfaced in the GUI; the merge still uses 'default'
-    # under the hood so a sparse variant file shows reasonable effective values.
-    _IMPLICIT_PRESET = "default"
+    def _current_preset(self) -> str:
+        """Hardware preset selected in the top bar ('default' before the combo
+        exists — subclasses may call this during ``__init__``)."""
+        combo = getattr(self, "preset_combo", None)
+        data = combo.currentData() if combo is not None else None
+        return str(data) if data else "default"
+
+    def _on_preset_changed(self, *_) -> None:
+        set_setting(_HW_PRESET_SETTING, self._current_preset())
+        # Same policy as a variant switch: re-merge and rebuild the form.
+        self._reload()
 
     def _current_variant(self) -> str:
         """gui-methods variant for the selected method. Falls back to the
@@ -438,7 +475,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             return
         self._refresh_variant_row(method)
         variant = self._current_variant()
-        merged, origin = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, origin = merged_gui_variant_preset(variant, self._current_preset())
         cfg = {k: v for k, v in merged.items() if k not in _SKIP}
         if self._preprocess_tab is not None:
             self._preprocess_tab.set_variant(variant, method=method)
@@ -479,7 +516,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             ),
             "preset": (
                 f"color:{tok('link')}; text-decoration: underline dotted;",
-                f"from presets.toml[{self._IMPLICIT_PRESET}] (saves to {variant_label})",
+                f"from presets.toml[{self._current_preset()}] (saves to {variant_label})",
             ),
             "method": (
                 f"color:{tok('text')}; text-decoration: underline dotted;",
@@ -772,7 +809,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         training-time previews land (see library/anima/training.sample_images)."""
         try:
             merged, _ = merged_gui_variant_preset(
-                self._current_variant(), self._IMPLICIT_PRESET
+                self._current_variant(), self._current_preset()
             )
             merged = self._gui_scoped_paths(merged)
             out = merged.get("output_dir") or "output/ckpt"
@@ -830,11 +867,14 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
         method_orig = _load(path)
         base = _load_base()
-        # Default-preset overlay is part of the effective baseline when deciding
-        # which form values are worth writing to disk (skips redundant entries).
+        # The selected hardware preset's overlay is part of the effective
+        # baseline when deciding which form values are worth writing to disk
+        # (skips redundant entries — a value the preset already provides must
+        # NOT be baked into the variant file, or it would pin the key against
+        # future preset switches; method wins over preset in the merge).
         from gui import _load_all_presets  # local import: only needed for save
 
-        implicit_pset = _load_all_presets().get(self._IMPLICIT_PRESET, {})
+        preset_overlay = _load_all_presets().get(self._current_preset(), {})
 
         out: dict[str, Any] = dict(method_orig)
 
@@ -859,7 +899,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
                         out.pop("variant", None)
                 out.pop(_GUI_PATH_SCOPE_KEY, None)
                 continue
-            baseline = method_orig.get(k, implicit_pset.get(k, base.get(k)))
+            baseline = method_orig.get(k, preset_overlay.get(k, base.get(k)))
             v = _read(w, baseline)
             if k in method_orig or v != baseline:
                 out[k] = v
@@ -1006,11 +1046,12 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
         self.new_variant_btn.setEnabled(False)
+        self.preset_combo.setEnabled(False)
 
     def _resolve_cache_dir(self, variant: str) -> Path:
         """Resolve the absolute lora_cache_dir for the given variant. Used by
         the Train cache-exists branch and the auto-chain preprocess path."""
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         merged = self._gui_scoped_paths(merged)
         cache_rel = merged.get("lora_cache_dir")
         if not cache_rel:
@@ -1024,7 +1065,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         env = {
             "METHOD": variant,
             "METHODS_SUBDIR": "gui-methods",
-            "PRESET": self._IMPLICIT_PRESET,
+            "PRESET": self._current_preset(),
         }
         if self._preprocess_tab is not None:
             env.update(self._preprocess_tab.preprocess_env())
@@ -1035,7 +1076,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
     ) -> dict[str, Any]:
         spec: dict[str, Any] = {
             "method": variant,
-            "preset": self._IMPLICIT_PRESET,
+            "preset": self._current_preset(),
             "methods_subdir": "gui-methods",
         }
         if config_snapshot is not None:
@@ -1101,7 +1142,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         snapshot = copy.deepcopy(
             merged
             if merged is not None
-            else merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)[0]
+            else merged_gui_variant_preset(variant, self._current_preset())[0]
         )
         snapshot = self._gui_scoped_paths(snapshot)
         if self._preprocess_tab is not None:
@@ -1161,7 +1202,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         """
         if self._preprocess_tab is not None:
             return self._preprocess_tab.preprocess_config_snapshot()
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         return self._gui_scoped_paths(copy.deepcopy(merged))
 
     def _launch_preprocess(self, variant: str) -> None:
@@ -1193,6 +1234,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
         self.new_variant_btn.setEnabled(False)
+        self.preset_combo.setEnabled(False)
         self.log.clear()
         self._reset_progress()
         self._progress_tracker.mark_starting(t("starting"))
@@ -1262,7 +1304,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # Resolve ``use_repa`` before the cache-state branch so a config
         # preprocessed before REPA was enabled re-runs preprocess to build the
         # missing PE sidecars rather than launching a silent no-op REPA run.
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         merged = self._gui_scoped_paths(merged)
         # TOML bools arrive as real bools; tolerate a stringified value too.
         _use_repa = merged.get("use_repa")
@@ -1314,7 +1356,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             self._save_preset(silent=True)
 
         variant = self._current_variant()
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         merged = self._gui_scoped_paths(merged)
         if not confirm_resumable_checkpoint(self, merged):
             return
@@ -1325,7 +1367,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         job_id = self._submit_job(
             lambda: gui_daemon.submit_training(
                 method=variant,
-                preset=self._IMPLICIT_PRESET,
+                preset=self._current_preset(),
                 methods_subdir="gui-methods",
                 config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=False,  # queue dropdown: add to queue, don't start now
@@ -1353,7 +1395,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         if not confirm_existing_caches(self, cache_dir):
             return
 
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         merged = self._gui_scoped_paths(merged)
         if train_after and not confirm_resumable_checkpoint(self, merged):
             return
@@ -1405,7 +1447,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         detached. That's what lets training survive the GUI closing. The caller
         owns all pre-launch confirmations (cache-reuse popup, resume prompt).
         """
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged, _ = merged_gui_variant_preset(variant, self._current_preset())
         merged = self._gui_scoped_paths(merged)
         logging_dir = merged.get("logging_dir")
         if logging_dir and self._tb_panel is not None:
@@ -1420,6 +1462,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
         self.new_variant_btn.setEnabled(False)
+        self.preset_combo.setEnabled(False)
         self.log.clear()
         self._reset_progress()
         self._progress_tracker.mark_starting(t("starting"))
@@ -1429,7 +1472,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         job_id = self._submit_job(
             lambda: gui_daemon.submit_training(
                 method=variant,
-                preset=self._IMPLICIT_PRESET,
+                preset=self._current_preset(),
                 methods_subdir="gui-methods",
                 config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=True,  # main Train button: run now
@@ -1519,6 +1562,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
         self.new_variant_btn.setEnabled(True)
+        self.preset_combo.setEnabled(True)
         self.stop_btn.setEnabled(True)
         self._job_timer.start()
 
@@ -1628,6 +1672,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
         self.new_variant_btn.setEnabled(True)
+        self.preset_combo.setEnabled(True)
         if self._tb_panel is not None:
             self._tb_panel.clear_current_run()
 

@@ -364,6 +364,7 @@ STRINGS: dict[str, str] = {
     "locked_by_preset": "프리셋에 의해 잠김 (이 VRAM 프로필의 성능 설정은 고정되어 있습니다)",
     "lora_variants": "LoRA 변형",
     "variant": "변형:",
+    "hardware_preset": "하드웨어:",
     "apply_variant": "적용",
     "apply_variant_tooltip": "아래 폼을 이 variant의 프리셋 값으로 채웁니다. Save를 누르기 전까지는 디스크에 저장되지 않습니다.",
     "show_guide": "가이드",

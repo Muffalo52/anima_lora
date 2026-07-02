@@ -286,7 +286,7 @@ make gui-shortcut   # (Optional) Create a no-console-window .lnk shortcut on the
 
 Main GUI tabs:
 
-- **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `tlora-8gb`, `hydralora`, etc.), edit the `presets.toml` preset (default / low_vram / etc.) and all training keys, then start training.
+- **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `hydralora`, etc.), pick your card in the **Hardware** dropdown (Default 16GB+ / Low VRAM 8GB — the `presets.toml` hardware presets), edit the training keys, then start training. Data scope (`sample_ratio`, `artists_shard`) is a plain form field in the Basic section.
 - **Preprocess**: Run resize + VAE + text embedding caching in one shot.
 - **Dataset**: Preview images/captions and edit captions directly. Also **auto-generates captions** with the Anima Tagger (the *Autotag* button) and **groups visually similar images** so duplicates and same-scene shots are easy to spot — see [§7.4](#74-dataset-tab-autotag--grouping).
 - **Merge**: Bake a trained LoRA into the base DiT to produce a standalone ComfyUI checkpoint (supports base LoRA / OrthoLoRA / T-LoRA only).
@@ -358,7 +358,7 @@ All training runs through TOML config files and HuggingFace Accelerate. The conf
 ```bash
 # Recommended: Ortho + T-LoRA (gui-methods/tlora.toml)
 make lora-gui GUI_PRESETS=tlora                  # Standard environment
-PRESET=low_vram make lora-gui GUI_PRESETS=tlora-8gb   # VRAM 8~12 GB
+PRESET=low_vram make lora-gui GUI_PRESETS=tlora  # VRAM 8~12 GB (GUI: Hardware dropdown)
 
 # Other variants (configs/gui-methods/<variant>.toml — clean single files)
 make lora-gui GUI_PRESETS=lora                   # Plain baseline LoRA
@@ -449,10 +449,10 @@ How it works:
 | Variant | How to Run | When to Use |
 |---|---|---|
 | **OrthoLoRA + T-LoRA** ⭐ | `make lora-gui GUI_PRESETS=tlora` | **Recommended.** SVD-based orthogonal rotation (OrthoLoRA) + timestep rank masking (T-LoRA) stacked. Produces `anima_tlora_ortho.safetensors` |
-| **OrthoLoRA + T-LoRA (8 GB)** | `make lora-gui GUI_PRESETS=tlora-8gb` or `PRESET=low_vram make lora-gui GUI_PRESETS=tlora` | Same recommended combination on VRAM 8~12 GB |
+| **OrthoLoRA + T-LoRA (8 GB)** | `PRESET=low_vram make lora-gui GUI_PRESETS=tlora` (GUI: Hardware → Low VRAM) | Same recommended combination on VRAM 8~12 GB |
 | **Plain LoRA** | `make lora-gui GUI_PRESETS=lora` or `make lora` | Simplest baseline, for comparison experiments |
-| **Plain LoRA (8 GB)** | `make lora-gui GUI_PRESETS=lora-8gb` or `PRESET=low_vram make lora` | VRAM 8~12 GB |
-| **HydraLoRA** | `make lora-gui GUI_PRESETS=hydralora` (8 GB: `hydralora-8gb`) | MoE multi-head routing; fit multiple concepts in one adapter |
+| **Plain LoRA (8 GB)** | `PRESET=low_vram make lora-gui GUI_PRESETS=lora` or `PRESET=low_vram make lora` | VRAM 8~12 GB |
+| **HydraLoRA** | `make lora-gui GUI_PRESETS=hydralora` (8 GB: `PRESET=low_vram`) | MoE multi-head routing; fit multiple concepts in one adapter |
 | **ChimeraHydra** *(experimental)* | `make exp-chimera` or `make lora-gui GUI_PRESETS=chimera_hydra` | Content/frequency dual-pool MoE — for research |
 
 For detailed options per variant, see [`docs/guidelines/training.md`](training.md) and the individual docs under `docs/methods/`.
