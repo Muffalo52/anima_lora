@@ -21,23 +21,23 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 # 90, 128, 152, 180, 214 each for 16, 32, 48, 64, 96
-network_alpha = 128
-network_dim = 32
+network_alpha = 90
+network_dim = 16
 
-learning_rate = 2e-5
-max_train_epochs = 6
-save_every_n_epochs = 6
-checkpointing_epochs = 6
+learning_rate = 5e-5
+max_train_epochs = 4
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
-use_shuffled_caption_variants = true
+# use_shuffled_caption_variants = true
 # use_randomized_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
-output_name = "anima_quarter_4"
+output_name = "anima_plain"
 # sigmoid_bias = 0.5
 # path_pattern = "sincos/*"
-artists_shard="4_4"
+# artists_shard="4_4"
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0
 # use_cmmd=true
@@ -46,7 +46,7 @@ artists_shard="4_4"
 # -------------
 # Ortho-lora
 
-down_init = "weight_svd"
+# down_init = "weight_svd"
 
 # -------------
 # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
@@ -166,9 +166,9 @@ down_init = "weight_svd"
 # PE-Spatial, weight 0.05. DoG is on by default in the factory (opt out with
 # repa_target_dog = false). The `absolute` MLP-head arm lost the Phase-0 A/B and
 # stays reference-only — see docs/methods/repa.md before touching it.
-use_repa       = true
-repa_mode      = "relational"
-repa_weight    = 0.05          # settles at ~4% of total loss at plateau
-repa_layer     = 8            # block to hook (of 28)
-repa_encoder   = "pe_spatial"
+# use_repa       = true
+# repa_mode      = "relational"
+# repa_weight    = 0.05          # settles at ~4% of total loss at plateau
+# repa_layer     = 8            # block to hook (of 28)
+# repa_encoder   = "pe_spatial"
 

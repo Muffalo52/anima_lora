@@ -149,3 +149,33 @@ degradation pipeline) · `train.py` (two-timescale loop, EMA, ckpt) · `dry_run.
 
 κ & η table → from upstream config (κ=2.0 ✓). Disc head arch → mirror DMD2 (small
 conv head). Exact N=4 timesteps → choose+log. Batch/EMA → from SinSR.
+
+## Throughput (2026-07-02 efficiency pass — measured, 16 GB 5070 Ti)
+
+The loop was bs=2-eager-fp32-bound (GPU util 40–78%). Fixes shipped in `train.py`:
+bf16 default (**native**-bf16 VQGAN, mirroring `infer.py` — the old `--amp` never
+covered the 12 fp32 VQGAN encodes/step), fused 2B VQGAN encode (gt+lq), fused
+`d_real`/`d_fake` GAN pass (was 2×5 serial `encode_features`/step), fused
+node-path + LPIPS-path student forward (one 2B fwd+bwd), and class-level
+block-compile (`rsd_models.compile_swin_blocks`). Marginal gen-steps/s × bs
+(steps 5→25, 26-iter runs, `rsd_hr_cap4096`):
+
+| config | it/s | rel. samples/s | peak VRAM |
+|---|---|---|---|
+| OLD loop, bs2+ckpt (3k-iter run log) | 0.586 | 1.17 | — |
+| new, bs2+ckpt | 0.653 | 1.31 | 7.9 GB |
+| **new, bs4 no-ckpt (default)** | 0.618 | **2.47** | 12.8 GB |
+| new, bs6+ckpt | 0.419 | 2.51 | 13.8 GB |
+| **new, bs6 no-ckpt `--compile`** | ≥0.499 | **≥2.99** | 14.8 GB |
+| new, bs8 (any) | OOM | — | >15.5 GB |
+
+≈2.1× the old loop at the bs4 default; ≈2.6× with `--bs 6 --compile` (thin headroom
+— don't run alongside a desktop-heavy session). Key negative results: whole-graph
+`torch.compile` is strictly worse than eager (Swin `window_partition` graph breaks;
+tens of minutes of warmup since ckpt regions trace as higher-order ops), and
+grad-ckpt costs ~25% at these tiny 256² activations — it's a fit-bigger-bs lever
+only. Block-compile's win is the ~1.2 GB VRAM save (unlocks bs6-no-ckpt), not
+per-step speed. NOT re-benched: dataloader headroom at the new rates (full ~4096px
+PNG decode per 256² crop; raise `--num_workers` or pre-tile if starved). Batch
+reuse across the K critic updates (5× fewer encodes) is designed but NOT built —
+needs a 500-iter quality A/B first.

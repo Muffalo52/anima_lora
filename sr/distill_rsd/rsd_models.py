@@ -57,9 +57,10 @@ def enable_grad_checkpointing(model):
 
     UNetModelSwin hardcodes use_checkpoint=False on each BasicLayer, so the windowed
     attention at the 64x64 latent grid keeps all activations live for backward. The
-    layer input always flows from trainable convs here, so reentrant checkpoint won't
-    drop grad. Only worth it on the trainable nets (student/fake) — frozen no_grad
-    forwards (teacher) build no graph anyway.
+    vendored BasicLayer runs checkpoint(use_reentrant=False) — grad-safe regardless of
+    where the params get their grad, and composes with torch.compile. Only worth it on
+    the trainable nets (student/fake) — frozen no_grad forwards (teacher) build no
+    graph anyway.
     """
     n = 0
     for m in model.modules():
@@ -163,6 +164,29 @@ class StochasticUNet(UNetModelSwin):
         # first sub-module of middle_block is the ResBlock -> bottleneck feats
         h = self.middle_block[0](h, emb)
         return h  # [B, 640, 8, 8]
+
+
+def compile_swin_blocks():
+    """Block-compile the vendored SwinUNet (the repo's compile_blocks trick).
+
+    Whole-graph torch.compile on UNetModelSwin is pathological: dynamo traces the full
+    174M net once per (net, grad-mode, batch-shape) variant — ~7 giant graphs — and every
+    checkpoint() call inside becomes a higher-order op speculate-traced as its own
+    subgraph. Measured: tens of minutes of warmup for ~zero steady-state win.
+
+    Compiling the repeated block CLASSES instead keeps the module glue eager, leaves
+    checkpoint() OUTSIDE compiled code (backward recompute just re-invokes the compiled
+    forward — no higher-order op), and every instance across student/fake/teacher shares
+    one compiled artifact per distinct (resolution, width, batch, grad-mode): a handful
+    of small graphs. Idempotent; raise the dynamo recompile budget first (the variants
+    all live on ONE code object per class).
+    """
+    from models.swin_transformer import SwinTransformerBlock  # vendored ResShift
+    from models.unet import ResBlock
+    for cls in (SwinTransformerBlock, ResBlock):
+        if not getattr(cls, "_block_compiled", False):
+            cls.forward = torch.compile(cls.forward)
+            cls._block_compiled = True
 
 
 def make_eps(model, ref):

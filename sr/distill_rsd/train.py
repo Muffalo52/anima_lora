@@ -3,7 +3,8 @@
 Two-timescale: K fake-critic updates per generator update. Frozen v2 teacher, 1-step
 stochastic student, fake ResShift critic + GAN head, image-space LPIPS. See DESIGN.md.
 
-Run inside sr/.venv:  python train.py --iters 3000 --bs 2 [--amp]
+Run inside sr/.venv:  python train.py --iters 3000 [--bs 6 --compile] [--no-amp]
+(perf defaults benched 2026-07-02 — see DESIGN.md "Throughput".)
 """
 import argparse
 import copy
@@ -49,7 +50,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=3000, help="generator updates")
     ap.add_argument("--K", type=int, default=5, help="fake updates per generator update")
-    ap.add_argument("--bs", type=int, default=2)
+    ap.add_argument("--bs", type=int, default=4,
+                    help="batch size (default 4: benched 2026-07-02 on the 16GB 5070 Ti — "
+                         "bs4 no-ckpt eager 2.47 rel-throughput vs bs2-ckpt 1.31; bs8 OOM)")
     ap.add_argument("--grad_accum", type=int, default=1)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--lambda_lpips", type=float, default=2.0)
@@ -75,10 +78,24 @@ def main():
                          "won't load into the widened concat conv).")
     ap.add_argument("--noise_channels", type=int, default=None,
                     help="injected-noise channel count (default 3 for add, 1 for concat/official)")
-    ap.add_argument("--amp", action="store_true", help="bf16 autocast")
-    ap.add_argument("--no_grad_ckpt", action="store_true",
-                    help="disable Swin gradient checkpointing on student/fake (on by "
-                         "default — big activation-memory save, bit-exact)")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                    help="bf16 autocast on the nets + NATIVE-bf16 VQGAN (matches infer.py; "
+                         "autocast alone would keep the VQGAN GroupNorms fp32 and materialize "
+                         "the full-res norm activations). --no-amp = full fp32.")
+    ap.add_argument("--compile", action="store_true",
+                    help="block-compile the Swin/Res blocks at the CLASS level (shared across "
+                         "student/fake/teacher; glue stays eager, checkpoint() stays outside "
+                         "the compiled region — see rsd_models.compile_swin_blocks). Per-step "
+                         "it/s is a wash vs eager, but the ~1.2GB VRAM save is what lets "
+                         "`--bs 6` run without grad-ckpt (best measured throughput, ~14.8GB). "
+                         "Whole-graph compile was measured strictly worse — don't revive it.")
+    ap.add_argument("--grad_ckpt", action=argparse.BooleanOptionalAction, default=False,
+                    help="Swin gradient checkpointing on student/fake (bit-exact activation "
+                         "save; default OFF — at 256-px crops the recompute costs ~25%% "
+                         "throughput and bs4 fits without it; turn on to fit bigger bs "
+                         "on smaller cards)")
+    ap.add_argument("--no_grad_ckpt", dest="grad_ckpt", action="store_false",
+                    help=argparse.SUPPRESS)  # legacy spelling (pre-2026-07 runs)
     ap.add_argument("--src", default=None,
                     help="HR source dir (default image_dataset; pass the prep_rsd_cache "
                          "4096-capped cache for faster decode at the right 1024->4096 scale)")
@@ -98,10 +115,15 @@ def main():
     print("building nets...")
     gen_kw = dict(noise_mode=args.noise_mode, noise_channels=args.noise_channels)
     teacher = M.build_teacher(cfg, str(TEACHER_CKPT), dev)
-    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt, **gen_kw)
-    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=not args.no_grad_ckpt, **gen_kw)
+    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=args.grad_ckpt, **gen_kw)
+    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=args.grad_ckpt, **gen_kw)
     disc = M.DiscHead().to(dev)
     vqgan = M.build_autoencoder(cfg, dev)
+    if args.amp:
+        # native bf16 (mirrors infer.py): the frozen VQGAN is the full pixel-res conv
+        # stack; under autocast its GroupNorms stay fp32 and dominate encode VRAM/time.
+        vqgan = vqgan.to(torch.bfloat16)
+    vdt = next(vqgan.parameters()).dtype
     diff = M.build_diffusion(cfg)
     T = diff.num_timesteps
     ema = copy.deepcopy(student).eval()
@@ -119,6 +141,17 @@ def main():
     opt_g = torch.optim.AdamW(student.parameters(), lr=args.lr, betas=(0.9, 0.95))
     opt_f = torch.optim.AdamW(list(fake.parameters()) + list(disc.parameters()),
                               lr=args.lr, betas=(0.9, 0.95))
+
+    if args.compile:
+        # Block-compile (class-level, state_dict-transparent). All shape/grad-mode
+        # variants share each class's ONE code object, so the recompile budget must be
+        # raised — and pinned via its ContextVar .default or it silently reverts to 8 in
+        # the backward-compile context and spills to eager (same trap as distill_mod/spd).
+        sys.path.insert(0, str(M.REPO))
+        from library.runtime.dynamo import pin_dynamo_limit  # dependency-free helper
+        for knob in ("recompile_limit", "cache_size_limit"):
+            pin_dynamo_limit(knob, 64)
+        M.compile_swin_blocks()
 
     loader = DataLoader(ArtSRDataset(src=args.src, gt_size=256, scale=cfg.diffusion.params.sf,
                                      length=args.iters * (args.K + 1) * args.bs * args.grad_accum + 1000),
@@ -139,8 +172,11 @@ def main():
         return b["gt"].to(dev, non_blocking=True), b["lq"].to(dev, non_blocking=True)
 
     def encode(gt, lq):
+        # one fused 2B encode (native bf16 under --amp); latents come back fp32 so all
+        # downstream diffusion math is unchanged (they're tiny — 3ch at /4 res).
         with torch.no_grad():
-            return vqgan.encode(gt) * sf_scale, vqgan.encode(lq) * sf_scale
+            z = vqgan.encode(torch.cat([gt, lq]).to(vdt)).float() * sf_scale
+        return z.chunk(2)
 
     def rand_t(B, src):
         return src[torch.randint(0, len(src), (B,), device=dev)] if torch.is_tensor(src) \
@@ -149,7 +185,7 @@ def main():
     log_path = save_dir / "progress.jsonl"
     t0 = time.time()
     print(f"training: iters={args.iters} K={args.K} bs={args.bs}x{args.grad_accum} "
-          f"T={T} nodes={args.nodes} amp={args.amp}")
+          f"T={T} nodes={args.nodes} amp={args.amp} compile={args.compile}")
 
     for step in range(args.iters):
         # ===== K fake-critic updates =====
@@ -166,8 +202,11 @@ def main():
             with autocast():
                 x0_fake = predict_x0(diff, fake, z_t, z_y, t, eps)
                 L_fake = F.mse_loss(x0_fake.float(), z0_hat.float())
-                d_real = disc(fake.encode_features(z0, z_y, eps=eps))
-                d_fake = disc(fake.encode_features(z0_hat.detach(), z_y, eps=eps))
+                # real + fake GAN features in ONE 2B encoder pass (was two serial passes)
+                feats = fake.encode_features(
+                    torch.cat([z0, z0_hat.detach().float()]), z_y.repeat(2, 1, 1, 1),
+                    eps=eps.repeat(2, 1, 1, 1))
+                d_real, d_fake = disc(feats).chunk(2)
                 L_gan_d = (F.softplus(-d_real) + F.softplus(d_fake)).mean()
             (L_fake + args.lambda_gan * L_gan_d).backward()
             opt_f.step()
@@ -180,8 +219,16 @@ def main():
             z0, z_y = encode(gt, lq)
             t_n = rand_t(B, nodes); eps = make_eps(student, z0)
             z_tn = diff.q_sample(z0, z_y, t_n)
+            # single-step LPIPS path from z_T ~ N(z_y, kappa^2), stacked into the SAME
+            # student forward as the node path (t is per-sample, so the two paths batch
+            # cleanly) — halves the most expensive fwd+bwd of the generator phase.
+            z_TT = z_y + diff.kappa * torch.randn_like(z_y)
+            tT = torch.full((B,), T - 1, device=dev, dtype=torch.long)
             with autocast():
-                z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)
+                out = predict_x0(diff, student, torch.cat([z_tn, z_TT]),
+                                 z_y.repeat(2, 1, 1, 1), torch.cat([t_n, tT]),
+                                 torch.cat([eps, make_eps(student, z_y)]))
+            z0_hat, z0_single = out[:B], out[B:]
             t = rand_t(B, T)
             z_t = diff.q_sample(z0_hat.detach().float(), z_y, t)
             with torch.no_grad(), autocast():
@@ -203,14 +250,12 @@ def main():
                         dim=[1, 2, 3], keepdim=True).clamp_min(0.05)
                 grad = grad / denom
             L_theta = 0.5 * F.mse_loss(z0_hat.float(), (z0_hat.float() - grad).detach())
-            # single-step LPIPS path from z_T ~ N(z_y, kappa^2)
-            z_TT = z_y + diff.kappa * torch.randn_like(z_y)
-            tT = torch.full((B,), T - 1, device=dev, dtype=torch.long)
+            # decode runs native bf16 outside autocast (grad flows through the frozen
+            # decoder; matches infer.py's VAE handling), image back to fp32 for the losses
+            x0_img = vqgan.decode(z0_single.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
             with autocast():
-                z0_single = predict_x0(diff, student, z_TT, z_y, tT, make_eps(student, z_y))
-                x0_img = vqgan.decode(z0_single.float(), force_not_quantize=True).clamp(-1, 1)
                 L_lpips = lp(x0_img, gt).mean()
-                L_dc = dc_loss(x0_img.float(), gt.float())
+                L_dc = dc_loss(x0_img, gt.float())
                 L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, z_y, eps=eps))).mean()
             loss = (L_theta + args.lambda_lpips * L_lpips + args.lambda_dc * L_dc
                     + args.lambda_gan * L_gan_g) / args.grad_accum
@@ -225,7 +270,8 @@ def main():
         if step % args.log_every == 0:
             rate = (step + 1) / (time.time() - t0)
             line = {"step": step, **{k: round(v, 4) for k, v in g_logs.items()},
-                    "it_s": round(rate, 3)}
+                    "it_s": round(rate, 3),
+                    "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2)}
             print(line)
             with open(log_path, "a") as f:
                 f.write(json.dumps(line) + "\n")
