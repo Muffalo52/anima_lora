@@ -3,7 +3,7 @@
 Revives the archived v1 REPA (Yu et al., arXiv:2410.06940; ``_archive/repa/``)
 at the granularity its own docstring pre-planned, with two loss forms selectable
 per run for the Phase-0 three-arm A/B (see
-``docs/experimental/repa.md``):
+``docs/methods/repa.md``):
 
 - **Arm A — absolute patchwise**: project DiT block tokens → encoder dim with a
   small MLP head, cosine per token in fp32, mean. Paper-faithful REPA at the
@@ -41,7 +41,7 @@ stashed on the network; the adapter reads them off ``ctx.network`` so no new
 ``args`` plumbing is needed. The scalar alignment loss is returned under
 ``aux["repa"]`` and weighted by ``LossComposer`` stage 2 (``losses._repa_loss``).
 
-Phase-1 operating-point levers (``docs/experimental/repa.md`` §"Annealing
+Phase-1 operating-point levers (``docs/methods/repa.md`` §"Annealing
 plan"; archived proposal
 ``_archive/proposals/repa_phase1_operating_point.md``; both default-off):
 
@@ -191,7 +191,7 @@ def _safe_blur(grid: torch.Tensor, sigma: float, gh: int, gw: int) -> torch.Tens
     ``pad ≤ min_dim − 1``. On the coarse PE grid (~28–46 patches/side) the
     REPA-DoG divisors (≥16) never trigger this, but clamp σ defensively so an
     aggressive small divisor degrades to the widest valid blur instead of
-    crashing — same guard as the Phase-0 probe (``bench/repa/probe_dog_target.py``).
+    crashing — same guard as the Phase-0 probe (``_archive/bench/repa/probe_dog_target.py``).
     """
     from library.runtime.fei import gaussian_blur_2d
 
@@ -216,7 +216,7 @@ def dog_standardize(
 
     Generalizes ``spatial_norm``'s DC removal to a broader low-band strip
     (arXiv:2603.14645v1 §3.5, ``_archive/proposals/repa_dog_target.md``). Phase 0
-    (``bench/repa/probe_dog_target.py``) found this lifts target
+    (``_archive/bench/repa/probe_dog_target.py``) found this lifts target
     discriminability on all 3 content axes (best ``σ₁ = min/16``). ``pe`` is
     ``(B, N, d)`` with ``N == gh*gw`` (CLS already dropped); reshaped to the
     ``(gh, gw)`` grid in row-major order, band-passed, standardized, and

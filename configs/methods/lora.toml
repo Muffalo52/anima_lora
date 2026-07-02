@@ -155,34 +155,20 @@ down_init = "weight_svd"
 # vr_fei_sigma_low_div = 4.0
 
 # -------------
-# REPA v2 — encoder-alignment aux loss (docs/experimental/repa.md).
+# REPA — encoder-alignment aux loss (docs/methods/repa.md).
 #
 # Aligns a mid-block DiT feature to cached PE-Spatial patch tokens — a training-
 # time regularizer, orthogonal to the routing axes above (composes with the
 # default stack). PREREQ: `make preprocess-pe-spatial` to cache
 # {stem}_anima_pe_spatial.safetensors sidecars first.
 #
-#   repa_mode = "relational"  → Gram / relational-KD form (no head, domain-offset
-#                               cancelled). Phase-0 WINNER (2026-06-12, ~6:4–7:3
-#                               over absolute on eyeballed grids; corroborated by
-#                               iREPA arXiv:2512.10794) — the default.
-#             = "absolute"     → paper-faithful per-token cosine + MLP head.
-#                               Reference only; don't spend runs on it.
-#
-# Phase-1 operating-point levers (anneal/cutoff, spatial norm, token-subset Gram):
-# docs/experimental/repa.md §"Annealing plan". spatial_norm is validated + ON
-# below; anneal stays off pending its A/B (candidate 0.25); lever 3 closed.
+# Shipped stack: relational (Gram) form + REPA-DoG target band-pass, block 8,
+# PE-Spatial, weight 0.05. DoG is on by default in the factory (opt out with
+# repa_target_dog = false). The `absolute` MLP-head arm lost the Phase-0 A/B and
+# stays reference-only — see docs/methods/repa.md before touching it.
 use_repa       = true
 repa_mode      = "relational"
-repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
+repa_weight    = 0.05          # settles at ~4% of total loss at plateau
 repa_layer     = 8            # block to hook (of 28)
 repa_encoder   = "pe_spatial"
-repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
-
-# repa_anneal_steps = 0.5
-
-# Lever 1 — hard cutoff (HASTE): (0,1] = fraction of the run, >1 = absolute
-# optimizer steps, 0 = off. Candidate: 0.25 — the quarter-run align_loss curve
-# plateaus by ~18% of the run (anima_repa_normed_quarter, 2026-06-12).
-# repa_anneal_steps = 0.25
 
