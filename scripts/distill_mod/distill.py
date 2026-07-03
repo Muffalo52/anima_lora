@@ -21,7 +21,7 @@ complementing the cross-attention path.
 GAD (geometry-aware distillation; ``--gad_weight > 0``, off by default) adds a
 first-order term that also matches the teacher's *response to a text change* —
 see ``scripts/distill_mod/plan.md`` and
-``docs/findings/mod_guidance_text_derivative_orthogonal.md``.
+``docs/findings/mod_guidance_quality_tag_axis.md`` §3 (text-derivative orthogonal).
 
 Config lives in ``scripts/distill_mod/config.py`` (argparser + resolved
 ``ModConfig`` dataclass), mirroring the ``distill_turbo/`` precedent.

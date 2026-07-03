@@ -91,5 +91,5 @@ side-channel only.
 - DAVE-specific conclusions (the cap is justified by eyeball + the paper, **not** by
   this probe): `bench/dave/README.md` Phase 2d / Phase 3.
 - Related "we measured the wrong thing" findings: `turbo_fei_band_deficit_falsified.md`,
-  `mod_guidance_text_derivative_orthogonal.md` (pointwise MSE leaves the text
+  `mod_guidance_quality_tag_axis.md` §3 (pointwise MSE leaves the text
   *direction* unconstrained — another normalization/projection blind spot).

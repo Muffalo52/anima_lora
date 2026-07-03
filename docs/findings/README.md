@@ -36,15 +36,13 @@ The leftmost column is the outcome — what the evidence settled:
 
 | Verdict | Doc | What it says |
 |---------|-----|--------------|
-| DEMOTED | [mod_guidance_quality_tag_axis.md](mod_guidance_quality_tag_axis.md) | The "quality axis" is really a content-magnitude axis (geometry-only); replaced by image-space channel attribution. |
-| RESOLVED | [mod_guidance_text_derivative_orthogonal.md](mod_guidance_text_derivative_orthogonal.md) | The distilled head matches the teacher pointwise but its text-derivative is orthogonal — an **architectural** cos ceiling (AdaLN writes DC, the teacher's text response is ~99% AC), not a fit gap. A global-tone lever, not a content lever. |
+| DEMOTED + RESOLVED | [mod_guidance_quality_tag_axis.md](mod_guidance_quality_tag_axis.md) | The pooled-text head is a **global-tone/finishing lever, not a content or quality lever**. The "quality axis" is really content-magnitude (channel attribution); its text-derivative is orthogonal to the teacher's — an **architectural** cos ceiling (AdaLN writes DC, the teacher's text response is ~99% AC), not a fit gap. Schedule (σ+layer) axes both falsified; shipped `8–26` full-dose validated. |
 
 ## Turbo (DP-DMD) levers
 
 | Verdict | Doc | Why |
 |---------|-----|-----|
-| FALSIFIED | [turbo_fei_band_deficit_falsified.md](turbo_fei_band_deficit_falsified.md) | FEI band-deficit reweighting of the CFG-uplift `δ_cfg` — why it was plausible, why it failed in the CA-era loop. |
-| CLOSED | [turbo_fei_band_revival_closed.md](turbo_fei_band_revival_closed.md) | The same lever reopened on-trajectory (a legitimate reopen) and died again. Do not re-propose FEI / band-split levers on the DP-DMD loop. |
+| CLOSED (dead twice) | [turbo_fei_band_deficit_falsified.md](turbo_fei_band_deficit_falsified.md) | FEI band-deficit reweighting of the CFG-uplift `δ_cfg`: falsified in the CA-era loop (wrong distribution), then legitimately reopened on-trajectory and killed again (σ-matched null). Do not re-propose FEI / band-split levers on the DP-DMD loop. |
 
 ## Premises that held — the thing shipped
 

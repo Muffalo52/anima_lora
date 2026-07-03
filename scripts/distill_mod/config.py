@@ -264,7 +264,7 @@ def build_argparser() -> argparse.ArgumentParser:
     # GAD (geometry-aware distillation; arXiv 2606.01651) — also match the
     # teacher's finite-difference text response. gad_weight=0 (default) skips the
     # two extra forwards → bit-for-bit the MSE-only path. Motivation:
-    # docs/findings/mod_guidance_text_derivative_orthogonal.md.
+    # docs/findings/mod_guidance_quality_tag_axis.md §3 (text-derivative orthogonal).
     parser.add_argument(
         "--gad_weight",
         type=float,
