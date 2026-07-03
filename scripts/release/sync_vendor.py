@@ -30,7 +30,7 @@ Five targets:
 * ``custom_nodes/comfyui-anima-trainer/_vendor/`` — the stdlib daemon *client*
   the trainer node submits jobs through. Lets the node be installed outside
   the anima_lora repo and still talk to a running daemon over localhost HTTP.
-  ``scripts/daemon/config.py`` + ``client.py`` are copied verbatim; ``proc.py``
+  ``anima_daemon/config.py`` + ``client.py`` are copied verbatim; ``proc.py``
   is trimmed to ``read_pidfile`` only so the vendored client stays pure-stdlib
   (the live ``proc.py`` imports psutil for spawn/kill, which the node never
   needs — it errors if the daemon isn't already up rather than auto-starting).
@@ -386,16 +386,15 @@ def build_hydralora_vendor() -> None:
 # client pure-stdlib (the node never auto-starts the daemon, so spawn/kill is
 # never exercised).
 TRAINER_VERBATIM: list[tuple[str, str]] = [
-    ("scripts/daemon/config.py", "scripts/daemon/config.py"),
-    ("scripts/daemon/client.py", "scripts/daemon/client.py"),
+    ("anima_daemon/config.py", "anima_daemon/config.py"),
+    ("anima_daemon/client.py", "anima_daemon/client.py"),
 ]
 
 TRAINER_PACKAGE_DIRS: list[str] = [
-    "scripts",
-    "scripts/daemon",
+    "anima_daemon",
 ]
 
-TRIMMED_DAEMON_PROC = '''"""Trimmed extract of scripts/daemon/proc.py for the vendored daemon client.
+TRIMMED_DAEMON_PROC = '''"""Trimmed extract of anima_daemon/proc.py for the vendored daemon client.
 
 Contains only ``read_pidfile`` — the single symbol ``client.py`` touches at
 runtime (via ``_resolve_port``). The full live module routes spawn / kill /
@@ -421,7 +420,7 @@ def read_pidfile(path: Path) -> Optional[dict]:
 '''
 
 TRAINER_TRIMMED: list[tuple[str, str]] = [
-    ("scripts/daemon/proc.py", TRIMMED_DAEMON_PROC),
+    ("anima_daemon/proc.py", TRIMMED_DAEMON_PROC),
 ]
 
 

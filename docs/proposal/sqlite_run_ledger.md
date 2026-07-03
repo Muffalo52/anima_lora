@@ -13,7 +13,7 @@ source of truth; the DB is a rebuildable index plus a home for run history.
 The DB is a **cache you can `rm` and rebuild**. Every fact it holds also lives
 in a flat file that survives a corrupt or deleted DB:
 
-- `job.json` (`scripts/daemon/jobs.py:100`) stays the truth for job state —
+- `job.json` (`anima_daemon/jobs.py:100`) stays the truth for job state —
   atomic via `.tmp` swap, human-readable, `cat`-debuggable.
 - `output/ckpt/<name>.snapshot.toml` (`library/config/io.py:695`) stays the
   truth for "the config that produced the checkpoint on disk right now."
@@ -47,7 +47,7 @@ run of the same `output_name`") mean globbing `output/logs/<run_TS>/` and
 parsing TOML by hand. This is what the ledger retires.
 
 **#3 can't be virtualized away** — it's passed back as `--config_file` when the
-daemon spawns `train.py` (`scripts/daemon/manager.py:603`), so the path must
+daemon spawns `train.py` (`anima_daemon/manager.py:603`), so the path must
 exist on disk at spawn time. Keep writing it; it self-cleans with the job dir.
 
 ## Schema
@@ -147,7 +147,7 @@ known gap, not a silent one.
 ## Explicit non-goals
 
 - **`progress.jsonl` stays exactly as is.** It's line-buffered and *tailed*
-  (`scripts/daemon/tail.py` `read_events`); per-step `INSERT`s would put a write
+  (`anima_daemon/tail.py` `read_events`); per-step `INSERT`s would put a write
   dependency on the training hot path and replace clean append-tail with table
   polling. The ledger reads the *summary* at `run_end`, never the per-step
   stream.

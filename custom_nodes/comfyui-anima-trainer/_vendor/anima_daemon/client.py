@@ -9,6 +9,7 @@ both the ComfyUI node and ``make daemon`` rely on.
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import sys
 import time
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from . import config, proc
+
+logger = logging.getLogger("anima.daemon")
 
 
 def venv_python(*, windowless: bool = False) -> str:
@@ -97,6 +100,30 @@ def _root_mismatch_message(health: dict, expected_root: str | Path) -> str:
     )
 
 
+def daemon_is_stale(health: Optional[dict]) -> bool:
+    """True iff a live daemon is serving code older than the current on-disk source.
+
+    Compares the fingerprint the daemon reported it *booted* with against a
+    fresh hash of ``anima_daemon/*.py`` on disk. A daemon predating the
+    fingerprint field (no ``fingerprint`` key) is treated as stale so it gets
+    replaced by a current one. Used by ``ensure_daemon`` (eager restart) and
+    ``daemon-status`` (``stale_code`` flag). See ``config.source_fingerprint``.
+    """
+    if not health:
+        return False
+    running = health.get("fingerprint")
+    if not running:
+        return True
+    return running != config.source_fingerprint()
+
+
+def _await_down(client: "DaemonClient", timeout: float) -> None:
+    """Poll until ``client`` stops answering ``/health`` or ``timeout`` elapses."""
+    deadline = time.time() + timeout
+    while time.time() < deadline and client.health() is not None:
+        time.sleep(0.2)
+
+
 def _has_live_jobs(client: "DaemonClient") -> bool:
     try:
         return any(
@@ -160,7 +187,13 @@ class DaemonClient:
         overrides: Optional[dict] = None,
         extra: Optional[list[str]] = None,
         start: Optional[bool] = None,
+        captured_env: Optional[dict] = None,
     ) -> dict:
+        # Snapshot the caller's whitelisted env (Phase 0b) so the queued job runs
+        # with THIS shell's GPU/model/token settings, not the daemon's boot env.
+        # Pass captured_env={} explicitly to opt out.
+        if captured_env is None:
+            captured_env = config.capture_env()
         return self._request(
             "POST",
             "/jobs",
@@ -173,6 +206,7 @@ class DaemonClient:
                 "overrides": overrides or {},
                 "extra": extra or [],
                 "start": start,
+                "captured_env": captured_env,
             },
         )
 
@@ -186,7 +220,10 @@ class DaemonClient:
         config_snapshot: Optional[dict] = None,
         config_file: Optional[str] = None,
         start: Optional[bool] = None,
+        captured_env: Optional[dict] = None,
     ) -> dict:
+        if captured_env is None:
+            captured_env = config.capture_env()
         return self._request(
             "POST",
             "/jobs",
@@ -199,6 +236,7 @@ class DaemonClient:
                 "config_snapshot": config_snapshot or None,
                 "config_file": config_file,
                 "start": start,
+                "captured_env": captured_env,
             },
         )
 
@@ -257,7 +295,7 @@ def ensure_daemon(
     """Return a client to a live daemon, starting one if needed.
 
     Idempotent: if ``/health`` answers we just return a client. Otherwise spawn
-    ``python -m scripts.daemon`` detached (stdout → ``daemon.log``) and poll
+    ``python -m anima_daemon`` detached (stdout → ``daemon.log``) and poll
     ``/health`` until it answers or ``timeout`` elapses.
 
     The daemon may bind a *different* port than requested if the preferred one
@@ -275,26 +313,36 @@ def ensure_daemon(
     requested = port or _resolve_port()
     client = DaemonClient(requested)
     health = client.health()
-    if health is not None and expected_root is None:
-        return client
-    if health is not None and expected_root is not None:
-        if daemon_matches_root(health, expected_root):
-            return client
-        if health.get("active_job") or _has_live_jobs(client):
-            raise RuntimeError(
-                f"{_root_mismatch_message(health, expected_root)}; "
-                "it still has queued or running jobs"
-            )
-        client.shutdown(kill_jobs=False)
-        deadline = time.time() + min(timeout, 5.0)
-        while time.time() < deadline and client.health() is not None:
-            time.sleep(0.2)
+    if health is not None:
+        if expected_root is None or daemon_matches_root(health, expected_root):
+            # Our checkout (or the caller doesn't care which): reuse it unless
+            # it's running stale code, in which case restart eagerly so we never
+            # trust a resident process serving a since-edited anima_daemon/*.
+            # Reconcile on the fresh daemon re-adopts the running job losslessly
+            # and queued jobs persist on disk, so restarting with live work is
+            # safe here (unlike the cross-checkout case below). Cost ~1–2s, paid
+            # at most once per daemon-code change.
+            if not daemon_is_stale(health):
+                return client
+            logger.info("daemon is running stale code; restarting")
+            client.shutdown(kill_jobs=False)
+            _await_down(client, min(timeout, 5.0))
+        else:
+            # A different checkout's daemon holds the port. Refuse to evict it if
+            # it has live work; otherwise reclaim the port for ours.
+            if health.get("active_job") or _has_live_jobs(client):
+                raise RuntimeError(
+                    f"{_root_mismatch_message(health, expected_root)}; "
+                    "it still has queued or running jobs"
+                )
+            client.shutdown(kill_jobs=False)
+            _await_down(client, min(timeout, 5.0))
 
     config.ensure_state_dirs()
     proc.spawn_detached(
         # pythonw.exe → no console window whose close button would kill the
         # daemon and strand the pidfile. Logs still go to daemon.log below.
-        [venv_python(windowless=True), "-m", "scripts.daemon", str(requested)],
+        [venv_python(windowless=True), "-m", "anima_daemon", str(requested)],
         cwd=config.ROOT,
         stdout_path=config.DAEMON_LOG,
     )

@@ -7,7 +7,7 @@ per-checkpoint ModelSpec git query fire repeatedly, so on Windows users see a
 terminal blink several times whenever a checkpoint is written — cosmetic but
 alarming.
 
-This is distinct from the *job launcher* (``scripts/daemon/proc.py``), which
+This is distinct from the *job launcher* (``anima_daemon/proc.py``), which
 spawns the trainer under ``pythonw.exe``: ``CREATE_NO_WINDOW`` doesn't survive
 the uv venv ``python.exe`` trampoline re-exec, so that path needs a different
 fix. ``CREATE_NO_WINDOW`` *does* work for direct console executables, which is

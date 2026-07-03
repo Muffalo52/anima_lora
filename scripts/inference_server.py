@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Resident Anima inference server — load the DiT/VAE/TE once, generate many.
 
-This is the inference twin of the training ``scripts/daemon/``: same
+This is the inference twin of the training ``anima_daemon/``: same
 **discoverability** skin (a localhost HTTP port + a pidfile both written to a
 fixed per-user location), wrapped around the **resident-model** lifetime the
 ``scripts/anima_tagger/autotag_server.py`` worker pioneered. The engine itself is
@@ -68,7 +68,7 @@ if str(ROOT) not in sys.path:
 logger = logging.getLogger("anima.inference_server")
 
 # --------------------------------------------------------------------------- #
-# Discovery — mirrors scripts/daemon/config.py so any client (CLI / agent /
+# Discovery — mirrors anima_daemon/config.py so any client (CLI / agent /
 # MCP / a vendored node) finds {port} without hardcoding it. Kept inline so this
 # file stays self-contained and importable without dragging in torch.
 # --------------------------------------------------------------------------- #

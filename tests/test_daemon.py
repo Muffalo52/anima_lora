@@ -18,14 +18,14 @@ import time
 import psutil
 import pytest
 
-from scripts.daemon import config, gpu, jobs, proc
+from anima_daemon import config, gpu, jobs, proc
 
 # Bound at import time so tests that monkeypatch the client module's attribute
 # can still build a real (dead) client without recursing into their own patch.
-from scripts.daemon.client import DaemonClient as _RealDaemonClient
-from scripts.daemon.manager import JobManager
-from scripts.daemon.mcp import MCPServer
-from scripts.daemon.server import serve
+from anima_daemon.client import DaemonClient as _RealDaemonClient
+from anima_daemon.manager import JobManager
+from anima_daemon.mcp import MCPServer
+from anima_daemon.server import serve
 from scripts.tasks._common import build_method_args
 
 
@@ -127,7 +127,7 @@ def _wait_until(pred, timeout=20.0, interval=0.1):
 @pytest.fixture
 def daemon(tmp_path, monkeypatch):
     """An in-process daemon (manager + HTTP server) with fake training cmds."""
-    from scripts.daemon import client
+    from anima_daemon import client
 
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
     monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
@@ -260,8 +260,8 @@ def test_cli_queue_submits_instead_of_launching(daemon, monkeypatch):
 
     cl, _ = daemon
     # Point the CLI's daemon client at the in-process test daemon (train() does
-    # a local `from scripts.daemon import client` then calls ensure_daemon).
-    import scripts.daemon.client as daemon_client
+    # a local `from anima_daemon import client` then calls ensure_daemon).
+    import anima_daemon.client as daemon_client
 
     monkeypatch.setattr(daemon_client, "ensure_daemon", lambda **kw: cl)
     launched = []
@@ -284,7 +284,7 @@ def test_cli_queue_folds_artist_into_extra(daemon, monkeypatch):
     from scripts.tasks import _common
 
     cl, _ = daemon
-    import scripts.daemon.client as daemon_client
+    import anima_daemon.client as daemon_client
 
     monkeypatch.setattr(daemon_client, "ensure_daemon", lambda **kw: cl)
     monkeypatch.setattr(_common, "accelerate_launch", lambda *a: None)
@@ -475,7 +475,7 @@ def test_command_job_build_cmd():
     cmd, env = mgr._build_cmd(job)
     # Command jobs launch under the resolved venv interpreter (windowless on
     # Windows), not necessarily the caller's sys.executable.
-    from scripts.daemon.client import venv_python
+    from anima_daemon.client import venv_python
 
     assert cmd == [venv_python(windowless=True), "tasks.py", "preprocess"]
     assert "train.py" not in cmd
@@ -520,7 +520,7 @@ def test_source_fingerprint_stable_and_content_sensitive(tmp_path, monkeypatch):
 
 
 def test_daemon_is_stale_matrix(monkeypatch):
-    from scripts.daemon import client as daemon_client
+    from anima_daemon import client as daemon_client
 
     monkeypatch.setattr(config, "source_fingerprint", lambda: "CURRENT")
     assert daemon_client.daemon_is_stale(None) is False  # nothing running
@@ -533,7 +533,7 @@ def test_daemon_is_stale_matrix(monkeypatch):
 def test_health_reports_boot_fingerprint(daemon):
     """/health echoes the fingerprint the daemon booted with; on an unchanged
     tree that equals the current on-disk hash → not stale."""
-    from scripts.daemon import client as daemon_client
+    from anima_daemon import client as daemon_client
 
     cl, _ = daemon
     h = cl.health()
@@ -687,7 +687,7 @@ def test_train_inline_mode_calls_accelerate(monkeypatch):
     def _no_daemon(**kw):  # ensure_daemon must not be reached
         raise AssertionError("inline mode must not contact the daemon")
 
-    import scripts.daemon.client as daemon_client
+    import anima_daemon.client as daemon_client
 
     monkeypatch.setattr(daemon_client, "ensure_daemon", _no_daemon)
     _common.train("lora", ["--inline", "--network_dim", "32"])
@@ -700,7 +700,7 @@ def real_cmd_daemon(tmp_path, monkeypatch):
     """Daemon with the *real* `_build_cmd` (no fake-trainer patch) so command
     jobs actually exec their argv. GPU guard stubbed so the queue never blocks
     on the host's VRAM."""
-    from scripts.daemon import client
+    from anima_daemon import client
 
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
     monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
@@ -761,7 +761,7 @@ def test_serve_falls_back_when_port_held_by_stranger():
     instead of failing (``serve_with_fallback``)."""
     import socket
 
-    from scripts.daemon.server import serve_with_fallback
+    from anima_daemon.server import serve_with_fallback
 
     # A plain listener that never speaks HTTP — stands in for a stranger.
     stranger = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -786,7 +786,7 @@ def test_serve_falls_back_when_port_held_by_stranger():
 def test_serve_defers_to_a_live_sibling_daemon(daemon):
     """If an anima daemon already answers on the port, ``serve_with_fallback``
     re-raises so the second process stands down (no duplicate daemon)."""
-    from scripts.daemon.server import serve_with_fallback
+    from anima_daemon.server import serve_with_fallback
 
     cl, mgr = daemon  # a real in-process daemon is already serving here
     port = cl.port
@@ -795,7 +795,7 @@ def test_serve_defers_to_a_live_sibling_daemon(daemon):
 
 
 # --------------------------------------------------------------------------
-# MCP stdio bridge (scripts/daemon/mcp.py)
+# MCP stdio bridge (anima_daemon/mcp.py)
 # --------------------------------------------------------------------------
 
 
@@ -970,7 +970,7 @@ def test_mcp_submit_command_and_tail_log(real_cmd_daemon):
 
 
 def test_daemon_status_json(daemon, monkeypatch, capsys):
-    import scripts.daemon.client as daemon_client
+    import anima_daemon.client as daemon_client
     from scripts.tasks import daemon as daemon_tasks
 
     cl, _ = daemon
@@ -993,7 +993,7 @@ def test_daemon_status_json(daemon, monkeypatch, capsys):
 
 
 def test_daemon_status_down_exits_1(monkeypatch, capsys):
-    import scripts.daemon.client as daemon_client
+    import anima_daemon.client as daemon_client
     from scripts.tasks import daemon as daemon_tasks
 
     monkeypatch.setattr(daemon_client, "DaemonClient", lambda port=None: _dead_client())
@@ -1007,7 +1007,7 @@ def test_daemon_status_down_exits_1(monkeypatch, capsys):
 def test_tail_while_write(tmp_path):
     """progress.jsonl tail-while-write: last_event sees the freshest line even
     as it grows (Windows-strict-locking smoke check)."""
-    from scripts.daemon import tail
+    from anima_daemon import tail
 
     p = tmp_path / "progress.jsonl"
     with open(p, "w", buffering=1, encoding="utf-8") as f:
@@ -1025,7 +1025,7 @@ def test_tail_while_write(tmp_path):
 
 
 def test_read_events_filters(tmp_path):
-    from scripts.daemon import tail
+    from anima_daemon import tail
 
     p = tmp_path / "progress.jsonl"
     stream = [{"ev": "run_start", "ts": 0.0}]
@@ -1131,7 +1131,7 @@ def test_mcp_get_progress(daemon):
 def test_tail_lines_collapse_tqdm_redraws(tmp_path):
     """One tqdm bar = one tail line: \\r redraw runs collapse to the final
     rendering instead of flooding the window with bar updates."""
-    from scripts.daemon.mcp import _tail_lines
+    from anima_daemon.mcp import _tail_lines
 
     p = tmp_path / "stdout.log"
     bar = "\r".join(f"caching:  {i}%|██| {i}/100" for i in range(0, 101, 10))
@@ -1141,3 +1141,58 @@ def test_tail_lines_collapse_tqdm_redraws(tmp_path):
         "caching:  100%|██| 100/100",
         "warn: thing happened",
     ]
+
+
+# --- relocation invariants: stdlib-only boundary + compat shim ---------------
+
+
+def test_anima_daemon_is_stdlib_only():
+    """The daemon package must not import ``library`` / ``networks`` / ``torch``.
+
+    This is the load-bearing invariant behind the disposable-daemon design: a
+    package that stays import-light boots (and eagerly restarts) in ~1s. The
+    relocation out of ``scripts/`` turns the docstring promise into a testable
+    boundary — AST-scan every module for a forbidden top-level import.
+    """
+    import ast
+    from pathlib import Path
+
+    pkg = Path(config.__file__).resolve().parent
+    forbidden = {"library", "networks", "torch"}
+    offenders = []
+    for path in sorted(pkg.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # level>0 is a relative import (never a top-level lib); skip.
+                names = [node.module] if (node.module and node.level == 0) else []
+            else:
+                continue
+            for name in names:
+                if name and name.split(".")[0] in forbidden:
+                    offenders.append(f"{path.name}: {name}")
+    assert not offenders, f"daemon must stay stdlib-only, found: {offenders}"
+
+
+def test_scripts_daemon_compat_shim_aliases_same_objects():
+    """``scripts.daemon.<mod>`` is the *same module object* as
+    ``anima_daemon.<mod>`` — so external MCP registrations and pre-move callers
+    keep working, and test/monkeypatch identity is preserved across both paths.
+    """
+    import importlib
+
+    for name in (
+        "config",
+        "client",
+        "server",
+        "manager",
+        "jobs",
+        "proc",
+        "gpu",
+        "tail",
+    ):
+        old = importlib.import_module(f"scripts.daemon.{name}")
+        new = importlib.import_module(f"anima_daemon.{name}")
+        assert old is new, f"scripts.daemon.{name} is not anima_daemon.{name}"

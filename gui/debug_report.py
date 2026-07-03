@@ -1,6 +1,6 @@
 """Build a copy-pasteable diagnostic bundle for bug reports.
 
-Qt-free on purpose (only stdlib + ``scripts.daemon.config`` paths) so it stays
+Qt-free on purpose (only stdlib + ``anima_daemon.config`` paths) so it stays
 unit-testable and can't drag torch into the GUI. The Settings dialog's "Copy
 debug report" button calls :func:`build_debug_report`; users paste the result
 into an issue / chat.
@@ -22,7 +22,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from scripts.daemon import config as _cfg
+from anima_daemon import config as _cfg
 
 _DAEMON_LOG_LINES = 2000  # read window for daemon.log before filtering to today
 _JOB_STDOUT_LINES = 200  # per-job stdout tail (only for non-done jobs)

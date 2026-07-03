@@ -24,7 +24,7 @@ The daemon auto-starts on first submit — you rarely start it by hand. But:
 
 ```bash
 python tasks.py daemon            # start it, detached, wait for /health
-python -m scripts.daemon          # equivalent (what the spawner runs)
+python -m anima_daemon          # equivalent (what the spawner runs)
 python tasks.py daemon-status     # one JSON object: health + resolved base_url
                                   # + compact job summaries (--full for raw
                                   # records); passive, exit 1 when down
@@ -165,7 +165,7 @@ Daemon-level events (job start/finish, etc.), plus `: keepalive` comments while 
 "worker_alive", "worker_idle_for"}`. `root` is the checkout the daemon belongs
 to — useful to confirm you're talking to *this* repo's daemon and not another
 checkout's (see `daemon_matches_root` in `client.py`). `fingerprint` is the
-content hash of `scripts/daemon/*.py` the daemon **booted** with; if it differs
+content hash of `anima_daemon/*.py` the daemon **booted** with; if it differs
 from the current on-disk source the daemon is running stale code and the next
 `ensure_daemon()` submit restarts it eagerly (see *Disposable daemon* below). `worker_idle_for` is seconds since the job
 worker thread last advanced; a large value while a job sits `queued` means the
@@ -176,13 +176,13 @@ false — has died (a bug worth a report).
 
 `{"kill_jobs": true}` → stop the daemon, optionally killing the running job.
 
-## Python client (`scripts.daemon.client`)
+## Python client (`anima_daemon.client`)
 
 Pure stdlib (`urllib`) — imports without dragging in `library.*`/torch, so it's
 safe to call from anywhere.
 
 ```python
-from scripts.daemon.client import DaemonClient, ensure_daemon
+from anima_daemon.client import DaemonClient, ensure_daemon
 
 client = ensure_daemon()          # start-if-needed, returns a live client
 # or: client = DaemonClient()     # attach only; assumes one is up
@@ -259,7 +259,7 @@ never have to ask "is the resident process trustworthy?" — we make the answer
 irrelevant.
 
 - **Eager restart on stale code.** Each daemon records a content fingerprint of
-  its own `scripts/daemon/*.py` at boot (in the pidfile + `/health`). Every
+  its own `anima_daemon/*.py` at boot (in the pidfile + `/health`). Every
   submit goes through `ensure_daemon()`, which compares that against the current
   on-disk source; on a mismatch it `POST /shutdown {kill_jobs:false}` → respawns.
   The fresh daemon's boot reconcile re-adopts the still-running job and queued
@@ -305,7 +305,7 @@ restarts without reconfiguration.
 
 ```bash
 # Claude Code (use your checkout's absolute paths; any cwd works)
-claude mcp add anima-daemon -- <repo>/.venv/Scripts/python.exe <repo>/scripts/daemon/mcp.py
+claude mcp add anima-daemon -- <repo>/.venv/Scripts/python.exe <repo>/anima_daemon/mcp.py
 ```
 
 For other clients, the equivalent JSON config:
@@ -313,7 +313,7 @@ For other clients, the equivalent JSON config:
 ```json
 {"mcpServers": {"anima-daemon": {
   "command": "<repo>/.venv/Scripts/python.exe",
-  "args": ["<repo>/scripts/daemon/mcp.py"]
+  "args": ["<repo>/anima_daemon/mcp.py"]
 }}}
 ```
 

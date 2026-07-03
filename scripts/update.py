@@ -365,7 +365,7 @@ def _restart_daemon_if_idle() -> None:
     """Bring the training daemon onto the freshly-updated code.
 
     The daemon supervisor runs detached and has already imported the OLD
-    ``scripts/daemon/*`` into memory; swapping the files on disk doesn't touch
+    ``anima_daemon/*`` into memory; swapping the files on disk doesn't touch
     it, so a new-code client would otherwise be talking to a stale-code daemon.
     Restarting fixes that — but training jobs run in their own detached
     processes (they imported everything at launch), so an *active* run is not
@@ -378,7 +378,7 @@ def _restart_daemon_if_idle() -> None:
     Best-effort: any daemon hiccup is reported, never fatal to the update.
     """
     try:
-        from scripts.daemon import client as _client
+        from anima_daemon import client as _client
     except Exception:  # noqa: BLE001 — daemon module optional / mid-swap
         return
     if not _client.is_running():

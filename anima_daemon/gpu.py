@@ -14,9 +14,21 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from typing import Optional
 
-from library.runtime.proc import no_window_kwargs
+
+def no_window_kwargs() -> dict:
+    """``subprocess`` kwargs that suppress the Windows console-window flash.
+
+    Inlined (rather than imported from ``library.runtime.proc``) to keep the
+    daemon package stdlib-only — the load-bearing invariant that makes it
+    ~1s-restartable. Returns ``{"creationflags": CREATE_NO_WINDOW}`` on Windows,
+    ``{}`` elsewhere (a harmless no-op on Linux/macOS).
+    """
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 def gpu_pids() -> Optional[set[int]]:

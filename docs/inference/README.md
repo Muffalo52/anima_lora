@@ -37,7 +37,7 @@ Infrastructure, not a sampler method — how to *run* inference, not what it doe
 
 | Doc | What it is | Entry | Load-bearing gotcha |
 |-----|-----------|-------|---------------------|
-| [server.md](server.md) | Resident inference server — load DiT/VAE/TE once, serve many generations over a localhost HTTP port + pidfile (the inference twin of `scripts/daemon/`). | `python scripts/inference_server.py serve` | Separate process from the training daemon (opposite GPU lifetime); coexists via cooperative `/unload` + idle-TTL so it yields the card to training. |
+| [server.md](server.md) | Resident inference server — load DiT/VAE/TE once, serve many generations over a localhost HTTP port + pidfile (the inference twin of `anima_daemon/`). | `python scripts/inference_server.py serve` | Separate process from the training daemon (opposite GPU lifetime); coexists via cooperative `/unload` + idle-TTL so it yields the card to training. |
 
 ## Other
 

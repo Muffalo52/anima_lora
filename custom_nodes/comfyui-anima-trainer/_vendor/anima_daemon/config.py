@@ -21,8 +21,8 @@ import hashlib
 import os
 from pathlib import Path
 
-# scripts/daemon/config.py -> parents[2] == anima_lora/
-ROOT = Path(__file__).resolve().parents[2]
+# anima_daemon/config.py -> parents[1] == anima_lora/
+ROOT = Path(__file__).resolve().parents[1]
 
 STATE_DIR = ROOT / "output" / "daemon"
 JOBS_DIR = STATE_DIR / "jobs"
@@ -59,7 +59,7 @@ JOB_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_JOB_STALL_TIMEOUT", "0"))
 
 # --- Phase 0a: daemon-source fingerprint ------------------------------------
 # The daemon is disposable: a resident process serving last week's
-# scripts/daemon/*.py after an edit or pull is untrustworthy, so we detect the
+# anima_daemon/*.py after an edit or pull is untrustworthy, so we detect the
 # mismatch and eagerly restart (reconcile/adopt makes that lossless). The
 # fingerprint keys on file *contents*, not git HEAD, because the common case is
 # a dirty working tree mid-edit. A daemon records the fingerprint it BOOTED with
@@ -69,7 +69,7 @@ _SRC_DIR = Path(__file__).resolve().parent
 
 
 def source_fingerprint() -> str:
-    """Short content hash of the daemon's own source (``scripts/daemon/*.py``).
+    """Short content hash of the daemon's own source (``anima_daemon/*.py``).
 
     Stable across runs (sorted by name), sensitive to any byte change in any
     module. Unreadable files are skipped rather than raising — a partial hash is
@@ -151,10 +151,10 @@ def discover_pidfile() -> Path:
     First existing candidate wins:
 
       1. the in-repo ``PIDFILE`` — authoritative when this module runs inside
-         the anima_lora checkout (``parents[2]`` is the repo root);
+         the anima_lora checkout (``parents[1]`` is the repo root);
       2. ``global_pidfile()`` — the per-user mirror (covers the
          ``$ANIMA_DAEMON_PIDFILE`` override and the standalone-node case where
-         ``parents[2]`` points at the vendor dir and ``PIDFILE`` never exists);
+         ``parents[1]`` points at the vendor dir and ``PIDFILE`` never exists);
       3. ``$ANIMA_LORA_ROOT/output/daemon/daemon.json`` — an explicit repo root;
       4. an upward search from this file for a repo root (``train.py`` +
          ``configs/``), then its ``output/daemon/daemon.json``.

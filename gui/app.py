@@ -151,13 +151,13 @@ class GuidebookDialog(QDialog):
 
 def _mcp_paths() -> tuple[Path, Path]:
     """(venv python, MCP bridge script) for THIS checkout — real absolute
-    paths, not the <repo> placeholder the docs use (scripts/daemon/README.md)."""
+    paths, not the <repo> placeholder the docs use (anima_daemon/README.md)."""
     venv_python = (
         _REPO_ROOT
         / ".venv"
         / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     )
-    return venv_python, _REPO_ROOT / "scripts" / "daemon" / "mcp.py"
+    return venv_python, _REPO_ROOT / "anima_daemon" / "mcp.py"
 
 
 def _mcp_add_command() -> str:
@@ -847,7 +847,7 @@ def main():
     _dark(app)
     # Reflect the persisted "Debug mode" setting into the env *before* the daemon
     # is spawned below, so a freshly-started daemon logs at DEBUG (see
-    # scripts/daemon/__main__._setup_logging).
+    # anima_daemon/__main__._setup_logging).
     if get_setting("debug_mode", False):
         os.environ["ANIMA_DEBUG"] = "1"
     global _WINDOW

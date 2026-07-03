@@ -101,8 +101,8 @@ def _fake_job(stdout_path, started_at, kind="train"):
 
 
 def test_stall_watchdog_fires_with_diagnostic(tmp_path, monkeypatch):
-    from scripts.daemon import config
-    from scripts.daemon.manager import JobManager
+    from anima_daemon import config
+    from anima_daemon.manager import JobManager
 
     stdout = tmp_path / "stdout.log"
     stdout.write_text("loading PE-Core...\rfetching sorryhyun/pe-core (one-time).\n")
@@ -128,7 +128,7 @@ def test_default_budgets(monkeypatch):
     monkeypatch.delenv("ANIMA_DAEMON_JOB_STALL_TIMEOUT", raising=False)
     import importlib
 
-    from scripts.daemon import config
+    from anima_daemon import config
 
     importlib.reload(config)
     try:
@@ -141,8 +141,8 @@ def test_default_budgets(monkeypatch):
 def test_stall_watchdog_budget_is_per_kind(tmp_path, monkeypatch):
     """With training unwatched by default, the same long silence is a stall for
     a command (preprocess) job but healthy for a train job."""
-    from scripts.daemon import config
-    from scripts.daemon.manager import JobManager
+    from anima_daemon import config
+    from anima_daemon.manager import JobManager
 
     monkeypatch.setattr(config, "CMD_STALL_TIMEOUT", 120, raising=False)
     monkeypatch.setattr(config, "JOB_STALL_TIMEOUT", 0, raising=False)
@@ -159,8 +159,8 @@ def test_stall_watchdog_budget_is_per_kind(tmp_path, monkeypatch):
 
 
 def test_stall_watchdog_disabled_by_zero(tmp_path, monkeypatch):
-    from scripts.daemon import config
-    from scripts.daemon.manager import JobManager
+    from anima_daemon import config
+    from anima_daemon.manager import JobManager
 
     stdout = tmp_path / "stdout.log"
     stdout.write_text("x\n")

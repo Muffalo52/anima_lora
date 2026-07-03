@@ -103,7 +103,7 @@ override-dependencies = ["numpy>=2.0.0"]
 # the editable finder instead of per-file `sys.path.insert` shims — and any tool
 # runs as `python -m bench.spd.foo`. `gui` stays CLI-only (not importable).
 [tool.setuptools.packages.find]
-include = ["anima_lora*", "library*", "networks*", "bench*", "scripts*", "preprocess*"]
+include = ["anima_lora*", "anima_daemon*", "library*", "networks*", "bench*", "scripts*", "preprocess*"]
 
 [tool.setuptools.package-data]
 # Ship the model-scoped T5("") CFG-uncond sidecar bundled in library/anima/assets/

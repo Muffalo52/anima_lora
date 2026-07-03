@@ -1,6 +1,6 @@
 # Daemon as the first-class run manager — disposable daemon, attach-by-default, bench as jobs
 
-Status: **Phase 0 shipped (2026-07-03); Phases 1 / 1.5 / 2 remain proposals.**
+Status: **Phase 0 + repo relocation shipped (2026-07-03); Phases 1 / 1.5 / 2 remain proposals.**
 Motivation: the daemon is architecturally
 sound (serial GPU queue, disk-backed state, self-describing surface) but
 socially opt-in — training grew `--queue`, preprocess/mask submit, and
@@ -78,8 +78,13 @@ daemon-env ← captured_env ← extra_env; the `run_gpu` attach/detach/inline
 chokepoint lives in `scripts/tasks/_common.py` (`_resolve_run_mode` /
 `_attach_and_wait`) and `train()` routes through it (attach default). Covered by
 `tests/test_daemon.py`. The `scripts/daemon/` → `anima_daemon/` relocation
-(below) was **deferred** — its vendor-sync / GUI / `update.py` fan-out warrants
-its own change.
+(below) shipped as its own follow-on change (2026-07-03): package moved with git
+history, `config.ROOT`/`_SRC_DIR`/`-m` launch retargeted, `gpu.no_window_kwargs`
+inlined so the package is now **zero** `library` imports (enforced by
+`test_anima_daemon_is_stdlib_only`), `scripts/daemon/` kept as a `sys.modules`
+alias shim (+ `mcp.py` exec-forward, `__main__` forward) for old MCP
+registrations / vendored trees, and vendor-sync / GUI / `update.py` / import
+sites updated in lockstep.
 
 ### 0a. Code fingerprint + eager restart
 
@@ -248,10 +253,9 @@ spec it only if the freeze level proves insufficient in practice.
   becomes an owned lifecycle transition instead of a cross-pidfile courtesy.
   One process owns GPU policy.
 
-## Repo location — `scripts/daemon/` → `anima_daemon/` (deferred; not done in Phase 0)
+## Repo location — `scripts/daemon/` → `anima_daemon/` — ✅ SHIPPED 2026-07-03
 
-Promoting the package out of `scripts/` is worth doing, but only as part of
-Phase 0 and never as `daemon/`:
+Promoting the package out of `scripts/` was worth doing, and never as `daemon/`:
 
 - **Why**: the layering contract files `scripts/` as the entry-point tier;
   a service subsystem that everything routes through belongs at top level

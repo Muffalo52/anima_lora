@@ -454,7 +454,7 @@ def build_launch_cmd(*args: str, python_exe: str | None = None) -> list[str]:
 
     Pure command construction — the returned list is exactly what launches
     training. Extracted from ``accelerate_launch`` so other spawners (the
-    training daemon under ``scripts/daemon/``) can ``Popen`` the same command
+    training daemon under ``anima_daemon/``) can ``Popen`` the same command
     themselves — detached, with their own stdio redirection and process-tree
     monitoring — instead of going through ``run()``'s blocking
     ``subprocess.run`` + ``sys.exit``-on-failure path. The nsys profiling
@@ -549,7 +549,7 @@ def build_method_args(
     """Assemble the ``["--method", m, "--preset", p, ...]`` train.py arg list.
 
     Pure — no env reads, no subprocess. Shared by the CLI ``train()`` path and
-    the training daemon (``scripts/daemon``) so the daemon doesn't duplicate the
+    the training daemon (``anima_daemon``) so the daemon doesn't duplicate the
     ARTIST / PROFILE_STEPS handling. ``extra`` is appended verbatim; ``artist`` /
     ``profile_steps`` add their flags only when the caller didn't already pass
     them in ``extra``.
@@ -666,7 +666,7 @@ def _attach_and_wait(cl, job_id: str) -> int:
     id, skipping lines it already printed (the on-disk ``stdout.log`` replays
     from the start, so nothing is lost and nothing is double-printed).
     """
-    from scripts.daemon.client import DaemonClient
+    from anima_daemon.client import DaemonClient
 
     print(
         f"\nattached to job {job_id} ({cl.base}) — ctrl-C detaches "
@@ -729,7 +729,7 @@ def queue_command(label: str, argv: list[str]) -> None:
     (``["-m", "scripts.distill_turbo.distill", ...]``). Preset/CLI flags must be
     baked into ``argv`` here: the command-job path does no config merging.
     """
-    from scripts.daemon import client as _daemon_client
+    from anima_daemon import client as _daemon_client
 
     cl = _daemon_client.ensure_daemon()
     resp = cl.submit_command(label=label, argv=list(argv))
@@ -783,7 +783,7 @@ def train(
         return
 
     # Daemon paths (attach / detach). Fold ARTIST / PROFILE_STEPS into extra as
-    # explicit flags: the daemon's own build_method_args (scripts/daemon/
+    # explicit flags: the daemon's own build_method_args (anima_daemon/
     # manager.py) doesn't read env vars, so without folding a queued artist run
     # would silently train the full dataset.
     if artist and "--artist_filter" not in extra:
@@ -791,7 +791,7 @@ def train(
     if profile_steps and "--profile_steps" not in extra:
         extra += ["--profile_steps", profile_steps]
 
-    from scripts.daemon import client as _daemon_client
+    from anima_daemon import client as _daemon_client
 
     cl = _daemon_client.ensure_daemon()
     job_id = cl.submit(

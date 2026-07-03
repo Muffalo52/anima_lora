@@ -20,9 +20,9 @@ import json
 import os
 import sys
 
-from scripts.daemon import client as _client
-from scripts.daemon import config as _cfg
-from scripts.daemon import proc as _proc
+from anima_daemon import client as _client
+from anima_daemon import config as _cfg
+from anima_daemon import proc as _proc
 
 
 def _job_arg(extra) -> str | None:
@@ -84,7 +84,7 @@ def cmd_daemon_status(extra):
     resolved from the pidfile each call, so it follows a fallback-to-ephemeral
     port — read it from here rather than assuming 8765. ``stale_code: true``
     means the resident daemon is serving source older than the current on-disk
-    ``scripts/daemon/*`` — the next submit will eagerly restart it (Phase 0a).
+    ``anima_daemon/*`` — the next submit will eagerly restart it (Phase 0a).
     Jobs are compact summaries (id/state/error/ckpt_path/…); pass ``--full`` for
     the raw records.
     """

@@ -104,7 +104,7 @@ def daemon_is_stale(health: Optional[dict]) -> bool:
     """True iff a live daemon is serving code older than the current on-disk source.
 
     Compares the fingerprint the daemon reported it *booted* with against a
-    fresh hash of ``scripts/daemon/*.py`` on disk. A daemon predating the
+    fresh hash of ``anima_daemon/*.py`` on disk. A daemon predating the
     fingerprint field (no ``fingerprint`` key) is treated as stale so it gets
     replaced by a current one. Used by ``ensure_daemon`` (eager restart) and
     ``daemon-status`` (``stale_code`` flag). See ``config.source_fingerprint``.
@@ -295,7 +295,7 @@ def ensure_daemon(
     """Return a client to a live daemon, starting one if needed.
 
     Idempotent: if ``/health`` answers we just return a client. Otherwise spawn
-    ``python -m scripts.daemon`` detached (stdout → ``daemon.log``) and poll
+    ``python -m anima_daemon`` detached (stdout → ``daemon.log``) and poll
     ``/health`` until it answers or ``timeout`` elapses.
 
     The daemon may bind a *different* port than requested if the preferred one
@@ -317,7 +317,7 @@ def ensure_daemon(
         if expected_root is None or daemon_matches_root(health, expected_root):
             # Our checkout (or the caller doesn't care which): reuse it unless
             # it's running stale code, in which case restart eagerly so we never
-            # trust a resident process serving a since-edited scripts/daemon/*.
+            # trust a resident process serving a since-edited anima_daemon/*.
             # Reconcile on the fresh daemon re-adopts the running job losslessly
             # and queued jobs persist on disk, so restarting with live work is
             # safe here (unlike the cross-checkout case below). Cost ~1–2s, paid
@@ -342,7 +342,7 @@ def ensure_daemon(
     proc.spawn_detached(
         # pythonw.exe → no console window whose close button would kill the
         # daemon and strand the pidfile. Logs still go to daemon.log below.
-        [venv_python(windowless=True), "-m", "scripts.daemon", str(requested)],
+        [venv_python(windowless=True), "-m", "anima_daemon", str(requested)],
         cwd=config.ROOT,
         stdout_path=config.DAEMON_LOG,
     )

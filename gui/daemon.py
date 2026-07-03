@@ -1,4 +1,4 @@
-"""GUI-side bridge to the local training daemon (``scripts/daemon``).
+"""GUI-side bridge to the local training daemon (``anima_daemon``).
 
 Phase 2 turns the GUI into a daemon *client*: the Train button submits a job to
 the daemon (so training survives the GUI closing) and the tab then *observes*
@@ -19,9 +19,9 @@ import os
 import re
 from typing import Optional
 
-from scripts.daemon import client as _client
-from scripts.daemon import config as _cfg
-from scripts.daemon.jobs import STATE_DONE, STATE_ERROR, STATE_STOPPED, TERMINAL_STATES
+from anima_daemon import client as _client
+from anima_daemon import config as _cfg
+from anima_daemon.jobs import STATE_DONE, STATE_ERROR, STATE_STOPPED, TERMINAL_STATES
 
 
 class DaemonUnavailable(RuntimeError):
@@ -233,7 +233,7 @@ def read_job_kind(job_id: str) -> str:
 
 def read_job_label(job_id: str) -> Optional[str]:
     """Display label of a command job (its ``method`` field doubles as the
-    label — see ``scripts/daemon/jobs.Job``). Lets a tab re-claim *its own*
+    label — see ``anima_daemon/jobs.Job``). Lets a tab re-claim *its own*
     command job (e.g. ``exp-spd``) on GUI reopen without grabbing another tab's.
     ``None`` for a missing/unreadable record."""
     data = _read_job_record(job_id)

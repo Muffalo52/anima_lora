@@ -1,4 +1,4 @@
-"""Trimmed extract of scripts/daemon/proc.py for the vendored daemon client.
+"""Trimmed extract of anima_daemon/proc.py for the vendored daemon client.
 
 Contains only ``read_pidfile`` — the single symbol ``client.py`` touches at
 runtime (via ``_resolve_port``). The full live module routes spawn / kill /

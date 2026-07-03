@@ -3,7 +3,7 @@
 `scripts/inference_server.py` — load the DiT / VAE / text-encoder **once** and
 serve many generations over a localhost HTTP port, instead of paying the
 model-load cost per image. It's the inference counterpart of the training
-`scripts/daemon/`: same discoverability skin (a localhost port + a pidfile at a
+`anima_daemon/`: same discoverability skin (a localhost port + a pidfile at a
 fixed per-user location), wrapped around the resident-model lifetime the Anima
 Tagger's `scripts/anima_tagger/autotag_server.py` worker established.
 
@@ -65,7 +65,7 @@ the path is returned.
 
 ## Discovery
 
-Mirrors `scripts/daemon/config.py`. The server writes its `{pid, create_time,
+Mirrors `anima_daemon/config.py`. The server writes its `{pid, create_time,
 port}` to **two** places so any client finds it without hardcoding:
 
 1. in-repo — `output/inference/server.json`

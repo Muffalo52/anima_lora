@@ -140,13 +140,13 @@ def _resolve_daemon_client():
 
     The trainer node is self-contained: it talks to a running Anima daemon over
     localhost HTTP through the pure-stdlib client vendored under ``_vendor/``
-    (kept verbatim-in-sync with the live ``scripts/daemon/client.py`` by
+    (kept verbatim-in-sync with the live ``anima_daemon/client.py`` by
     ``scripts/release/sync_vendor.py``). We import it via a *relative* import so we
-    never bind the generic top-level ``scripts`` name — the old live-first probe
-    did ``import scripts.daemon.client`` against a ``../..`` it assumed was the
-    repo, which is ComfyUI's root in a standalone install; that poisoned
-    ``sys.modules['scripts']`` with some unrelated on-path package and broke the
-    vendor fallback too (``ModuleNotFoundError: scripts.daemon``).
+    never bind a generic top-level name — an old live-first probe that did
+    ``import anima_daemon.client`` against a ``../..`` it assumed was the repo
+    (which is ComfyUI's root in a standalone install) could poison
+    ``sys.modules`` with an unrelated on-path package and break the vendor
+    fallback (``ModuleNotFoundError``).
 
     The client never *starts* a daemon — it only talks to one. Its
     ``config.discover_pidfile`` finds a running daemon's pidfile (the per-user
@@ -155,7 +155,7 @@ def _resolve_daemon_client():
     fallback port; failing all that it uses ``127.0.0.1:8765`` (override with
     ``$ANIMA_DAEMON_PORT``).
     """
-    from ._vendor.scripts.daemon.client import DaemonClient
+    from ._vendor.anima_daemon.client import DaemonClient
 
     return DaemonClient
 
