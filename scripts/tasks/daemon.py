@@ -78,12 +78,15 @@ _STATUS_JOB_FIELDS = (
 def cmd_daemon_status(extra):
     """Daemon status as one JSON object on stdout — the agent/script surface.
 
-    ``{"up", "base_url", "pid", "port", "root", "paused", "active_job",
-    "jobs"}``. Passive: never starts a daemon (safe to poll); ``up: false`` +
-    exit 1 when nothing answers ``/health``. ``base_url`` is resolved from the
-    pidfile each call, so it follows a fallback-to-ephemeral port — read it
-    from here rather than assuming 8765. Jobs are compact summaries
-    (id/state/error/ckpt_path/…); pass ``--full`` for the raw records.
+    ``{"up", "base_url", "pid", "port", "root", "stale_code", "paused",
+    "active_job", "jobs"}``. Passive: never starts a daemon (safe to poll);
+    ``up: false`` + exit 1 when nothing answers ``/health``. ``base_url`` is
+    resolved from the pidfile each call, so it follows a fallback-to-ephemeral
+    port — read it from here rather than assuming 8765. ``stale_code: true``
+    means the resident daemon is serving source older than the current on-disk
+    ``scripts/daemon/*`` — the next submit will eagerly restart it (Phase 0a).
+    Jobs are compact summaries (id/state/error/ckpt_path/…); pass ``--full`` for
+    the raw records.
     """
     cl = _client.DaemonClient()
     health = cl.health()
@@ -101,6 +104,7 @@ def cmd_daemon_status(extra):
                 "pid": health.get("pid"),
                 "port": health.get("port"),
                 "root": health.get("root"),
+                "stale_code": _client.daemon_is_stale(health),
                 "paused": health.get("paused"),
                 "active_job": health.get("active_job"),
                 "jobs": jobs,

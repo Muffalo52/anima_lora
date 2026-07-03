@@ -11,11 +11,13 @@ Centralizes:
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -563,51 +565,156 @@ def build_method_args(
     return [*args, *extra]
 
 
-def _queue_submit(
-    method: str,
-    *,
-    preset: str,
-    methods_subdir: str | None,
-    extra: list[str],
-    artist: str | None,
-    profile_steps: str | None,
-) -> None:
-    """Enqueue a training job on the local daemon instead of running it inline.
+# --- Phase 0c: attach-by-default run modes ----------------------------------
+# Every GPU-touching CLI target routes through the daemon by default: submit,
+# then stream the job's stdout to this terminal (attach). Queueing is no longer
+# a separate mode — it's just what happens when something else holds the card;
+# with an idle queue, attach feels like inline plus a ~1s first-time boot. Three
+# modes, resolved by _resolve_run_mode:
+#   attach (default) — submit + stream + exit with the job's exit code; ctrl-C
+#                      DETACHES (job survives), it never kills the run.
+#   detach           — submit + return (the old --queue behaviour, kept as an
+#                      alias for overnight sweeps).
+#   inline           — run the child directly, no daemon (the debugging path:
+#                      pdb / py-spy / faulthandler / nsys all want a direct
+#                      child). Forced automatically for PROFILE_STEPS / accelerate.
+_RUN_MODE_FLAGS = {
+    "--inline": "inline",
+    "--queue": "detach",
+    "--detach": "detach",
+    "--attach": "attach",
+}
 
-    The ``--queue`` path (``make lora --queue``, ``make lora-gui <v> --queue``)
-    turns the CLI into a job *producer*: it auto-starts the daemon if needed and
-    POSTs the same method/preset/methods_subdir the inline path would have built,
-    then returns immediately. Submit ×N to drain an overnight sweep serially.
 
-    ARTIST / PROFILE_STEPS are folded into ``extra`` as explicit flags here
-    because the daemon's own ``build_method_args`` call (in
-    ``scripts/daemon/manager.py``) doesn't read those env vars — without folding,
-    a queued artist run would silently train the full dataset.
+def _resolve_run_mode(extra: list[str]) -> tuple[str, list[str]]:
+    """Pop any run-mode flag from ``extra`` and return ``(mode, extra)``.
+
+    Precedence: an explicit ``--inline/--queue/--detach/--attach`` flag beats the
+    ``ANIMA_RUN_MODE`` env var, which beats the attach default. When the mode is
+    left implicit, ``PROFILE_STEPS`` (nsys wraps the launch — CLI-only) or
+    ``ANIMA_ACCELERATE_LAUNCH`` (multi-GPU needs a direct child; the daemon
+    builds a single-process command) force inline so the default attach path
+    never silently drops them. An explicit flag is always honored as-is.
     """
     extra = list(extra)
-    if artist and "--artist_filter" not in extra:
-        extra += ["--artist_filter", artist]
-    if profile_steps and "--profile_steps" not in extra:
-        extra += ["--profile_steps", profile_steps]
+    flagged: str | None = None
+    for flag, mode in _RUN_MODE_FLAGS.items():
+        while flag in extra:
+            extra.remove(flag)
+            flagged = mode
+    if flagged is not None:
+        return flagged, extra
+    mode = os.environ.get("ANIMA_RUN_MODE") or "attach"
+    if mode not in ("attach", "detach", "inline"):
+        mode = "attach"
+    if mode != "inline" and (
+        os.environ.get("PROFILE_STEPS") or os.environ.get("ANIMA_ACCELERATE_LAUNCH")
+    ):
+        mode = "inline"
+    return mode, extra
 
-    from scripts.daemon import client as _daemon_client
 
-    cl = _daemon_client.ensure_daemon()
-    resp = cl.submit(
-        method=method,
-        preset=preset,
-        methods_subdir=methods_subdir,
-        extra=extra,
+def _safe_job(cl, job_id: str) -> dict | None:
+    try:
+        return cl.get(job_id)
+    except Exception:  # noqa: BLE001 — a down/racing daemon is expected here
+        return None
+
+
+def _attach_hints(job_id: str) -> str:
+    return (
+        f"  make daemon-attach JOB={job_id}   # re-attach to this job\n"
+        f"  make daemon-kill JOB={job_id}     # stop it\n"
+        f"  make daemon-status                # queue overview"
     )
-    job_id = resp.get("job_id")
+
+
+def _print_queued(cl, job_id: str, desc: str) -> None:
     print(
-        f"queued job {job_id} (method={method}, preset={preset}). "
-        f"daemon: {cl.base}\n"
+        f"queued job {job_id} ({desc}). daemon: {cl.base}\n"
         f"  make daemon-attach JOB={job_id}   # follow this job's output\n"
         f"  make daemon-attach                # follow queue/lifecycle events\n"
         f"  make daemon-kill JOB={job_id}     # cancel it\n"
         f"  make daemon-terminate             # stop the daemon + discard queue"
     )
+
+
+def _exit_code_for(cl, job_id: str, *, settle: float = 10.0) -> int:
+    """The job's exit code once terminal: its OS ``returncode`` when known, else
+    a state-derived code (done→0, anything else→1). A signal death (negative rc)
+    maps to the conventional ``128+N`` so ``&&`` chains see a normal nonzero."""
+    deadline = time.time() + settle
+    job = _safe_job(cl, job_id)
+    while job and job.get("state") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = _safe_job(cl, job_id)
+    if job is None:
+        return 1
+    rc = job.get("returncode")
+    if isinstance(rc, int):
+        return 128 + (-rc) if rc < 0 else rc
+    return 0 if job.get("state") == "done" else 1
+
+
+def _attach_and_wait(cl, job_id: str) -> int:
+    """Stream a submitted job's stdout to this terminal; return its exit code.
+
+    Ctrl-C DETACHES — the job keeps running (we're the parent of nothing, same
+    contract as ``make daemon-attach``); we print the re-attach one-liners and
+    return 0. Tolerates a daemon restart mid-stream (Phase 0a can trigger one):
+    on a dropped stream it re-resolves the pidfile and re-attaches the same job
+    id, skipping lines it already printed (the on-disk ``stdout.log`` replays
+    from the start, so nothing is lost and nothing is double-printed).
+    """
+    from scripts.daemon.client import DaemonClient
+
+    print(
+        f"\nattached to job {job_id} ({cl.base}) — ctrl-C detaches "
+        "(the job keeps running)\n"
+    )
+    emitted = 0  # log lines already printed, across reconnects
+    try:
+        while True:
+            seen = 0
+            got_eof = False
+            try:
+                for payload in cl.stream_logs(job_id):
+                    # The tail SSE ends with a {"ev":"eof","state":…} sentinel.
+                    if payload.startswith("{") and '"eof"' in payload:
+                        try:
+                            obj = json.loads(payload)
+                        except ValueError:
+                            obj = None
+                        if isinstance(obj, dict) and obj.get("ev") == "eof":
+                            got_eof = True
+                            break
+                    seen += 1
+                    if seen <= emitted:
+                        continue  # replayed line from before a reconnect
+                    emitted = seen
+                    print(payload, flush=True)
+            except KeyboardInterrupt:
+                raise
+            except Exception:  # noqa: BLE001 — socket drop / daemon restart
+                pass
+            if got_eof:
+                break
+            # Stream ended without eof: either the job is terminal (stop) or the
+            # daemon restarted. Re-resolve its port and re-check; re-attach only
+            # while the job is still live.
+            job = _safe_job(cl, job_id)
+            if job is None:
+                cl = DaemonClient()  # port may have moved on restart
+                job = _safe_job(cl, job_id)
+            if job is None or job.get("state") not in ("queued", "running"):
+                break
+            time.sleep(0.5)
+            cl = DaemonClient()
+    except KeyboardInterrupt:
+        print(f"\ndetached (job {job_id} continues).")
+        print(_attach_hints(job_id))
+        return 0
+    return _exit_code_for(cl, job_id)
 
 
 def queue_command(label: str, argv: list[str]) -> None:
@@ -616,8 +723,8 @@ def queue_command(label: str, argv: list[str]) -> None:
     The training daemon is generic over "run this argv" via its ``kind="command"``
     job path (the same one preprocess/mask use). The bespoke loops
     (``scripts/distill_turbo`` / ``scripts/distill_spd``) bypass ``train.py``, so
-    they can't ride the train-job ``_queue_submit`` path — they submit a plain
-    command job instead. ``argv`` is run by the daemon as
+    they can't ride the train ``--queue`` path — they submit a plain command job
+    instead (detach semantics). ``argv`` is run by the daemon as
     ``[venv_python, *argv]`` from the repo root, so pass the module form
     (``["-m", "scripts.distill_turbo.distill", ...]``). Preset/CLI flags must be
     baked into ``argv`` here: the command-job path does no config merging.
@@ -649,18 +756,22 @@ def train(
     `--artist_filter <name>` (filters dataset to `@<name>`-tagged captions and
     redirects output to `output/ckpt-artist/`).
 
-    ``--queue`` anywhere in ``extra`` enqueues the job on the local training
-    daemon and returns immediately instead of running it inline (the overnight
-    sweep path — see ``_queue_submit``).
+    Run mode (Phase 0c, ``_resolve_run_mode``): by default the job is submitted
+    to the local daemon and this terminal *attaches* to its stdout, exiting with
+    the job's exit code (ctrl-C detaches, the run survives). ``--queue`` detaches
+    (submit + return — the overnight-sweep producer); ``--inline`` runs the child
+    directly with no daemon (the debugging path). ``ANIMA_RUN_MODE`` sets the
+    default; ``PROFILE_STEPS`` / ``ANIMA_ACCELERATE_LAUNCH`` force inline.
     """
     preset = preset or _preset()
     extra = list(extra or [])
     artist = os.environ.get("ARTIST")
     profile_steps = os.environ.get("PROFILE_STEPS")
 
-    if "--queue" in extra:
-        extra.remove("--queue")
-        _queue_submit(
+    mode, extra = _resolve_run_mode(extra)
+
+    if mode == "inline":
+        args = build_method_args(
             method,
             preset=preset,
             methods_subdir=methods_subdir,
@@ -668,17 +779,34 @@ def train(
             artist=artist,
             profile_steps=profile_steps,
         )
+        accelerate_launch(*args)
         return
 
-    args = build_method_args(
-        method,
+    # Daemon paths (attach / detach). Fold ARTIST / PROFILE_STEPS into extra as
+    # explicit flags: the daemon's own build_method_args (scripts/daemon/
+    # manager.py) doesn't read env vars, so without folding a queued artist run
+    # would silently train the full dataset.
+    if artist and "--artist_filter" not in extra:
+        extra += ["--artist_filter", artist]
+    if profile_steps and "--profile_steps" not in extra:
+        extra += ["--profile_steps", profile_steps]
+
+    from scripts.daemon import client as _daemon_client
+
+    cl = _daemon_client.ensure_daemon()
+    job_id = cl.submit(
+        method=method,
         preset=preset,
         methods_subdir=methods_subdir,
         extra=extra,
-        artist=artist,
-        profile_steps=profile_steps,
-    )
-    accelerate_launch(*args)
+    ).get("job_id")
+
+    if mode == "detach":
+        _print_queued(cl, job_id, f"method={method}, preset={preset}")
+        return
+    rc = _attach_and_wait(cl, job_id)
+    if rc:
+        sys.exit(rc)
 
 
 INFERENCE_BASE = [

@@ -131,13 +131,22 @@ def kill_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
 
 # pidfile — single-daemon lock keyed on (pid, create_time)
 def write_pidfile(
-    path: Path, *, pid: int, port: int, root: Optional[Path] = None
+    path: Path,
+    *,
+    pid: int,
+    port: int,
+    root: Optional[Path] = None,
+    fingerprint: Optional[str] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     ct = create_time(pid)
     data = {"pid": pid, "create_time": ct, "port": port}
     if root is not None:
         data["root"] = str(root)
+    if fingerprint is not None:
+        # The daemon-source fingerprint it booted with — disk-observable so a
+        # passive reader can flag stale code without the HTTP port (Phase 0a).
+        data["fingerprint"] = fingerprint
     path.write_text(json.dumps(data), encoding="utf-8")
 
 

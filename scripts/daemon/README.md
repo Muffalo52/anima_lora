@@ -82,7 +82,12 @@ Training job:
 ```
 Only `method` is required. `overrides` become `--key value` CLI args; `extra` is
 appended verbatim. `config_snapshot` (a merged config dict) or `config_file` (a
-path) pin the exact config instead of re-resolving the merge chain.
+path) pin the exact config instead of re-resolving the merge chain. Optional
+`captured_env` is a whitelisted snapshot of the submitter's shell (`ANIMA_*`,
+`CUDA_*`, `HF_*`, `PYTORCH_*`, `TORCH_*`, `NCCL_*`) that the daemon layers under
+the job's env at spawn (**daemon-env ← captured_env ← extra_env**), so a queued
+job runs with the caller's GPU/model/token settings, not the daemon's boot env.
+The Python client and MCP bridge fill it automatically; pass `{}` to opt out.
 
 Command job:
 ```json
@@ -156,10 +161,13 @@ Daemon-level events (job start/finish, etc.), plus `: keepalive` comments while 
 
 ### `GET /health`
 
-`{"ok", "pid", "port", "root", "active_job", "paused", "worker_alive",
-"worker_idle_for"}`. `root` is the checkout the daemon belongs to — useful to
-confirm you're talking to *this* repo's daemon and not another checkout's (see
-`daemon_matches_root` in `client.py`). `worker_idle_for` is seconds since the job
+`{"ok", "pid", "port", "root", "fingerprint", "active_job", "paused",
+"worker_alive", "worker_idle_for"}`. `root` is the checkout the daemon belongs
+to — useful to confirm you're talking to *this* repo's daemon and not another
+checkout's (see `daemon_matches_root` in `client.py`). `fingerprint` is the
+content hash of `scripts/daemon/*.py` the daemon **booted** with; if it differs
+from the current on-disk source the daemon is running stale code and the next
+`ensure_daemon()` submit restarts it eagerly (see *Disposable daemon* below). `worker_idle_for` is seconds since the job
 worker thread last advanced; a large value while a job sits `queued` means the
 worker is wedged behind a long-running job (normal) or — with `worker_alive`
 false — has died (a bug worth a report).
@@ -221,10 +229,11 @@ Everything is mirrored to disk, so a reader can skip the port entirely:
 
 ```
 output/daemon/
-  daemon.json            pidfile: {pid, create_time, port, root}
+  daemon.json            pidfile: {pid, create_time, port, root, fingerprint}
   daemon.log             the detached daemon's own stdout/stderr
   jobs/<id>/
-    job.json             the full Job record (atomic-replaced on each change)
+    job.json             the full Job record (atomic-replaced on each change;
+                         carries `returncode` once the job process exits)
     stdout.log           the subprocess's captured stdout+stderr
     progress.jsonl       structured training progress (train jobs only)
 ```
@@ -242,6 +251,35 @@ thread.
 | `ANIMA_LORA_ROOT` | — | explicit repo root for pidfile discovery |
 | `ANIMA_DAEMON_GPU_BUSY_FRAC` | `0.85` | pre-launch GPU guard: card treated as busy above this used/total fraction |
 | `ANIMA_DAEMON_GPU_RETRIES` / `_DELAY` | `1` / `2.0` | guard wait before launching anyway |
+
+## Disposable daemon — trust + attach
+
+The daemon is a **throwaway view over disk state**, not a durable service, so we
+never have to ask "is the resident process trustworthy?" — we make the answer
+irrelevant.
+
+- **Eager restart on stale code.** Each daemon records a content fingerprint of
+  its own `scripts/daemon/*.py` at boot (in the pidfile + `/health`). Every
+  submit goes through `ensure_daemon()`, which compares that against the current
+  on-disk source; on a mismatch it `POST /shutdown {kill_jobs:false}` → respawns.
+  The fresh daemon's boot reconcile re-adopts the still-running job and queued
+  jobs persist on disk, so the restart is lossless (~1–2s, paid at most once per
+  code change). `daemon-status` shows `stale_code` for a passive observer.
+- **Submit-time env capture.** The submit chokepoints snapshot the caller's
+  whitelisted env into the job record (`captured_env`, above), killing the
+  "queued job silently ran with the daemon's week-old `CUDA_VISIBLE_DEVICES`"
+  vector.
+- **Attach by default (CLI).** `make lora` (and the other GPU targets) submit to
+  the daemon and then **stream the job's stdout to your terminal**, exiting with
+  the job's exit code (`returncode`). Ctrl-C **detaches** — the run survives (it
+  prints the re-attach one-liners). `--queue` detaches immediately (the sweep
+  producer); `--inline` runs the child directly with no daemon (the debugging
+  path — pdb / py-spy / nsys). `ANIMA_RUN_MODE={attach,detach,inline}` sets the
+  default; `PROFILE_STEPS` / `ANIMA_ACCELERATE_LAUNCH` force inline.
+
+Corollary constraint: the daemon stays **stdlib-only forever**. The moment it
+imports `library.*` or holds a model, restarts stop being ~1s and staleness
+becomes real again.
 
 ## Gotchas
 

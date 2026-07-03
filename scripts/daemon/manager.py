@@ -124,6 +124,7 @@ class JobManager:
         extra: Optional[list[str]] = None,
         from_chain: bool = False,
         start: Optional[bool] = None,
+        captured_env: Optional[dict] = None,
     ) -> Job:
         job = Job(
             id=new_job_id(),
@@ -133,6 +134,7 @@ class JobManager:
             overrides=dict(overrides or {}),
             extra=list(extra or []),
             from_chain=from_chain,
+            captured_env=dict(captured_env or {}),
         )
         self._attach_config_file(
             job, config_snapshot=config_snapshot, config_file=config_file
@@ -149,6 +151,7 @@ class JobManager:
         config_snapshot: Optional[dict] = None,
         config_file: Optional[str] = None,
         start: Optional[bool] = None,
+        captured_env: Optional[dict] = None,
     ) -> Job:
         """Enqueue a plain ``python <argv>`` task (preprocess / mask).
 
@@ -169,6 +172,7 @@ class JobManager:
             kind="command",
             argv=list(argv or []),
             extra_env=dict(extra_env or {}),
+            captured_env=dict(captured_env or {}),
             chain_train=dict(chain_train) if chain_train else None,
         )
         self._attach_config_file(
@@ -523,6 +527,10 @@ class JobManager:
             return
         ev = tail.last_event(job.progress_path)
         rc = popen.poll() if popen is not None else None
+        # Mirror the OS exit code into the record (Phase 0c) before finalizing,
+        # so the persist inside _finalize captures it and run_gpu can exit with
+        # it. None for an adopted orphan (psutil liveness gives no code).
+        job.returncode = rc
         if job.stop_requested:
             self._finalize(job, STATE_STOPPED)
             return
@@ -579,6 +587,10 @@ class JobManager:
                     overrides=ct.get("overrides") or {},
                     extra=ct.get("extra") or [],
                     from_chain=True,
+                    # Inherit the originating command's captured env so the
+                    # chained train step runs with the same shell settings
+                    # (Phase 0b) — the submitter is long gone by now.
+                    captured_env=job.captured_env,
                 )
                 job.chained_job_id = follow.id
                 logger.info(
@@ -723,6 +735,14 @@ class JobManager:
         # lines (warnings/tracebacks). 10s is plenty — the GUI tracker parses
         # only the latest line, and training has its own progress.jsonl.
         env.setdefault("TQDM_MININTERVAL", "10")
+
+        # Layer the submitter's captured env (Phase 0b) over the daemon's boot
+        # env, so a job runs with the shell's CUDA_VISIBLE_DEVICES / ANIMA_DIT /
+        # HF_TOKEN rather than week-old daemon values. Applied via update (not
+        # setdefault): the caller's explicit value must win over an inherited
+        # one. A command job's extra_env is applied AFTER this, so it stays the
+        # highest-priority layer (daemon-env ← captured_env ← extra_env).
+        env.update(job.captured_env or {})
 
         # Command jobs (preprocess / mask): a plain task invocation under
         # pythonw.exe (windowless). A uv-venv python.exe re-execs the real

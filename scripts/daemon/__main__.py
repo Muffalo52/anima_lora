@@ -56,12 +56,19 @@ def main() -> int:
     manager = JobManager()
     manager.start()
 
+    # Fingerprint the source we're booting with (Phase 0a): recorded in the
+    # pidfile + /health so a client that has since edited scripts/daemon/* can
+    # detect it's talking to stale code and eagerly restart us. Computed once,
+    # here — /health must echo the BOOT value, never re-hash the (possibly newer)
+    # on-disk files, or the staleness check would always agree with itself.
+    fingerprint = config.source_fingerprint()
+
     try:
         # Falls back to an ephemeral port if a stranger holds the preferred one,
         # but re-raises (→ exit 3) if a sibling anima daemon already owns it, so
         # a startup race can't produce two daemons. The bound port is written to
         # the pidfile below; clients re-resolve it from there.
-        server = serve_with_fallback(manager, port=port)
+        server = serve_with_fallback(manager, port=port, fingerprint=fingerprint)
     except OSError as exc:
         log.error("could not bind 127.0.0.1:%s (%s); another anima daemon?", port, exc)
         manager.shutdown(kill_jobs=False)
@@ -72,6 +79,7 @@ def main() -> int:
         pid=os.getpid(),
         port=server.server_address[1],
         root=config.ROOT,
+        fingerprint=fingerprint,
     )
     # Mirror to a stable per-user path so a ComfyUI trainer node installed
     # *outside* this checkout can discover us (and our bound port) without
@@ -83,6 +91,7 @@ def main() -> int:
             pid=os.getpid(),
             port=server.server_address[1],
             root=config.ROOT,
+            fingerprint=fingerprint,
         )
     except OSError as exc:
         log.warning("could not write global pidfile mirror (%s)", exc)

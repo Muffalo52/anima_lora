@@ -50,6 +50,11 @@ class Job:
     argv: list[str] = field(default_factory=list)
     extra_env: dict = field(default_factory=dict)
 
+    # Whitelisted env snapshot of the SUBMITTER's shell (Phase 0b), layered
+    # under the daemon's boot env and above nothing but its own defaults at
+    # spawn (daemon-env ← captured_env ← extra_env). Empty for legacy jobs.
+    captured_env: dict = field(default_factory=dict)
+
     # Auto-chain: a command job carrying a ``chain_train`` spec ({method, preset,
     # methods_subdir}) makes the manager enqueue that train job on success, so a
     # GUI-initiated "preprocess → train" survives the GUI closing (the chain
@@ -75,6 +80,12 @@ class Job:
     progress_path: Optional[str] = None
     stdout_path: Optional[str] = None
     ckpt_path: Optional[str] = None
+
+    # The job process's OS exit code, mirrored from the monitor loop on terminal
+    # transition (Phase 0c). None until the process exits, or for an adopted
+    # orphan (psutil liveness gives no code). ``run_gpu`` exits with this so
+    # bench harnesses / CI / `&&` chains compose exactly as they do inline.
+    returncode: Optional[int] = None
 
     error: Optional[str] = None
     # Free-text hint for terminal states ("orphaned", "gpu_held_by_unknown", …).

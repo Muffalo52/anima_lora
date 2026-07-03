@@ -5,7 +5,8 @@ Single localhost process; one job at a time. State lives under
 already covered by the repo's ``output/`` gitignore.
 
     output/daemon/
-      daemon.json           pidfile: {"pid", "create_time", "port"}
+      daemon.json           pidfile: {"pid", "create_time", "port", "root",
+                            "fingerprint"}
       daemon.log            the detached daemon's stdout/stderr
       jobs/<job_id>/
         job.json            persisted Job record (survives daemon restart)
@@ -16,6 +17,7 @@ already covered by the repo's ``output/`` gitignore.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -53,6 +55,66 @@ GPU_GUARD_DELAY = float(os.environ.get("ANIMA_DAEMON_GPU_DELAY", "2.0"))
 # training in via ANIMA_DAEMON_JOB_STALL_TIMEOUT.
 CMD_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_CMD_STALL_TIMEOUT", "120"))
 JOB_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_JOB_STALL_TIMEOUT", "0"))
+
+
+# --- Phase 0a: daemon-source fingerprint ------------------------------------
+# The daemon is disposable: a resident process serving last week's
+# scripts/daemon/*.py after an edit or pull is untrustworthy, so we detect the
+# mismatch and eagerly restart (reconcile/adopt makes that lossless). The
+# fingerprint keys on file *contents*, not git HEAD, because the common case is
+# a dirty working tree mid-edit. A daemon records the fingerprint it BOOTED with
+# in its pidfile + /health; a client re-computes the current on-disk value and
+# compares (see client.daemon_is_stale).
+_SRC_DIR = Path(__file__).resolve().parent
+
+
+def source_fingerprint() -> str:
+    """Short content hash of the daemon's own source (``scripts/daemon/*.py``).
+
+    Stable across runs (sorted by name), sensitive to any byte change in any
+    module. Unreadable files are skipped rather than raising — a partial hash is
+    still a useful staleness signal and must never crash a boot or a submit.
+    """
+    h = hashlib.sha256()
+    for path in sorted(_SRC_DIR.glob("*.py")):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        h.update(path.name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(data)
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+# --- Phase 0b: submit-time env capture --------------------------------------
+# A queued job must run with the SUBMITTER's environment, not the daemon's
+# week-old boot env (a shell with a different CUDA_VISIBLE_DEVICES / ANIMA_DIT /
+# HF_TOKEN would otherwise be silently ignored). The submit chokepoints snapshot
+# this whitelist of prefixes into the job record; the daemon layers it under the
+# job's explicit extra_env at spawn. PATH / VIRTUAL_ENV are deliberately NOT
+# captured — the daemon resolves the venv interpreter itself and must keep doing
+# so (a captured PATH from an odd shell would break that).
+CAPTURED_ENV_PREFIXES = ("ANIMA_", "CUDA_", "HF_", "PYTORCH_", "TORCH_", "NCCL_")
+# ANIMA_DAEMON_* configures the daemon process, not a job; capturing it into a
+# job's env is noise at best and, for a job that re-submits, confusing. Drop it.
+_CAPTURED_ENV_SKIP_PREFIXES = ("ANIMA_DAEMON_",)
+
+
+def capture_env(source: dict | None = None) -> dict:
+    """Snapshot the whitelisted env vars (see ``CAPTURED_ENV_PREFIXES``).
+
+    Runs in the *submitting* process (CLI / GUI / node), so it captures that
+    caller's shell — not the daemon's. ``source`` defaults to ``os.environ``.
+    """
+    env = os.environ if source is None else source
+    return {
+        k: v
+        for k, v in env.items()
+        if k.startswith(CAPTURED_ENV_PREFIXES)
+        and not k.startswith(_CAPTURED_ENV_SKIP_PREFIXES)
+    }
 
 
 def ensure_state_dirs() -> None:

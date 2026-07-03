@@ -21,7 +21,7 @@ Endpoints
     POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
     GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
     GET  /events            → SSE: daemon-level lifecycle events
-    GET  /health            → {ok, pid, port, root, active_job, paused, worker_alive, worker_idle_for}
+    GET  /health            → {ok, pid, port, root, fingerprint, active_job, paused, worker_alive, worker_idle_for}
     POST /shutdown          {kill_jobs} → {ok}
 """
 
@@ -257,7 +257,7 @@ TOOLS = [
     },
     {
         "name": "health",
-        "description": "Daemon liveness: {ok, pid, port, root, active_job, paused, worker_alive, worker_idle_for}. 'root' is the checkout it belongs to; worker_idle_for is seconds since the job worker last advanced.",
+        "description": "Daemon liveness: {ok, pid, port, root, fingerprint, active_job, paused, worker_alive, worker_idle_for}. 'root' is the checkout it belongs to; 'fingerprint' is the daemon-source hash it booted with (stale if it differs from current on-disk source); worker_idle_for is seconds since the job worker last advanced.",
         "method": "GET",
         "path": "/health",
         "input_schema": {"type": "object", "properties": {}},
@@ -394,6 +394,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "pid": os.getpid(),
                 "port": self.server.server_address[1],
                 "root": str(config.ROOT),
+                # The source fingerprint we BOOTED with (not re-hashed live) —
+                # a client compares it against current on-disk source to detect
+                # stale daemon code and trigger an eager restart (Phase 0a).
+                "fingerprint": getattr(self.server, "boot_fingerprint", None),
                 "active_job": active.id if active else None,
                 "paused": self.manager.is_paused(),
                 "worker_alive": self.manager.worker_alive(),
@@ -418,6 +422,7 @@ class _Handler(BaseHTTPRequestHandler):
                 config_snapshot=body.get("config_snapshot") or None,
                 config_file=body.get("config_file") or None,
                 start=start,
+                captured_env=body.get("captured_env") or {},
             )
             self._send_json({"job_id": job.id, "state": job.state}, 201)
             return
@@ -434,6 +439,7 @@ class _Handler(BaseHTTPRequestHandler):
             overrides=body.get("overrides") or {},
             extra=body.get("extra") or [],
             start=start,
+            captured_env=body.get("captured_env") or {},
         )
         self._send_json({"job_id": job.id, "state": job.state}, 201)
 
@@ -560,21 +566,22 @@ class _Server(ThreadingHTTPServer):
     # enable it only off-Windows; on Windows a contested bind must fail loudly.
     allow_reuse_address = os.name != "nt"
 
-    def __init__(self, addr, manager: JobManager):
+    def __init__(self, addr, manager: JobManager, *, fingerprint=None):
         super().__init__(addr, _Handler)
         self.manager = manager
+        self.boot_fingerprint = fingerprint
 
     def request_shutdown(self, kill_jobs: bool) -> None:
         self.manager.shutdown(kill_jobs=kill_jobs)
         self.shutdown()  # unblocks serve_forever()
 
 
-def serve(manager: JobManager, *, port: int) -> _Server:
+def serve(manager: JobManager, *, port: int, fingerprint=None) -> _Server:
     """Bind 127.0.0.1:port and return the server (call ``serve_forever``)."""
-    return _Server((config.HOST, port), manager)
+    return _Server((config.HOST, port), manager, fingerprint=fingerprint)
 
 
-def serve_with_fallback(manager: JobManager, *, port: int) -> _Server:
+def serve_with_fallback(manager: JobManager, *, port: int, fingerprint=None) -> _Server:
     """Bind ``port``; if it's already taken, fall back to an OS-chosen free one.
 
     The catch: don't blindly grab a new port on every collision, or a startup
@@ -586,7 +593,7 @@ def serve_with_fallback(manager: JobManager, *, port: int) -> _Server:
     do we move to an ephemeral one (the actual port is recorded in the pidfile,
     and ``ensure_daemon`` re-resolves it from there)."""
     try:
-        return _Server((config.HOST, port), manager)
+        return _Server((config.HOST, port), manager, fingerprint=fingerprint)
     except OSError:
         from .client import DaemonClient
 
@@ -600,4 +607,4 @@ def serve_with_fallback(manager: JobManager, *, port: int) -> _Server:
             "127.0.0.1:%s held by a non-anima process; using an ephemeral port",
             port,
         )
-        return _Server((config.HOST, 0), manager)
+        return _Server((config.HOST, 0), manager, fingerprint=fingerprint)

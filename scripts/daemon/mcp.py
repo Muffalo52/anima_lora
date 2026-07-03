@@ -226,6 +226,11 @@ class MCPServer:
             path = path.replace("{id}", urllib.parse.quote(job_id, safe=""))
         if name == "submit_command":
             args["kind"] = "command"  # the daemon defaults a bare /jobs POST to train
+        if name in ("submit_training", "submit_command"):
+            # Env capture (Phase 0b): the raw-POST path skips client.submit's
+            # auto-capture, so snapshot the bridge's whitelisted env here (an
+            # explicit captured_env in the call still wins).
+            args.setdefault("captured_env", config.capture_env())
         if tool["method"] == "GET":
             return client._request("GET", path)
         return client._request("POST", path, args)

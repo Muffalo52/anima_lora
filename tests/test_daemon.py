@@ -140,7 +140,7 @@ def daemon(tmp_path, monkeypatch):
 
     mgr = JobManager()
     mgr.start()
-    srv = serve(mgr, port=0)
+    srv = serve(mgr, port=0, fingerprint=config.source_fingerprint())
     t = threading.Thread(
         target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
     )
@@ -490,6 +490,209 @@ def test_command_job_loads_with_train_default():
     job = jobs.Job.from_dict({"id": "old", "method": "lora", "preset": "default"})
     assert job.kind == "train"
     assert job.argv == [] and job.extra_env == {}
+    # Phase 0 fields default cleanly on a legacy record.
+    assert job.captured_env == {} and job.returncode is None
+
+
+# --------------------------------------------------------------------------
+# Phase 0a: source fingerprint + stale-daemon detection
+# --------------------------------------------------------------------------
+
+
+def test_source_fingerprint_stable_and_content_sensitive(tmp_path, monkeypatch):
+    """The fingerprint is stable across calls and changes when any *.py byte
+    changes; an unreadable file is skipped, not fatal."""
+    src = tmp_path / "pkg"
+    src.mkdir()
+    (src / "a.py").write_text("x = 1\n")
+    (src / "b.py").write_text("y = 2\n")
+    monkeypatch.setattr(config, "_SRC_DIR", src)
+
+    fp1 = config.source_fingerprint()
+    assert fp1 == config.source_fingerprint()  # stable
+    (src / "b.py").write_text("y = 3\n")  # one byte changes
+    assert config.source_fingerprint() != fp1
+    # a non-.py sibling doesn't participate
+    (src / "notes.txt").write_text("ignored")
+    fp3 = config.source_fingerprint()
+    (src / "notes.txt").write_text("still ignored, differently")
+    assert config.source_fingerprint() == fp3
+
+
+def test_daemon_is_stale_matrix(monkeypatch):
+    from scripts.daemon import client as daemon_client
+
+    monkeypatch.setattr(config, "source_fingerprint", lambda: "CURRENT")
+    assert daemon_client.daemon_is_stale(None) is False  # nothing running
+    assert daemon_client.daemon_is_stale({"fingerprint": "CURRENT"}) is False
+    assert daemon_client.daemon_is_stale({"fingerprint": "OLD"}) is True
+    # a daemon predating the field is stale (gets replaced by a current one)
+    assert daemon_client.daemon_is_stale({"ok": True}) is True
+
+
+def test_health_reports_boot_fingerprint(daemon):
+    """/health echoes the fingerprint the daemon booted with; on an unchanged
+    tree that equals the current on-disk hash → not stale."""
+    from scripts.daemon import client as daemon_client
+
+    cl, _ = daemon
+    h = cl.health()
+    assert h["fingerprint"] == config.source_fingerprint()
+    assert daemon_client.daemon_is_stale(h) is False
+
+
+# --------------------------------------------------------------------------
+# Phase 0b: submit-time env capture
+# --------------------------------------------------------------------------
+
+
+def test_capture_env_whitelist():
+    src = {
+        "ANIMA_DIT": "/models/dit.safetensors",
+        "CUDA_VISIBLE_DEVICES": "1",
+        "HF_TOKEN": "hf_x",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "TORCH_LOGS": "recompiles",
+        "NCCL_DEBUG": "INFO",
+        "ANIMA_DAEMON_PORT": "8765",  # daemon-config → excluded
+        "PATH": "/usr/bin",  # never captured
+        "VIRTUAL_ENV": "/x/.venv",  # never captured
+        "HOME": "/home/x",  # not whitelisted
+    }
+    got = config.capture_env(src)
+    assert got == {
+        "ANIMA_DIT": "/models/dit.safetensors",
+        "CUDA_VISIBLE_DEVICES": "1",
+        "HF_TOKEN": "hf_x",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "TORCH_LOGS": "recompiles",
+        "NCCL_DEBUG": "INFO",
+    }
+
+
+def test_build_cmd_layers_captured_env_under_extra_env():
+    """daemon-env ← captured_env ← extra_env: the submitter's capture overrides
+    the daemon's inherited value, and a command's extra_env overrides both."""
+    job = jobs.Job(
+        id="c1",
+        method="preprocess",
+        preset="",
+        kind="command",
+        argv=["tasks.py", "preprocess"],
+        captured_env={"CUDA_VISIBLE_DEVICES": "2", "HF_TOKEN": "from_shell"},
+        extra_env={"HF_TOKEN": "from_extra"},
+    )
+    mgr = JobManager.__new__(JobManager)
+    _, env = mgr._build_cmd(job)
+    assert env["CUDA_VISIBLE_DEVICES"] == "2"  # captured beats daemon boot env
+    assert env["HF_TOKEN"] == "from_extra"  # extra_env wins over captured
+
+
+def test_submit_stores_captured_env(daemon):
+    cl, _ = daemon
+    jid = cl.submit(
+        method="lora",
+        overrides={"duration": 0.2},
+        captured_env={"ANIMA_DIT": "/x.safetensors"},
+    )["job_id"]
+    assert cl.get(jid)["captured_env"] == {"ANIMA_DIT": "/x.safetensors"}
+
+
+# --------------------------------------------------------------------------
+# Phase 0c: returncode mirroring + run-mode resolution + attach exit code
+# --------------------------------------------------------------------------
+
+
+def test_returncode_mirrored_on_nonzero_exit(real_cmd_daemon):
+    """A command job's OS exit code lands in job.returncode, and _exit_code_for
+    reads it back (what run_gpu exits with)."""
+    from scripts.tasks import _common
+
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(label="boom", argv=["-c", "import sys; sys.exit(3)"])[
+        "job_id"
+    ]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "error", timeout=15)
+    assert cl.get(jid)["returncode"] == 3
+    assert _common._exit_code_for(cl, jid) == 3
+
+
+def test_returncode_zero_on_clean_command(real_cmd_daemon):
+    from scripts.tasks import _common
+
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(label="ok", argv=["-c", "pass"])["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+    assert cl.get(jid)["returncode"] == 0
+    assert _common._exit_code_for(cl, jid) == 0
+
+
+def test_attach_streams_and_returns_exit_code(real_cmd_daemon, capsys):
+    """_attach_and_wait streams the job's stdout to the terminal and returns its
+    exit code — the attach-by-default core (what run_gpu exits with)."""
+    from scripts.tasks import _common
+
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(
+        label="chatty",
+        argv=[
+            "-c",
+            "print('line-one'); print('line-two'); import sys; sys.exit(2)",
+        ],
+    )["job_id"]
+    rc = _common._attach_and_wait(cl, jid)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "line-one" in out and "line-two" in out
+
+
+def test_resolve_run_mode():
+    from scripts.tasks._common import _resolve_run_mode
+
+    # default is attach; flags are stripped from extra
+    assert _resolve_run_mode(["--network_dim", "32"]) == (
+        "attach",
+        ["--network_dim", "32"],
+    )
+    assert _resolve_run_mode(["--queue"]) == ("detach", [])
+    assert _resolve_run_mode(["--detach"]) == ("detach", [])
+    assert _resolve_run_mode(["--inline", "--foo"]) == ("inline", ["--foo"])
+    assert _resolve_run_mode(["--attach"]) == ("attach", [])
+
+
+def test_resolve_run_mode_env_and_forced_inline(monkeypatch):
+    from scripts.tasks._common import _resolve_run_mode
+
+    monkeypatch.setenv("ANIMA_RUN_MODE", "detach")
+    assert _resolve_run_mode([])[0] == "detach"
+    # an explicit flag beats the env var
+    assert _resolve_run_mode(["--inline"])[0] == "inline"
+
+    # PROFILE_STEPS forces inline for the *implicit* mode, but an explicit flag
+    # is still honored.
+    monkeypatch.delenv("ANIMA_RUN_MODE", raising=False)
+    monkeypatch.setenv("PROFILE_STEPS", "3-5")
+    assert _resolve_run_mode([])[0] == "inline"
+    assert _resolve_run_mode(["--queue"])[0] == "detach"
+
+
+def test_train_inline_mode_calls_accelerate(monkeypatch):
+    """`--inline` (or ANIMA_RUN_MODE=inline) runs the child directly, never
+    touching the daemon."""
+    from scripts.tasks import _common
+
+    launched = []
+    monkeypatch.setattr(_common, "accelerate_launch", lambda *a: launched.append(a))
+
+    def _no_daemon(**kw):  # ensure_daemon must not be reached
+        raise AssertionError("inline mode must not contact the daemon")
+
+    import scripts.daemon.client as daemon_client
+
+    monkeypatch.setattr(daemon_client, "ensure_daemon", _no_daemon)
+    _common.train("lora", ["--inline", "--network_dim", "32"])
+    assert len(launched) == 1
+    assert "--network_dim" in launched[0] and "--inline" not in launched[0]
 
 
 @pytest.fixture
@@ -507,7 +710,7 @@ def real_cmd_daemon(tmp_path, monkeypatch):
 
     mgr = JobManager()
     mgr.start()
-    srv = serve(mgr, port=0)
+    srv = serve(mgr, port=0, fingerprint=config.source_fingerprint())
     t = threading.Thread(
         target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
     )
@@ -778,6 +981,7 @@ def test_daemon_status_json(daemon, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["up"] is True
     assert out["base_url"] == cl.base
+    assert out["stale_code"] is False  # in-process daemon shares current source
     assert any(j["id"] == jid for j in out["jobs"])
     # compact by default: heavy record fields are stripped…
     assert "argv" not in out["jobs"][0] and "extra_env" not in out["jobs"][0]
