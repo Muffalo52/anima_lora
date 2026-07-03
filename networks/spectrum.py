@@ -168,6 +168,7 @@ def spectrum_denoise(
     delta: Optional[float] = None,
     refresh_ratio: float = -1.0,
     sea_beta: float = 2.0,
+    foveation=None,
 ) -> torch.Tensor:
     """Spectrum-accelerated denoising loop.
 
@@ -209,6 +210,17 @@ def spectrum_denoise(
             ``ctx.fsg``, when set, forces its scheduled σ-band steps to actual
             forwards (excluded from the window/SEA decision domain) and calibrates
             the latent before each.
+        foveation: Optional velocity-foveation adapter (Phase 0b probe,
+            ``bench/foveated/``; see ``docs/proposal/foveated_denoise.md``).
+            Duck-typed: ``force_actual(i, sigma)`` (one forced actual forward at
+            the σ_c crossing — feature discontinuity vs the Chebyshev fit),
+            ``eval_view(latents, sigma)`` (composite the DiT evaluates on below
+            σ_c; the latent itself is never rewritten), ``pool_velocity(v, sigma)``
+            (output-side periphery pooling of every emitted v — forecast steps
+            included; post-unpatchify, so forecaster state is untouched), and
+            ``final_readout(latents)`` (bicubic merged-representation readout).
+            Unvalidated against DCW / SMC-CFG — both are warned about and
+            ignored while foveation is active (mirrors SPD's posture).
     """
     # Unpack the shared side-channels into the locals the loop body uses.
     pgraft_network = ctx.pgraft_network
@@ -221,6 +233,14 @@ def spectrum_denoise(
     dcw_band_mask = ctx.dcw_band_mask
     dcw_calibrator = ctx.dcw_calibrator
     smc_cfg = ctx.smc_cfg
+    if foveation is not None and (
+        dcw or dcw_calibrator is not None or smc_cfg is not None
+    ):
+        logger.warning(
+            "Spectrum foveation does not compose with DCW / SMC-CFG yet "
+            "(unvalidated against pooled periphery velocities) — ignoring them."
+        )
+        dcw, dcw_calibrator, smc_cfg = False, None, None
     soft_tokens_net = ctx.soft_tokens_net
     soft_tokens_embed_seqlens = ctx.soft_tokens_embed_seqlens
     soft_tokens_neg_seqlens = ctx.soft_tokens_neg_seqlens
@@ -368,6 +388,14 @@ def spectrum_denoise(
                         pooled_neg=pooled_text_neg,
                     )
 
+                # Foveation: one forced actual forward at the σ_c crossing —
+                # the composite eval-view kinks the feature trajectory, so the
+                # Chebyshev basis must re-observe there. Treated like an FSG
+                # forcing: no window advance, excluded from the SEA trace.
+                fov_forced = foveation is not None and foveation.force_actual(
+                    i, float(sigmas[i])
+                )
+
                 # SEA: accumulate the SEA-filtered relative-L1 distance of the
                 # input latent (x_t == `latents`, shared across cond/uncond so
                 # one accumulator drives both branches). One FFT/iFFT per step —
@@ -380,13 +408,15 @@ def spectrum_denoise(
                         # FSG steps are forced actual; exclude their distance
                         # from the auto-δ decision trace (matched to the window
                         # baseline, which also excludes them).
-                        if warmup_steps <= i < stop_at and not fsg_forced:
+                        if warmup_steps <= i < stop_at and not (
+                            fsg_forced or fov_forced
+                        ):
                             sea_dists.append(d)
                     sea_prev = sea_now
 
                 # Decide: actual forward or cached prediction? FSG-scheduled
                 # steps are forced actual regardless of window/SEA rule.
-                if i < warmup_steps or i >= stop_at or fsg_forced:
+                if i < warmup_steps or i >= stop_at or fsg_forced or fov_forced:
                     actual = True
                 elif use_sea and delta_val is not None:
                     actual = sea_accum >= delta_val
@@ -403,6 +433,14 @@ def spectrum_denoise(
                     dcw_calibrator.record_latent_pre_forward(i, latents)
 
                 if actual:
+                    # Foveation eval-view: below σ_c the DiT evaluates on the
+                    # merged-token composite (periphery = pool(z)); the latent
+                    # itself is never rewritten (stays on-manifold).
+                    model_x = (
+                        foveation.eval_view(latents, float(sigmas[i]))
+                        if foveation is not None
+                        else latents
+                    )
                     if soft_tokens_net is not None:
                         soft_tokens_net.append_postfix(
                             embed, soft_tokens_embed_seqlens, timesteps=t_exp
@@ -414,7 +452,7 @@ def spectrum_denoise(
                             else {}
                         )
                         noise_pred = anima(
-                            latents, t_exp, embed, padding_mask=padding_mask, **_pos_kw
+                            model_x, t_exp, embed, padding_mask=padding_mask, **_pos_kw
                         )
                     feat = captured["feat"]
                     if cond_fc is None:
@@ -440,7 +478,7 @@ def spectrum_denoise(
                                 else {}
                             )
                             uncond_noise_pred = anima(
-                                latents,
+                                model_x,
                                 t_exp,
                                 negative_embed,
                                 padding_mask=padding_mask,
@@ -463,7 +501,8 @@ def spectrum_denoise(
                     # window). FSG-forced steps don't advance it — they are an
                     # external forcing, not a window-driven refresh, so the
                     # window rhythm matches the no-FSG schedule (cf. warmup).
-                    if i >= warmup_steps and not fsg_forced:
+                    # The foveation crossing forward gets the same treatment.
+                    if i >= warmup_steps and not (fsg_forced or fov_forced):
                         curr_ws = round(curr_ws + flex_window, 3)
                     consec_cached = 0
                     sea_accum = 0.0  # refresh resets the SEA accumulator (Eq. 8)
@@ -491,6 +530,12 @@ def spectrum_denoise(
 
                     consec_cached += 1
                     pbar.set_postfix(mode="cached", n=fwd_count)
+
+                # Foveation: below σ_c every emitted v — actual *and* forecast —
+                # is periphery-pooled (all tokens in a merge group share one
+                # update). Post-unpatchify, so forecaster state is untouched.
+                if foveation is not None:
+                    noise_pred = foveation.pool_velocity(noise_pred, float(sigmas[i]))
 
                 denoised = latents.float() - sigmas[i] * noise_pred.float()
                 if sampler is not None:
@@ -536,6 +581,12 @@ def spectrum_denoise(
                 latents = new_latents.to(latents.dtype)
 
                 pbar.update()
+
+        # Foveation final readout: the periphery is read from the merged
+        # representation once before decode (bicubic up), stripping the
+        # never-denoised HF that pooled velocities cannot remove.
+        if foveation is not None:
+            latents = foveation.final_readout(latents)
 
         # Auto-δ: this generate ran the window schedule while recording the SEA
         # distance trace; derive the δ that matches the target refresh fraction

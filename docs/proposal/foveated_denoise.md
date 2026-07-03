@@ -1,7 +1,24 @@
-# Foveated denoise — spatial effort allocation in the detail phase
+# Deferred foveation — spatial effort allocation in the detail phase
 
-Status: **Phase 0 PASS (2026-07-03, `bench/foveated/`); Phase 0b (Spectrum compose
-smoke) is the next gate; Phases 1–3 proposed.** Origin: *Foveated Diffusion* (Chao,
+> **Naming (2026-07-03)**: the method is **deferred foveation** — the name encodes the
+> load-bearing inversion (foveation locked out until σ ≤ σ_c, because foveating during
+> the high-σ authority window produces a *different image*; deferring it preserves image
+> identity and is what makes the line training-free). "Deferred-foveated merge" = the
+> real token-merge mechanism (Phase 1b); the static rectangle is the *mask* being
+> "fixed", a Phase-2-replaceable detail, not part of the method name. σ_c is a knob,
+> not a constant: emulation knee [0.5, 0.75] bare-loop, ≈0.5 under aggressive Spectrum.
+
+Status: **Phases 0, 0b, 1b, and 1a ALL PASS (2026-07-03, `bench/foveated/`).** 0b:
+headroom confirmed (forecast error ×1.6–1.7 fovea-concentrated; compose knee σ_c≈0.5).
+1b (**deferred-foveated merge**, owner-reordered first): real whole-stack token merge
+ships **×1.37 e2e @ σ_c=0.75** (fwd ×2.15 at 51% tokens), fovea 0.065/0.027 — better
+than the emulation; standalone knee 0.75. 1a (**foveated Spectrum**): fovea-cropped SEA
+trigger beats plain aggressive Spectrum on fovea fidelity at *identical* forward count
+(0.1909 vs 0.1983, visibly cleaner sign text; periphery also −10%), and the
+periphery-rides-forecast emit is exactly neutral — partial-recompute foundation
+validated. Remaining: production wiring, 1c periphery catch-up, asymmetric cadence /
+partial recompute (Phase 3), mask sources (Phase 2). Full run history:
+`bench/foveated/plan.md`. Origin: *Foveated Diffusion* (Chao,
 Yariv, Xiao, Wetzstein — arXiv:2603.23491, same Wetzstein-lab lineage as SPD), inverted
 to fit Anima's output contract.
 
@@ -88,30 +105,34 @@ the claim becomes *"aggressive-Spectrum + foveation beats aggressive-Spectrum al
 subject fidelity"* — a quality-allocation claim, immune to the speed arithmetic, and the
 honest version of "concentrate denoise where it's needed".
 
-## Phase 0b — Spectrum compose smoke — NEXT GATE
+## Phase 0b — Spectrum compose smoke ✅ PASS at σ_c=0.5 (2026-07-03)
 
-Wire the P0 velocity-foveation into `spectrum_denoise` (both live at the sampler
-boundary; composite input on actual forwards, output-side pooling of every emitted v —
-forecast steps included, it's post-unpatchify so forecaster state is untouched, final
-readout pool, plus the forced actual forward at σ_c).
+`bench/foveated/probe_spectrum_compose.py`; wiring = `spectrum_denoise(foveation=...)`
+hook points (composite input on actual forwards, output-side pooling of every emitted
+v — forecast steps included, post-unpatchify so forecaster state is untouched, final
+readout pool, plus the forced actual forward at the σ_c crossing; DCW/SMC warned and
+ignored while active). Run `20260703-1701-p0b`: aggressive Spectrum (window 3 / flex 3 /
+warmup 4 → 10/28 forwards, ×2.8), 2 seeds:
 
-**Hypothesis to falsify:** at aggressive Spectrum settings (e.g. `flex_window 3.0`,
-~×5 forward-count reduction) + foveation σ_c=0.75, the fovea is visually closer to the
-full-compute baseline than plain aggressive Spectrum's fovea region is, at equal or lower
-actual-forward count.
+- **Headroom CONFIRMED** — the readout that de-risks the whole reframe: plain aggressive
+  Spectrum's forecast error concentrates in the fovea (fovea/periph RMSE ratio
+  1.62–1.74; errmap bright on sign lettering / face / hands, near-black sky). Its
+  visible damage is *subject* damage (garbled sign text, smear artifacts on hands)
+  while the periphery survives — exactly the allocation asymmetry foveated Spectrum
+  wants to exploit.
+- **Composition stable and free at σ_c=0.5**: fovea RMSE +0.002 over plain spec
+  (visually identical drift), same forward count, periphery clean bokeh, no
+  instability through the σ_c feature discontinuity.
+- **σ_c=0.75 fails under aggressive caching** (+0.029 fovea RMSE, visibly worse text):
+  the bare-loop knee [0.5, 0.75] shrinks to **≈0.5** when most post-crossing steps are
+  forecast. Phase 1a operates at σ_c=0.5.
+- Scope: 0b's wiring doesn't reallocate refresh budget yet, so foveated arms only
+  *matched* spec's fovea — the "beats aggressive Spectrum on subject fidelity at
+  matched compute" claim is Phase 1a's to demonstrate, now with its premise measured.
 
-- Judge: same-seed montage eyeball (fovea crops), fovea RMSE as change-certifier only.
-- KILL the composition (not the line) if foveation adds visible fovea damage on top of
-  Spectrum's, or if forecast error through the σ_c discontinuity destabilizes cached
-  steps despite the forced forward.
-- Also read out: does the σ_c crossing inflate SEA/forecast residuals in the *fovea*
-  (leak through shared AdaLN/attention)?
+## Phase 1 — pick the mechanism — NEXT GATE (0b passed → default branch is 1a)
 
-Cheap: ~half-day wiring + one bench run. PASS → Phase 1 chooses its branch with data.
-
-## Phase 1 — pick the mechanism (gated on 0b)
-
-Two branches; 0b's outcome decides the default:
+Two branches; 0b's outcome picked the default:
 
 - **1a. Foveated Spectrum decisions** (if 0b shows the quality-allocation win): make the
   refresh decision spatially aware. Cheapest form first — global refresh cadence
