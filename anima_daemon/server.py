@@ -17,6 +17,8 @@ Endpoints
     GET  /jobs/{id}/progress → filtered progress.jsonl events
                             ?events=step,val&since_step=N&every_nth=N&last_n=N
     POST /jobs/{id}/stop    → {job}
+    POST /jobs/{id}/pause   → {job_id, state, error?}  (SIGSTOP the job tree)
+    POST /jobs/{id}/resume  → {job_id, state, error?}  (SIGCONT it back to running)
     POST /queue/start       → {ok, paused:false}  (resume a paused queue)
     POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
     GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
@@ -44,6 +46,8 @@ logger = logging.getLogger("anima.daemon")
 
 _JOB_RE = re.compile(r"^/jobs/(?P<id>[^/]+)$")
 _JOB_STOP_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/stop$")
+_JOB_PAUSE_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/pause$")
+_JOB_RESUME_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/resume$")
 _JOB_LOGS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/logs$")
 _JOB_PROGRESS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/progress$")
 
@@ -227,6 +231,39 @@ TOOLS = [
         },
     },
     {
+        "name": "pause_job",
+        "description": (
+            "Freeze a running job's process tree (SIGSTOP) — VRAM/CUDA context "
+            "stay put, SM utilisation drops to zero, resume is instant. The queue "
+            "does NOT advance past it (it still owns its slot). Refuses anything "
+            "not running, and refuses a multi-GPU accelerate-launch run. Returns "
+            "{job_id, state, error?}."
+        ),
+        "method": "POST",
+        "path": "/jobs/{id}/pause",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {"id": {"type": "string", "description": "Job id to pause."}},
+        },
+    },
+    {
+        "name": "resume_job",
+        "description": (
+            "Thaw a paused job's process tree (SIGCONT) back to running. Returns "
+            "{job_id, state, error?} (error if the job isn't paused)."
+        ),
+        "method": "POST",
+        "path": "/jobs/{id}/resume",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Job id to resume."}
+            },
+        },
+    },
+    {
         "name": "tail_logs",
         "description": (
             "SSE stream of a job's combined stdout+stderr from the start of the file; "
@@ -373,6 +410,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_shutdown()
         elif m := _JOB_STOP_RE.match(path):
             self._handle_stop(m.group("id"))
+        elif m := _JOB_PAUSE_RE.match(path):
+            self._handle_pause(m.group("id"))
+        elif m := _JOB_RESUME_RE.match(path):
+            self._handle_resume(m.group("id"))
         else:
             self._send_json({"error": "not found", "path": path}, 404)
 
@@ -499,6 +540,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "no such job", "job_id": job_id}, 404)
             return
         self._send_json({"job_id": job.id, "state": job.state})
+
+    def _handle_pause(self, job_id: str) -> None:
+        result = self.manager.pause_job(job_id)
+        if result is None:
+            self._send_json({"error": "no such job", "job_id": job_id}, 404)
+            return
+        # A refusal (wrong state / accelerate run) rides an `error` field in the
+        # 200 body, matching the rest of this API's body-carries-outcome contract
+        # (`stop` of a terminal job likewise 200s) — only a missing job is 404.
+        self._send_json(result)
+
+    def _handle_resume(self, job_id: str) -> None:
+        result = self.manager.resume_job(job_id)
+        if result is None:
+            self._send_json({"error": "no such job", "job_id": job_id}, 404)
+            return
+        self._send_json(result)
 
     def _handle_shutdown(self) -> None:
         body = self._read_json()

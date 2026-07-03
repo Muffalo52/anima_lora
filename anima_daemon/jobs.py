@@ -16,13 +16,17 @@ from typing import Optional
 
 from . import config
 
-# queued → running → {done | error | stopped}
+# queued → running → {done | error | stopped}; running ↔ paused (tree-freeze).
 STATE_QUEUED = "queued"
 STATE_RUNNING = "running"
+STATE_PAUSED = "paused"
 STATE_DONE = "done"
 STATE_ERROR = "error"
 STATE_STOPPED = "stopped"
 TERMINAL_STATES = frozenset({STATE_DONE, STATE_ERROR, STATE_STOPPED})
+# The job holds its VRAM slot and blocks the queue in both states — the worker
+# is parked in the monitor loop for it, running or frozen (Phase 2a).
+ACTIVE_STATES = frozenset({STATE_RUNNING, STATE_PAUSED})
 
 
 def new_job_id() -> str:
@@ -71,6 +75,15 @@ class Job:
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
+    # Wall-clock of the last `running → paused` tree-freeze (Phase 2a); cleared
+    # on resume. Observability only — the freeze itself is the process state.
+    paused_at: Optional[float] = None
+
+    # Whether the train tree was spawned under `accelerate launch` (multi-GPU /
+    # distributed). Set at launch from the built command. Pause refuses these: a
+    # frozen NCCL rank trips the collective heartbeat timeout. Command jobs and
+    # the single-GPU direct-invoke fast path are False.
+    accelerate_launched: bool = False
 
     # The spawned `accelerate launch` process, identified as (pid, create_time)
     # so a reused PID can never be mistaken for our job.

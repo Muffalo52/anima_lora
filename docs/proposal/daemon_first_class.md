@@ -1,6 +1,6 @@
 # Daemon as the first-class run manager — disposable daemon, attach-by-default, bench as jobs
 
-Status: **Phase 0 + repo relocation + Phase 1a + `make gen` (1c command-job chokepoint) shipped (2026-07-03); Phases 1b / 1c-rest / 1.5 / 2 remain proposals.**
+Status: **Phase 0 + repo relocation + Phase 1a + `make gen` (1c command-job chokepoint) + Phase 2a (pause/resume tree-freeze) shipped (2026-07-03); Phases 1b / 1c-rest / 2b / 2c remain proposals.**
 Motivation: the daemon is architecturally
 sound (serial GPU queue, disk-backed state, self-describing surface) but
 socially opt-in — training grew `--queue`, preprocess/mask submit, and
@@ -223,7 +223,27 @@ inline). Covered by `tests/test_gen_manifest.py` + an end-to-end lift test in
 `tests/test_daemon.py`. The remaining `test-*` bodies can now migrate by swapping
 their `run([...])` for `run_command("test:<x>", argv)` opportunistically.
 
-## Phase 1.5 — pause/resume a running job (tree-freeze)
+## Phase 2 — daemon owns the GPU: pause/resume, pipelines, resident server
+
+The daemon-lifecycle bucket. Note the two halves have **different gates**: 2a
+(pause/resume) is independent of Phase 1 adoption and similarly small — ship it
+whenever; 2b/2c (pipelines + resident server) wait until Phase 1 demonstrates
+people actually leave runs queued.
+
+### 2a. Pause/resume a running job (tree-freeze) — ✅ SHIPPED 2026-07-03
+
+Implemented as described below. Landed surface: `proc.suspend_tree` /
+`proc.resume_tree` (psutil SIGSTOP/SIGCONT, parent-first freeze / children-first
+thaw, beside `kill_tree`); `jobs.STATE_PAUSED` + `ACTIVE_STATES` frozenset +
+`Job.paused_at` / `Job.accelerate_launched`; `manager.pause_job` / `resume_job`
+(refuse non-running + accelerate-launch runs); the monitor loop skips the stall
+watchdog while `paused`; `_current_running_locked` / `_queue_is_idle_locked` /
+`_reconcile` treat paused as an active, queue-blocking, re-adoptable state;
+`stop`/`_kill_job_tree` thaw-then-kill a frozen tree; `POST /jobs/{id}/pause` +
+`/resume` endpoints + `pause_job`/`resume_job` TOOLS entries (auto-exposed over
+MCP) + `DaemonClient.pause_job`/`resume_job`; `make daemon-pause` /
+`daemon-resume` CLI verbs (`JOB=<id>` or the active job). Covered by
+`tests/test_daemon.py` (Phase 2a section). 2b/2c remain proposals.
 
 `POST /jobs/{id}/pause` / `POST /jobs/{id}/resume`, new `paused` job state
 (`running ↔ paused` only). Mechanism: **suspend the process tree** —
@@ -267,17 +287,19 @@ to `save_state` + exit, resume later as a fresh job via `--resume`
 per-loop cooperation — exactly the mirroring tax — and a separate feature;
 spec it only if the freeze level proves insufficient in practice.
 
-## Phase 2 — pipelines + one GPU owner
+### 2b. Pipelines — generalize `chain_train` → `chain`
 
-- **Generalize `chain_train` → `chain`**: a list of follow-on job specs run
-  on success (linear only; no DAG until a real need shows up). Unlocks
-  `preprocess → train → test-grid → bench` living in the daemon and surviving
-  the submitter. `chain_train` becomes sugar for a one-element chain.
-- **Fold the resident inference server** (`scripts/inference_server.py`)
-  under the daemon as a managed resident: daemon starts/stops it, and the
-  current best-effort eviction (`manager.py::_evict_resident_inference`)
-  becomes an owned lifecycle transition instead of a cross-pidfile courtesy.
-  One process owns GPU policy.
+A list of follow-on job specs run on success (linear only; no DAG until a real
+need shows up). Unlocks `preprocess → train → test-grid → bench` living in the
+daemon and surviving the submitter. `chain_train` becomes sugar for a
+one-element chain.
+
+### 2c. Fold the resident inference server under the daemon
+
+Bring `scripts/inference_server.py` under the daemon as a managed resident:
+daemon starts/stops it, and the current best-effort eviction
+(`manager.py::_evict_resident_inference`) becomes an owned lifecycle transition
+instead of a cross-pidfile courtesy. One process owns GPU policy.
 
 ## Repo location — `scripts/daemon/` → `anima_daemon/` — ✅ SHIPPED 2026-07-03
 
@@ -324,6 +346,7 @@ capture (~15), `run_gpu` + `returncode` (mostly recombining the old
 architecture — do 1a
 first (it's ~20 lines across `manager.py` + `bench/_common.py`), then migrate
 bench dirs opportunistically as they're next touched, rather than in one
-sweep. Phase 1.5 (pause) is independent of both and similarly small —
-`suspend_tree`/`resume_tree` beside `kill_tree`, one state, two endpoints.
-Phase 2 waits until Phase 1 demonstrates people actually leave runs queued.
+sweep. Phase 2a (pause) is independent of Phase 1 and similarly small —
+`suspend_tree`/`resume_tree` beside `kill_tree`, one state, two endpoints — so
+it can land any time. Phase 2b/2c (pipelines + resident server) wait until
+Phase 1 demonstrates people actually leave runs queued.

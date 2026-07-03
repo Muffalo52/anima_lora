@@ -150,6 +150,38 @@ def cmd_daemon_kill(extra):
     print(f"job {result.get('job_id')} → {result.get('state')} (daemon still up).")
 
 
+def cmd_daemon_pause(extra):
+    """Freeze the running job's process tree (SIGSTOP) in place — VRAM stays put,
+    resume is instant. ``JOB=<id>`` targets a specific job; otherwise the active
+    one. The queue does not advance past a paused job (it still owns the card)."""
+    if not _client.is_running():
+        print("no daemon running.", file=sys.stderr)
+        sys.exit(1)
+    cl = _client.DaemonClient()
+    result = cl.pause_job(_job_arg(extra))
+    if result.get("error"):
+        print(result["error"], file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"job {result.get('job_id')} → {result.get('state')} (frozen; VRAM held). "
+        f"`make daemon-resume` to thaw."
+    )
+
+
+def cmd_daemon_resume(extra):
+    """Thaw a paused job (SIGCONT) → back to running. ``JOB=<id>`` targets a
+    specific job; otherwise the active (paused) one."""
+    if not _client.is_running():
+        print("no daemon running.", file=sys.stderr)
+        sys.exit(1)
+    cl = _client.DaemonClient()
+    result = cl.resume_job(_job_arg(extra))
+    if result.get("error"):
+        print(result["error"], file=sys.stderr)
+        sys.exit(1)
+    print(f"job {result.get('job_id')} → {result.get('state')} (thawed).")
+
+
 def cmd_daemon_terminate(extra):
     """Stop the whole daemon. The active job tree is killed and the GPU freed."""
     if not _client.is_running():

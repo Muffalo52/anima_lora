@@ -26,8 +26,10 @@ import toml
 
 from . import config, gpu, proc, tail
 from .jobs import (
+    ACTIVE_STATES,
     STATE_DONE,
     STATE_ERROR,
+    STATE_PAUSED,
     STATE_QUEUED,
     STATE_RUNNING,
     STATE_STOPPED,
@@ -293,9 +295,83 @@ class JobManager:
                 self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
                 return job
             job.persist()
-        if state == STATE_RUNNING:
+        if state in ACTIVE_STATES:
+            # Running or paused (frozen): either way tree-kill it. _kill_job_tree
+            # thaws a paused tree first so the SIGTERM is actually delivered.
             self._kill_job_tree(job)
         return job
+
+    def pause_job(self, job_id: str) -> Optional[dict]:
+        """Freeze a running job's process tree (SIGSTOP), method-agnostically.
+
+        The CUDA context and VRAM stay put; only SM scheduling stops, so resume
+        is instant (no reload/recompile, mid-step optimizer state intact). The
+        queue does NOT advance — the paused job still owns its slot; ``pause`` is
+        "hold my run", not "yield it". Returns ``{job_id, state, error?}``, or
+        ``None`` when no such job (the server maps that to 404). Refuses anything
+        not ``running`` and refuses a multi-GPU ``accelerate launch`` run (a
+        frozen NCCL rank trips the collective heartbeat).
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if job.state == STATE_PAUSED:
+                return {"job_id": job.id, "state": job.state}  # idempotent
+            if job.state != STATE_RUNNING:
+                return {
+                    "job_id": job.id,
+                    "state": job.state,
+                    "error": f"can only pause a running job (current state: {job.state})",
+                }
+            if job.accelerate_launched:
+                return {
+                    "job_id": job.id,
+                    "state": job.state,
+                    "error": "refusing to pause a multi-GPU accelerate-launch run "
+                    "(a frozen NCCL rank trips the collective heartbeat timeout)",
+                }
+            # Flip to paused BEFORE suspending, so the monitor loop already skips
+            # the stall watchdog by the time the tree stops writing output. If the
+            # suspend then races a natural exit, _finalize_from_exit (paused isn't
+            # terminal) still finalizes correctly.
+            job.state = STATE_PAUSED
+            job.paused_at = time.time()
+            job.persist()
+            pid = job.pid
+        if pid is not None:
+            proc.suspend_tree(pid)
+        self._broadcast({"ev": "paused", "job_id": job_id})
+        return {"job_id": job_id, "state": STATE_PAUSED}
+
+    def resume_job(self, job_id: str) -> Optional[dict]:
+        """Thaw a paused job's process tree (SIGCONT) → back to ``running``.
+
+        Returns ``{job_id, state, error?}``, or ``None`` for no such job. A
+        no-op error for a job that isn't paused. Wall-clock throughput/ETA
+        inside the run blips across the pause window; accepted, not compensated.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if job.state != STATE_PAUSED:
+                return {
+                    "job_id": job.id,
+                    "state": job.state,
+                    "error": f"job is not paused (current state: {job.state})",
+                }
+            pid = job.pid
+        if pid is not None:
+            proc.resume_tree(pid)
+        with self._lock:
+            # Guard against a concurrent stop/exit having moved it on already.
+            if job.state == STATE_PAUSED:
+                job.state = STATE_RUNNING
+                job.paused_at = None
+                job.persist()
+        self._broadcast({"ev": "resumed", "job_id": job_id})
+        return {"job_id": job_id, "state": job.state}
 
     def _run(self) -> None:
         # Drain re-attached orphans before touching the queue so the serial
@@ -415,6 +491,9 @@ class JobManager:
             job.started_at = time.time()
             job.pid = popen.pid
             job.create_time = proc.create_time(popen.pid)
+            # Record whether this went out under the accelerate launcher, so
+            # pause can refuse a multi-GPU run without re-deriving it (Phase 2a).
+            job.accelerate_launched = "accelerate.commands.accelerate_cli" in cmd
             job.persist()
             self._popens[job.id] = popen
         self._broadcast({"ev": "started", "job_id": job.id, "pid": job.pid})
@@ -429,6 +508,12 @@ class JobManager:
             if self._kill_on_shutdown:
                 self._kill_job_tree(job)
                 break
+            if job.state == STATE_PAUSED:
+                # Frozen tree writes nothing — the stall watchdog would fire and
+                # kill it. Keep polling liveness (a `stop` while paused, or the
+                # process dying, still exits the loop) but skip the watchdog.
+                time.sleep(_POLL_INTERVAL)
+                continue
             stalled = self._stall_reason(job)
             if stalled is not None:
                 logger.warning("job %s killed by stall watchdog: %s", job.id, stalled)
@@ -712,8 +797,14 @@ class JobManager:
         job.status_detail = "launched despite busy GPU"
 
     def _kill_job_tree(self, job: Job) -> None:
-        if job.pid is not None:
-            proc.kill_tree(job.pid)
+        if job.pid is None:
+            return
+        # A SIGSTOP'd tree won't act on the SIGTERM kill_tree sends until it's
+        # resumed (only SIGKILL reaches a stopped process) — thaw first so the
+        # graceful terminate lands and we don't wait out the full kill grace.
+        if job.state == STATE_PAUSED:
+            proc.resume_tree(job.pid)
+        proc.kill_tree(job.pid)
 
     def _evict_resident_inference(self) -> None:
         """Ask a resident inference server (if any) to free VRAM before launch.
@@ -841,9 +932,15 @@ class JobManager:
     def _reconcile(self) -> None:
         self._jobs = load_all()
         for job in self._jobs.values():
-            if job.state == STATE_RUNNING:
+            if job.state in ACTIVE_STATES:
                 if proc.is_alive(job.pid, job.create_time):
-                    logger.info("reconcile: re-attaching live job %s", job.id)
+                    # A paused job's tree is still SIGSTOP'd on disk (the freeze
+                    # outlives the daemon) — re-adopt it in whatever state it was
+                    # left; the monitor loop skips the stall watchdog while it's
+                    # `paused` and a later resume thaws it.
+                    logger.info(
+                        "reconcile: re-attaching live %s job %s", job.state, job.id
+                    )
                     self._adopt.append(job.id)
                 else:
                     logger.info("reconcile: job %s died while we were down", job.id)
@@ -858,8 +955,11 @@ class JobManager:
                 self._queue.put(job.id)
 
     def _current_running_locked(self) -> Optional[Job]:
+        # The job occupying the worker/GPU slot — running or frozen. A paused job
+        # still owns its VRAM and blocks the queue, so `stop`/`shutdown`/health's
+        # active_job must all see it.
         for job in self._jobs.values():
-            if job.state == STATE_RUNNING:
+            if job.state in ACTIVE_STATES:
                 return job
         return None
 
@@ -870,7 +970,8 @@ class JobManager:
         already playing → let the new one auto-advance behind it). The
         just-submitted job is not in ``_jobs`` yet when this is consulted."""
         return not any(
-            job.state in (STATE_QUEUED, STATE_RUNNING) for job in self._jobs.values()
+            job.state == STATE_QUEUED or job.state in ACTIVE_STATES
+            for job in self._jobs.values()
         )
 
     def active_job(self) -> Optional[Job]:

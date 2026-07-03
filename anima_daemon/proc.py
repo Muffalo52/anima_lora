@@ -129,6 +129,61 @@ def kill_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
             pass
 
 
+def suspend_tree(pid: int) -> None:
+    """SIGSTOP ``pid`` and every descendant — freeze a whole job tree in place.
+
+    Parent **first** so it can't fork a new child into the gap while we walk
+    (the same "snapshot before you act" reason ``kill_tree`` snapshots up
+    front); dataloader workers and any compiler grandchildren follow. On Linux
+    this is SIGSTOP, on Windows ``NtSuspendProcess`` — psutil abstracts both.
+    The CUDA context and VRAM survive; only SM scheduling stops. Pairs with
+    :func:`resume_tree`. Safe on an already-dead PID.
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    try:
+        parent.suspend()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    try:
+        children = parent.children(recursive=True)
+    except psutil.NoSuchProcess:
+        children = []
+    for p in children:
+        try:
+            p.suspend()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
+def resume_tree(pid: int) -> None:
+    """SIGCONT ``pid`` and every descendant — the inverse of :func:`suspend_tree`.
+
+    Reverse order: children (deepest last-suspended) **first**, parent last, so
+    the parent never briefly observes a still-frozen child after it itself has
+    unfrozen. Safe on an already-dead PID.
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    try:
+        children = parent.children(recursive=True)
+    except psutil.NoSuchProcess:
+        children = []
+    for p in children:
+        try:
+            p.resume()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    try:
+        parent.resume()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+
 # pidfile — single-daemon lock keyed on (pid, create_time)
 def write_pidfile(
     path: Path,

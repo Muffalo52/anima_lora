@@ -164,6 +164,16 @@ COMMANDS = {
         "Follow the daemon (read-only). JOB=<id> tails that job's stdout; "
         "ctrl-C detaches only — training keeps running.",
     ),
+    "daemon-pause": (
+        daemon.cmd_daemon_pause,
+        "Freeze the running job (or JOB=<id>) in place — SIGSTOP the process "
+        "tree; VRAM stays allocated, SM util drops to zero, resume is instant. "
+        "The queue does not advance past it.",
+    ),
+    "daemon-resume": (
+        daemon.cmd_daemon_resume,
+        "Thaw a paused job (or JOB=<id>) — SIGCONT the process tree back to running.",
+    ),
     "daemon-kill": (
         daemon.cmd_daemon_kill,
         "Abort the running job (or JOB=<id>) and free the GPU; daemon stays up "

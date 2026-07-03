@@ -418,6 +418,84 @@ def test_pause_does_not_interrupt_running_job(daemon):
     assert _wait_until(lambda: cl.get(queued)["state"] == "done", timeout=15)
 
 
+# --------------------------------------------------------------------------
+# Phase 2a — pause/resume a running job (tree-freeze)
+# --------------------------------------------------------------------------
+
+
+def test_pause_resume_running_job(daemon):
+    """`pause` SIGSTOPs the job's tree (state → paused, OS process stopped, the
+    slot still owned); `resume` SIGCONTs it and it runs to completion."""
+    cl, _ = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 5.0})["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "running", timeout=15)
+    pid = cl.get(jid)["pid"]
+
+    res = cl.pause_job(jid)
+    assert res["state"] == "paused"
+    assert not res.get("error")
+    # The process tree is genuinely frozen (POSIX exposes STATUS_STOPPED).
+    if not sys.platform.startswith("win"):
+        assert _wait_until(
+            lambda: psutil.Process(pid).status() == psutil.STATUS_STOPPED, timeout=5
+        )
+    assert cl.get(jid)["state"] == "paused"
+    # A paused job still owns the slot → it's the active job, and its staleness
+    # clock is frozen (None), not a wedged running-clock the watchdog would flag.
+    assert cl.health()["active_job"] == jid
+    assert cl.get(jid)["stale_for"] is None
+
+    res = cl.resume_job(jid)
+    assert res["state"] == "running"
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=25)
+
+
+def test_pause_refuses_non_running(daemon):
+    """Pause/resume only apply to a running/paused job. A queued job (queue held)
+    is refused with an `error` in the body and its state untouched."""
+    cl, _ = daemon
+    cl.pause_queue()
+    jid = cl.submit(method="lora", overrides={"duration": 1.0})["job_id"]
+    assert cl.get(jid)["state"] == "queued"
+
+    res = cl.pause_job(jid)
+    assert res.get("error") and res["state"] == "queued"
+    res = cl.resume_job(jid)
+    assert res.get("error") and res["state"] == "queued"
+
+    cl.start_queue()
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+
+def test_pause_refuses_accelerate_run(daemon):
+    """A multi-GPU `accelerate launch` run can't be frozen (a stopped NCCL rank
+    trips the collective heartbeat) — pause refuses it, run untouched."""
+    cl, mgr = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 5.0})["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "running", timeout=15)
+    mgr.get(jid).accelerate_launched = True  # simulate the launcher path
+
+    res = cl.pause_job(jid)
+    assert res.get("error") and "accelerate" in res["error"]
+    assert cl.get(jid)["state"] == "running"  # untouched
+
+
+def test_stop_while_paused_thaws_and_kills(daemon):
+    """Stopping a frozen job must thaw the tree first so the SIGTERM lands — it
+    dies promptly instead of waiting out the kill grace on a stopped process."""
+    cl, _ = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "running", timeout=15)
+    pid = cl.get(jid)["pid"]
+
+    cl.pause_job(jid)
+    assert _wait_until(lambda: cl.get(jid)["state"] == "paused", timeout=5)
+
+    cl.stop(jid)
+    assert _wait_until(lambda: cl.get(jid)["state"] == "stopped", timeout=10)
+    assert _wait_until(lambda: not psutil.pid_exists(pid), timeout=8)
+
+
 def test_reconcile_orphan_requeue_adopt(tmp_path, monkeypatch):
     """Boot sweep: dead `running` → orphaned error; `queued` → re-enqueued;
     live `running` → adopted for monitoring."""

@@ -110,7 +110,8 @@ Response: `201 {"job_id": "20260611-142233-a1b2c3", "state": "queued"}`.
 ### `GET /jobs` — list
 
 Returns `[job, …]` (full records, submission order). Each job has `state` ∈
-`queued | running | done | error | stopped`.
+`queued | running | paused | done | error | stopped` (`paused` = tree-frozen,
+see `/jobs/{id}/pause` below).
 
 ### `GET /jobs/{id}` — status
 
@@ -152,6 +153,34 @@ GET /jobs/{id}/progress?events=step,log&every_nth=50
 
 Stops a running or queued job (tree-kills the process). Returns `{job_id, state}`.
 The Python client's `stop()` with no id resolves the active job from `/health`.
+
+### `POST /jobs/{id}/pause` · `POST /jobs/{id}/resume` — tree-freeze
+
+`pause` SIGSTOPs the job's whole process tree (dataloader workers included);
+`resume` SIGCONTs it back. Method-agnostic and zero-cooperation — works
+identically on `train.py`, the bespoke turbo/spd/mod loops, bench, and
+inference, with no per-loop wiring. The CUDA context and VRAM survive; only SM
+scheduling stops, so resume is instant (no reload, no recompile, mid-step
+optimizer state intact). Returns `{job_id, state, error?}` (`error` on a refusal;
+404 only for an unknown id). Both client helpers (`pause_job`/`resume_job`) with
+no id resolve the active job from `/health`.
+
+Semantics:
+- **The queue does NOT advance past a paused job** — it still owns its VRAM
+  slot; `pause` is "hold my run", not "yield it". The worker stays parked
+  monitoring it.
+- **Refused** for anything not `running`, and for a multi-GPU `accelerate
+  launch` run (a frozen NCCL rank trips the collective heartbeat) — the refusal
+  rides an `error` field in the 200 body.
+- `stale_for` freezes while paused (state is `paused`, not a wedged `running`),
+  so observers don't false-alarm. Wall-clock throughput/ETA inside the run blips
+  across the pause; accepted, not compensated.
+- The freeze outlives a daemon restart (SIGSTOP persists) — boot reconcile
+  re-adopts a `paused` job as-is. `stop`/`shutdown` on a paused job thaw the tree
+  first so the kill lands promptly.
+- Opportunistic side-runs go *around* the daemon, not through it: a paused train
+  run holds only its allocated VRAM, so a small `--inline` inference fits in the
+  remainder (poor-man's preemption — the human schedules the gap, not the queue).
 
 ### `POST /queue/pause` · `POST /queue/start`
 
@@ -220,7 +249,8 @@ for line in client.stream_logs(job_id):
     print(line)
 
 # control
-client.pause_queue(); client.start_queue()
+client.pause_queue(); client.start_queue()        # queue gate
+client.pause_job(job_id); client.resume_job(job_id)  # tree-freeze (no id → active job)
 client.stop(job_id)               # or client.stop() for the active job
 client.list_jobs()
 ```
