@@ -1,10 +1,16 @@
 # Deferred-foveated merge
 
+> **Line ARCHIVED 2026-07-03** — the periphery soft blur is constitutive
+> (P4t: no tail treatment recovers it) and was judged unacceptable, so
+> production wiring stops here. The runner remains functional as documented
+> below, off by default. Digest: `_archive/bench/foveated/report.md`; retired
+> ship plan: `_archive/proposals/foveated_denoise.md`; reusable findings:
+> `docs/findings/foveated_denoise.md`.
+
 Training-free inference acceleration, **image-identity preserving**: same image
 where it matters, periphery rendered as an intentional soft blur. ×1.37 e2e at
 1024²/28-step/CFG 4 (fwd ×2.15 on merged steps), fovea visually
-baseline-identical. Runner in `networks/foveated.py`; research digest in
-`bench/foveated/report.md`; ship plan in `docs/proposal/foveated_denoise.md`.
+baseline-identical. Runner in `networks/foveated.py`.
 
 ```bash
 python inference.py ... --fovea_sigma_c 0.75            # defaults: frac 0.35, combo mask
@@ -74,7 +80,8 @@ python inference.py ... --fovea_sigma_c 0.75 --fovea_frac 0.25   # faster, knee 
   emits isolated fovea cells (scattered cells lose their attention
   neighborhood — +47 % subject error in P2).
 
-Bench regression surface: `bench/foveated/probe_token_merge.py` (speed +
-startup invariants on the real DiT) and `probe_mask_sources.py` /
-`probe_fraction_stretch.py` (the p2b/p3s numbers) — all import the promoted
-`networks/foveated.py` code.
+Bench regression surface (archived): `_archive/bench/foveated/` probes
+(`probe_token_merge.py` = speed + startup invariants, `probe_mask_sources.py` /
+`probe_fraction_stretch.py` = the p2b/p3s numbers) — they imported the promoted
+`networks/foveated.py` code; the live invariant pins are
+`tests/test_foveated_merge.py`.

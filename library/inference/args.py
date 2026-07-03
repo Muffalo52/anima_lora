@@ -425,9 +425,9 @@ def build_parser() -> argparse.ArgumentParser:
         "len = len(stages)-1. Default: 0.7 per handoff (single-late knee).",
     )
 
-    # Deferred-foveated merge (bench/foveated/ P0→P3): training-free, forces
-    # Euler, mutually exclusive with --spectrum / --spd. See networks/foveated.py
-    # + docs/inference/foveated.md.
+    # Deferred-foveated merge (archived line — _archive/bench/foveated/):
+    # training-free, forces Euler, mutually exclusive with --spectrum / --spd.
+    # See networks/foveated.py + docs/inference/foveated.md.
     parser.add_argument(
         "--fovea_sigma_c",
         type=float,

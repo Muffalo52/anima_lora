@@ -210,8 +210,9 @@ def spectrum_denoise(
             ``ctx.fsg``, when set, forces its scheduled σ-band steps to actual
             forwards (excluded from the window/SEA decision domain) and calibrates
             the latent before each.
-        foveation: Optional velocity-foveation adapter (Phase 0b probe,
-            ``bench/foveated/``; see ``docs/proposal/foveated_denoise.md``).
+        foveation: Optional velocity-foveation adapter (Phase 0b probe of the
+            archived foveated line, ``_archive/bench/foveated/``; see
+            ``_archive/proposals/foveated_denoise.md``).
             Duck-typed: ``force_actual(i, sigma)`` (one forced actual forward at
             the σ_c crossing — feature discontinuity vs the Chebyshev fit),
             ``eval_view(latents, sigma)`` (composite the DiT evaluates on below

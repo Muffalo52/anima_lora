@@ -1,6 +1,7 @@
 """Deferred-foveated merge invariants (networks/foveated.py).
 
-Tier-1.5 obligations from docs/proposal/foveated_denoise.md:
+Tier-1.5 obligations from the (now archived) ship proposal
+`_archive/proposals/foveated_denoise.md`:
 
   * **All-fovea mask ≡ identity** — with every cell fovea, the merge is a pure
     permutation (identity order), so the merged forward must be bit-exact to
@@ -14,8 +15,8 @@ Tier-1.5 obligations from docs/proposal/foveated_denoise.md:
     lands on target, and never emits isolated fovea cells (compactness — the
     P2 scatter falsification).
 
-The bench probes (`bench/foveated/`) import the same promoted code, so the
-quality/speed regression surface stays with them; this file guards the
+The bench probes (archived at `_archive/bench/foveated/`) imported the same
+promoted code; with the line archived, this file is the sole live guard of the
 plumbing.
 """
 

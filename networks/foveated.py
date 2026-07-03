@@ -1,8 +1,11 @@
 """Deferred-foveated merge — training-free inference acceleration.
 
-Ship home of the `bench/foveated/` P0→P3 line (digest in
-`bench/foveated/report.md`, ship plan in `docs/proposal/foveated_denoise.md`,
-user doc in `docs/inference/foveated.md`):
+Ship home of the foveated bench line — **ARCHIVED 2026-07-03** (owner decision
+post-P4t: the periphery soft blur is constitutive and unrecoverable; digest in
+`_archive/bench/foveated/report.md`, retired ship plan in
+`_archive/proposals/foveated_denoise.md`, durable lessons in
+`docs/findings/foveated_denoise.md`, user doc in `docs/inference/foveated.md`).
+The runner stays functional and off by default (`--fovea_sigma_c 0`):
 
   * Above σ_c: baseline full-grid sampling — composition/identity decided
     identically to no-foveation ("deferred" is load-bearing: text drive is

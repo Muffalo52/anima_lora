@@ -811,7 +811,8 @@ def generate_body(
             raise ValueError(
                 "--fovea_sigma_c is mutually exclusive with --spd / --spectrum "
                 "(all replace the denoise loop). The foveated-Spectrum compose "
-                "was closed by bench/foveated P3 — do not re-propose."
+                "was closed by foveated P3 (_archive/bench/foveated/) — do not "
+                "re-propose."
             )
         if _FOVEATED_RUNNER is None:
             raise RuntimeError(
