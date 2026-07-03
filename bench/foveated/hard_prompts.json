@@ -1,0 +1,17 @@
+{
+  "_comment": "Phase-2b hard prompts: real dataset captions (multi-subject / pattern-heavy periphery) + hand-annotated detail-critical evaluation boxes (faces), px in 1024x1024, verified by overlay 2026-07-03. Boxes are per seed because composition varies.",
+  "channel6": {
+    "caption": "image_dataset/channel_(caststation)/channel6.txt",
+    "boxes": {
+      "40": [[96, 128, 288, 288], [416, 128, 608, 288], [672, 96, 896, 288]],
+      "41": [[96, 128, 320, 320], [416, 128, 608, 320], [704, 96, 896, 288]]
+    }
+  },
+  "ootomo4424330": {
+    "caption": "image_dataset/ootomo_takuji/4424330.txt",
+    "boxes": {
+      "40": [[192, 96, 352, 288], [416, 96, 608, 288], [608, 96, 800, 288]],
+      "41": [[192, 96, 384, 320], [416, 96, 608, 320], [672, 64, 864, 288]]
+    }
+  }
+}

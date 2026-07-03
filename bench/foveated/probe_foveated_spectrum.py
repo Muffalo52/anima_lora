@@ -83,8 +83,9 @@ def spectrum_arm(
     mask_tok5: torch.Tensor | None = None,  # (1,1,H_t,W_t,1), 1=fovea
     sigma_c: float | None = None,
     sea_delta: float | None = None,
-    fovea_lat_box: tuple | None = None,  # (top, bottom, left, right) latent px
+    sea_dist_fn=None,  # callable(sea_now, sea_prev) -> float (trigger metric)
     record_trace: bool = False,
+    trace_fns: dict | None = None,  # name -> dist fn, recorded alongside (P2t)
 ):
     """One denoise run. Mirrors ``spectrum_denoise``'s decision/forecast logic
     (window rule, SEA accumulate-reset, warmup/tail forcing) minus the
@@ -92,7 +93,7 @@ def spectrum_arm(
     from library.inference import sampling as inference_utils
     from networks.spectrum import _spectrum_fast_forward
     from networks.spectrum_forecast import SpectrumPredictor
-    from networks.spectrum_sea import l1rel, sea_filter
+    from networks.spectrum_sea import sea_filter
 
     m_basis, lam, w_blend = 3, 0.1, 0.3  # spectrum_denoise defaults
     num_steps = len(timesteps)
@@ -109,23 +110,24 @@ def spectrum_arm(
     curr_ws, consec = window_size, 0
     sea_prev, sea_accum = None, 0.0
     trace: list[float] = []
+    traces: dict[str, list[float]] = {k: [] for k in (trace_fns or {})}
     refresh_steps: list[int] = []
-
-    def fovea_sea_dist(now, prev):
-        t_, b_, l_, r_ = fovea_lat_box
-        return l1rel(now[..., t_:b_, l_:r_], prev[..., t_:b_, l_:r_])
 
     try:
         for i, t in enumerate(timesteps):
             sigma = float(sigmas[i])
 
-            if schedule == "sea" or record_trace:
+            if schedule == "sea" or record_trace or trace_fns:
                 sea_now = sea_filter(latents[:, :, 0], sigma)
                 if sea_prev is not None:
-                    d = fovea_sea_dist(sea_now, sea_prev)
-                    sea_accum += d
-                    if warmup <= i < stop_at:
-                        trace.append(d)
+                    if schedule == "sea" or record_trace:
+                        d = sea_dist_fn(sea_now, sea_prev)
+                        sea_accum += d
+                        if record_trace and warmup <= i < stop_at:
+                            trace.append(d)
+                    if trace_fns and warmup <= i < stop_at:
+                        for k, fn in trace_fns.items():
+                            traces[k].append(fn(sea_now, sea_prev))
                 sea_prev = sea_now
 
             if schedule == "all" or i < warmup or i >= stop_at:
@@ -204,6 +206,7 @@ def spectrum_arm(
         "actual_forwards": len(refresh_steps),
         "refresh_steps": refresh_steps,
         "trace": trace,
+        "traces": traces,
     }
 
 
@@ -328,11 +331,17 @@ def main() -> None:
         num_steps, args.warmup_steps, stop_at, args.window_size, args.flex_window
     )
 
+    from networks.spectrum_sea import l1rel
+
+    def fovea_sea_dist(now, prev):
+        t_, b_, l_, r_ = fovea_lat_box
+        return l1rel(now[..., t_:b_, l_:r_], prev[..., t_:b_, l_:r_])
+
     common = dict(
         warmup=args.warmup_steps,
         window_size=args.window_size,
         flex_window=args.flex_window,
-        fovea_lat_box=fovea_lat_box,  # spec's trace recording needs it too
+        sea_dist_fn=fovea_sea_dist,  # spec's trace recording needs it too
     )
     pad = torch.zeros(1, 1, h_lat, w_lat, dtype=torch.bfloat16, device=device)
     run_dir = make_run_dir("foveated", label=args.label)

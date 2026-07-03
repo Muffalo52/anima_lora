@@ -178,11 +178,202 @@ cadence → crank global aggressiveness at held fovea quality), (ii) Phase-3 par
 recompute (refresh = fovea queries vs cached K/V ≈ ⅓ forward cost → 2–3× more fovea
 re-anchors per wall-clock).
 
-## Phase 2 — mask sources — GATED on P0
+> **RE-ATTRIBUTED by Phase 2t (below): the fovsea win is NOT foveal.** Every trigger
+> region (including anti-oracle background) produces the same schedule and the same
+> numbers — the win is generic SEA-vs-window timing at this aggressive point. The
+> fovea-fidelity gate result stands; the *mechanism* story and escalation (i) do not
+> (fovea-δ is meaningless when δ is region-independent). Escalation (ii) partial
+> recompute is untouched — it rests on `fovblend` neutrality, not on trigger timing.
 
-P0 uses a static center rect. Real masks: the FreeText Stage-1 localizer (endogenous I2T
-cross-attn "where is concept X", read during the full-res steps) ∪ high local-x̂₀-variance
-regions. Only worth building once P0/P1 show the mechanism is sound.
+## Phase 2 — mask shape/placement controls, then mask sources — GATED on P0 (open)
+
+P0/1b used a single oracle-placed center rect. Before building real mask *sources* (the
+FreeText Stage-1 localizer — endogenous I2T cross-attn "where is concept X", read during
+the full-res steps — ∪ high local-x̂₀-variance regions), Phase 2 first runs the shape and
+placement **controls** those sources would have to beat. Cost is fraction-only (attention
+is global — layout is free), so all arms run at matched fovea fraction on the real 1b
+merge path (`FoveatedTokenMerge` takes any binary cell mask; merged-rope exactness is
+per-2×2-group, mask-independent). `probe_mask_shapes.py`, arms:
+
+| arm | tests |
+|---|---|
+| `rect` (oracle center) | reference — the 1b configuration |
+| `rect_miss` (least-oracle-overlap random rect) | placement null — what a mis-aimed mask costs the subject. NB at frac 0.35 a rect can't fully miss the center subject (min overlap ~30% — corner placement); `subject_cover` is logged. |
+| `multi3` (3 random rects, frac/3 each) | moderate fragmentation — the "multiple subjects" primitive |
+| `scatter` (random cells) | max boundary perimeter — shape stress; also a "graded foveation" data point (32px blur cells everywhere) |
+
+`rect` vs `rect_miss` isolates placement; `rect_miss` vs `multi3` vs `scatter` isolates
+fragmentation with placement held random. Readouts: own-mask RMSE (mechanism holds per
+shape?), fixed subject-box RMSE in every arm (placement value), own-periphery Laplacian,
+boundary-ring Laplacian (seam/halo flag), matched-cost sanity. Gate: fragmentation ≈
+free (own-mask RMSE ≈ oracle rect) AND placement matters (rect_miss subject damage ≫
+rect) → derived masks are worth building and must beat the placement null. Known
+contract caveat regardless of outcome: hard mask edges crossing a *subject* look odd
+(P1 note) — a shipped mask source should be morphologically closed/dilated and
+subject-following; scatter violates this by construction (that's its job).
+
+### Result — gate PASS, with two shape constraints (2026-07-03, run
+`20260703-1910-p2` — bare DiT, 1024², 28 steps euler CFG 4, σ_c=0.75, frac≈0.352,
+2 seeds; startup invariants bit-exact)
+
+- **Matched cost confirmed**: every shape ×1.37–1.39 e2e (same token count) — layout is
+  free, fraction is the only cost knob, as designed.
+- **Placement dominates**: subject RMSE 0.065 (`rect`) vs 0.151 (`rect_miss`, residual
+  cover 30% — geometric floor at this frac). Visually the missed subject is destroyed
+  (face gone, sign unreadable). Saliency has large value to capture; derived masks must
+  beat this null and are worth building.
+- **Moderate fragmentation ≈ free; maximal is NOT.** Own-mask RMSE at held-random
+  placement: `rect_miss` 0.072 → `multi3` 0.077 (+7%, fine) → `scatter` 0.106 (+47%).
+  Isolated fovea cells lose fidelity — their entire attention neighborhood is merged —
+  and visually scatter is a *streaky smear*, not the hoped uniform "graded foveation"
+  softness. Shipped masks must be compact blobs (morphologically close/dilate any
+  derived saliency).
+- **Periphery blur is only clean bokeh on low-contrast content.** High-contrast content
+  landing in the periphery (the sign text in `rect_miss`, both seeds) shows moiré /
+  checker aliasing from 4× pooling + bicubic on hard edges — 1b's clean-bokeh readout
+  was partly a property of its low-contrast periphery (sky/grass). Second independent
+  reason the mask must be subject-following.
+- Boundary rings show no halo/sharpness spikes (ring Laplacian ratio 0.31–0.71 < 1
+  everywhere); the multi3 rect edge crossing the sign mid-word confirms the P1
+  half-sharp-subject contract note. `multi3` subject RMSE tracks coverage (0.157 @35%
+  → 0.120 @58%), consistent with placement being the whole story.
+
+**Next (Phase 2b — mask sources):** derive masks from x̂₀-variance (cheap, endogenous,
+read during full-res steps) and/or the localizer; morphological close + dilate to
+compact blobs; evaluate bracketed between `rect` (oracle) and `rect_miss` (null) on
+subject RMSE at matched fraction.
+
+### Phase 2b design (agreed 2026-07-03) — endogenous sources, hard dataset prompts
+
+v1 is purely **endogenous** (zero extra models / forwards; SAM3/PE-Spatial saliency is
+the escalation only if these fail). Two free signals, computed during the full-res
+steps before the σ_c crossing:
+
+- **`cfgdelta`** — accumulated per-cell |v_cond − v_uncond| over pre-crossing steps.
+  Both branches exist under CFG anyway; the delta marks where the prompt is steering =
+  a prompt-aware subject localizer (text drive is front-loaded, so the signal is
+  complete before crossing).
+- **`x0var`** — per-cell HF (Laplacian) energy of x̂₀ at the crossing (last 2–3 full
+  steps averaged). Marks detail-critical / high-contrast cells — the moiré-risk set.
+  Known risk: over-selects busy texture (trees, patterns); the bench measures exactly
+  this.
+- **`combo`** — normalized score sum.
+
+Score → mask: threshold at target fraction → drop specks (<4 cells) → morph close →
+dilate 1 cell (boundary margin, the subject-clipping contract) → re-solve threshold so
+the FINAL fraction hits target. Built per (prompt, seed) at the crossing step — the
+adaptivity is the value proposition vs the static rect. FoveatedTokenMerge construction
+is cheap index ops, so mid-run build is free.
+
+**Prompts — the design trap**: on the centered default prompt the static center rect is
+near-optimal and derived masks can only tie. Hard prompts come from **real dataset
+captions** (owner: pick difficult ones from post_image_dataset) — candidates mined for
+multi-subject spread + pattern-heavy periphery: `channel6` (3girls, explicit
+left/middle/right layout — center rect provably misses 2 of 3 faces) and
+`ootomo 4424330` (3girls against checkered wall + step-and-repeat — stresses x0var's
+texture over-selection). Baselines rendered first; subject boxes hand-annotated per
+(prompt, seed).
+
+Arms: `rect` (static center — status quo, not "oracle" on hard prompts), `rect_miss`
+(null), `x0var`, `cfgdelta`, `combo`. Real 1b merge, σ_c=0.75, matched fraction 0.35,
+default + hard prompts × 2 seeds. Gate: on the centered prompt derived ≈ rect (no
+regression on easy mode); on hard prompts derived clearly beats static rect and
+trivially beats rect_miss; overlays visually subject-following. Stretch (winner only):
+fraction 0.20–0.25 matching rect-at-0.35 quality → mask intelligence converts to speed.
+Scope: standalone merge line only (clean attribution); the winning source carries to
+the composed stack later — P2f guarantees the blend side accepts any mask.
+
+### Result — gate PASS, `combo` is the v1 source (2026-07-03, run
+`20260703-1948-p2b`, `probe_mask_sources.py`; NB no cross-attn maps used — sources are
+the two sampler-free signals; a tag-column `xattn` arm from `bench/cross_attn_drive`
+machinery remains the v2 option)
+
+Subject RMSE (aggregate, cover in parens):
+
+| source | default (easy) | channel6 (3 subjects) | ootomo (texture trap) |
+|---|---|---|---|
+| `rect` static | **0.0647** (100%) | 0.1961 (68%) | 0.1329 (93%) |
+| `rect_miss` | 0.1514 (30%) | 0.2537 (0%) | 0.2438 (0%) |
+| `x0var` | 0.0725 (66%) | 0.1496 (91%) | 0.1322 (91%) |
+| `cfgdelta` | 0.0836 (60%) | 0.1615 (89%) | **0.1132** (96%) |
+| `combo` | 0.0664 (68%) | **0.1393** (95%) | 0.1250 (95%) |
+
+- **Gate met on every axis**: on the centered default, `combo` ties static rect
+  (+0.0017, at just 68% box-cover — it spends the saved budget on hands/props);
+  on channel6 every derived source beats static rect, `combo` by **−29%** with 95%
+  face coverage (masks visibly trace all three characters as compact blobs; all three
+  face crops near-baseline, vs moiré mush for the rect's missed side faces); on ootomo
+  `cfgdelta` beats rect −15%. Everything ≫ `rect_miss`. e2e ×1.33–1.40 maintained,
+  achieved fraction 0.33–0.36, ring Laplacian <1 everywhere.
+- **x0var's texture trap confirmed and quantified**: its score map lights up the
+  checkered-wall grid (visible wall blobs in the mask); morphology limits the damage
+  to a tie-with-rect instead of a win on that prompt. `cfgdelta` ignores the wall —
+  prompt-awareness is what survives busy peripheries. `combo` inherits enough of both
+  to be the only source that never loses to static rect on any prompt → **v1 pick**.
+- Open follow-ups: (i) stretch leg — `combo` at fraction 0.20–0.25 vs rect@0.35
+  (converting mask intelligence into speed); (ii) optional `xattn` source (per-tag
+  cross-attn columns) if sharper semantics are wanted; (iii) production wiring of
+  source+morphology into the merge path (with 1c).
+
+## Phase 2t — trigger-region attribution: the 1a win is NOT foveal (2026-07-03, run
+`20260703-1920-p2t`, `probe_trigger_masks.py`)
+
+Follow-up question (owner): what happens if the 1a mechanism runs on the diverse P2
+masks? Answer: it's the attribution check 1a never had — and it **overturns the 1a
+mechanism story**. Setup: pure timing reallocation (no merge, no blend, full-res
+everywhere), SEA trigger distance computed on five regions — oracle rect (= 1a's
+`fovsea`, regression check), whole latent (`global`, = production `schedule="sea"`),
+anti-oracle rect, multi-rect, random scatter (identical placements to the P2 run) —
+each with its own auto-δ at the window schedule's refresh fraction.
+
+- `sea_rect` reproduced 1a's fovsea exactly (subject RMSE 0.1909, refreshes [6,11,18])
+  — validating both the 1a result and the `spectrum_arm` dist-fn refactor.
+- **Every other region produced the same schedule and the same numbers** (0.1909–0.1910,
+  ±1 fwd) — including the background-driven anti-oracle trigger. Calibrated δ spans just
+  0.515–0.535 across all five regions: the *relative* SEA distance (l1rel) is spatially
+  near-uniform, so WHERE the trigger looks doesn't move WHEN it fires.
+- Conclusion: the 1a improvement is **generic SEA-vs-window timing** at this aggressive
+  operating point (earlier mid-run refreshes → shorter tail extrapolation), not foveated
+  refresh allocation. Production already ships this trigger (`schedule="sea"`) — the
+  timing win needs **no mask and no new wiring**. Symmetrically, a bad mask can't hurt
+  the trigger either. NB the SEA-schedule bench's earlier "reallocation REFUTED at
+  matched compute" was a different (non-aggressive) operating point — SEA-vs-window is
+  setting-dependent; region-independence is the robust fact here.
+- Consequence for the roadmap: **masks matter only where P2 showed they do — the merge
+  mask (and Phase-3 partial-recompute queries)**. Drop the fovea-δ / asymmetric-cadence
+  trigger escalation; keep Phase 2b mask sources scoped to the merge line.
+
+## Phase 2f — diverse masks on the blend mechanisms: fovblend neutrality is
+mask-shape-INDEPENDENT (2026-07-03, run `20260703-1932-p2f`, `probe_blend_masks.py`)
+
+Owner follow-up: run the diverse masks through `fovblend` / `fov1a`. This closes the
+remaining 1a mechanism: fovblend's oracle-rect neutrality is the Phase-3
+partial-recompute foundation, and the merge line's scatter falsification raised the
+question of whether the compact-blob constraint carries over. Setup: blend σ_c=0.5
+(composed knee), same four mask placements as P2/P2t; fov1a arms use the global SEA
+trigger (per P2t region-independence). Neutrality measured as own-region / complement
+RMSE deltas vs `spec`'s same-region values.
+
+- **fovblend is neutral for every shape** — rect +0.0001/+0.0013 (own/comp), miss
+  +0.0002/+0.0009, multi3 +0.0003/+0.0010, **scatter +0.0008/+0.0009** — all within the
+  1a standard (≲0.003), both seeds, no visual artifacts (blend arms carry exactly
+  spec's known damage signature and nothing else). The merge line's compact-blob
+  constraint does NOT carry over: blending is per-token at emit (`final_layer` has no
+  attention), so isolated cells cost nothing here. **Phase-3 recompute region is freely
+  choosable at the emit level.**
+- **fov1a = SEA timing win + neutral blend, for any mask**: all fov1a arms land at or
+  slightly better than p2t's plain-SEA numbers (seed-40 fov1a_rect subject 0.1812 ≡
+  p2t sea_rect exactly; subjects 0.179–0.201 vs spec 0.184–0.215). The negative deltas
+  vs spec are the schedule effect, not the blend. Seed-41 fov1a arms took 11 fwd (one
+  extra late refresh, same as p2t's global trigger) — matched ±1 standard.
+- Caveat unchanged: fits still anchored to full actuals; the no-complement-update
+  degradation remains Phase 3's own pre-gate.
+
+**Net shape rules after P2/P2t/P2f:** merge mask — compact + subject-following
+(placement 2.3×, scatter falsified, moiré on missed high-contrast content); trigger —
+no mask at all (region-independent); blend/recompute region — any shape. Phase 2b mask
+sources therefore target the merge mask only, with the blend side free to reuse
+whatever mask (or none) falls out.
 
 ## Phase 3 — true grid coarsening (paper mechanism, time-gated) — GATED on P1
 
