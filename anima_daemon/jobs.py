@@ -87,6 +87,16 @@ class Job:
     # bench harnesses / CI / `&&` chains compose exactly as they do inline.
     returncode: Optional[int] = None
 
+    # Phase 1a — result envelope lift. A GPU job (bench script / test-*) that
+    # writes a bench envelope drops a pointer file (`result_path.json`) into its
+    # job dir via `bench/_common.write_result`; the monitor follows it on the
+    # terminal transition and records the envelope's absolute path here plus a
+    # `{label, metrics}` digest in `result_summary`. The canonical artifacts stay
+    # under `bench/<m>/results/` — the daemon holds only a pointer + digest, never
+    # the artifacts. Both None for a job that wrote no envelope (training, etc.).
+    result_path: Optional[str] = None
+    result_summary: Optional[dict] = None
+
     error: Optional[str] = None
     # Free-text hint for terminal states ("orphaned", "gpu_held_by_unknown", …).
     status_detail: Optional[str] = None

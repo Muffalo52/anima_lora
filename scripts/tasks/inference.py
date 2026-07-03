@@ -16,11 +16,13 @@ from ._common import (
     INFERENCE_BASE,
     ROOT,
     _random_ref_image,
+    _resolve_run_mode,
     latest_hydra,
     latest_lora,
     latest_output,
     override_arg,
     run,
+    run_command,
 )
 
 
@@ -165,6 +167,26 @@ def _spd_flags() -> list[str]:
 def cmd_test(extra):
     """Inference with the latest LoRA. See ``_base_test_args`` for env levers."""
     run([*_base_test_args(), *extra])
+
+
+def cmd_gen(extra):
+    """Batch generation routed through the daemon (attach-by-default, Phase 1c).
+
+    Same argv as ``make test`` (shares ``_base_test_args`` — NOLORA / SPECTRUM /
+    MOD / DAVE / FSG env levers all compose), but submitted as a GPU command job
+    so it **queues behind** a live training run instead of OOM-colliding with it,
+    survives the terminal closing, and lands a generation manifest in the job
+    record (Phase 1a result-lift). ``--queue`` detaches (overnight seed/ckpt
+    sweeps), ``--inline`` bypasses the daemon (identical to ``make test``).
+
+    Point at a specific adapter / prompt file / seed grid via ARGS, e.g.
+    ``make gen ARGS="--lora_weight output/ckpt/foo.safetensors --from_file prompts.txt"``.
+    """
+    mode, extra = _resolve_run_mode(extra)
+    # _base_test_args() leads with the python exe (INFERENCE_BASE[0]); run_command
+    # prepends the interpreter itself (venv python for the daemon), so drop it.
+    argv = [*_base_test_args()[1:], *extra]
+    run_command("gen", argv, mode=mode)
 
 
 def cmd_test_hydra(extra):

@@ -48,6 +48,7 @@ Cache-level data access (issues.md DX4)::
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 from dataclasses import asdict, is_dataclass
@@ -204,4 +205,19 @@ def write_result(
         record["extra"] = _serializable(extra)
     out = run_dir / "result.json"
     out.write_text(json.dumps(record, indent=2))
+
+    # Daemon result-envelope lift (proposal Phase 1a): when this script runs as a
+    # daemon job, the daemon exported ANIMA_DAEMON_JOB_DIR into our env. Drop a
+    # pointer to the just-written envelope there so the monitor can lift its
+    # abs path + {label, metrics} digest into the job record on the terminal
+    # transition. Absent (a plain inline `python bench/.../run_bench.py`) → a
+    # no-op, so bench scripts stay standalone with zero daemon coupling.
+    job_dir = os.environ.get("ANIMA_DAEMON_JOB_DIR")
+    if job_dir:
+        try:
+            pointer = Path(job_dir) / "result_path.json"
+            pointer.write_text(json.dumps({"path": str(out.resolve())}))
+        except OSError:
+            pass  # best-effort; a missing job dir must never fail the bench run
+
     return out

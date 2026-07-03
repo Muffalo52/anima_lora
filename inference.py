@@ -36,6 +36,7 @@ from library.inference import (
     generate_body,
     save_latent,
     save_output,
+    write_gen_manifest,
 )
 from library.inference.text import MAX_CROSSATTN_TOKENS
 
@@ -399,8 +400,22 @@ def process_interactive(args: argparse.Namespace) -> None:
 # region Main
 
 
+def _list_pngs(path) -> set:
+    """The set of ``*.png`` under ``path`` (empty if it doesn't exist yet). Used
+    to diff before/after a run so the daemon manifest captures exactly the images
+    this run produced, without threading a collector through every save path."""
+    try:
+        return {os.path.join(path, n) for n in os.listdir(path) if n.endswith(".png")}
+    except OSError:
+        return set()
+
+
 def main():
     args = parse_args()
+
+    # Snapshot the output dir so we can attribute freshly-written images to this
+    # run for the daemon result manifest (Phase 1a lift). No-op cost when inline.
+    _pngs_before = _list_pngs(getattr(args, "save_path", None))
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0
@@ -513,6 +528,11 @@ def main():
             vae.to(torch.bfloat16)
             vae.eval()
             save_output(args, vae, latent, device)
+
+    # Record a generation manifest + result pointer when running as a daemon job
+    # (proposal Phase 1a). Inline runs: no-op. Sorted so the manifest is stable.
+    new_images = sorted(_list_pngs(getattr(args, "save_path", None)) - _pngs_before)
+    write_gen_manifest(args, new_images)
 
     logger.info("Done!")
 

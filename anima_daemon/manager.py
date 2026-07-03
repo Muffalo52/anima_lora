@@ -567,6 +567,9 @@ class JobManager:
             if detail:
                 job.status_detail = detail
             job.ckpt_path = tail.last_ckpt_path(job.progress_path)
+            # Phase 1a — follow the bench envelope pointer (if the job wrote one)
+            # and record its abs path + a {label, metrics} digest on the record.
+            self._lift_result(job)
             # Auto-chain: a done command job with a chain_train spec enqueues its
             # follow-on train job here (survives the GUI closing). chained_job_id
             # persists in the same write that flips us to `done` → atomic for a
@@ -600,6 +603,38 @@ class JobManager:
                 )
             job.persist()
         self._broadcast({"ev": "ended", "job_id": job.id, "state": state})
+
+    def _lift_result(self, job: Job) -> None:
+        """Follow a bench envelope pointer (Phase 1a) into the job record.
+
+        A GPU job whose script called ``bench/_common.write_result`` under a
+        daemon spawn dropped ``<job_dir>/result_path.json`` → ``{"path": <abs
+        result.json>}``. Read it, then read the envelope for its ``label`` /
+        ``metrics`` digest. Best-effort and schema-blind: the envelope contract is
+        bench-owned (we lift ``label``/``metrics`` opaquely, never validate them),
+        and a missing/corrupt pointer is the common no-envelope case — leave the
+        fields None. Absolute paths only, so a ledger can index them as-is.
+        """
+        import json
+        from pathlib import Path
+
+        pointer = job.dir / "result_path.json"
+        try:
+            path = json.loads(pointer.read_text(encoding="utf-8")).get("path")
+        except (OSError, ValueError, AttributeError):
+            return
+        if not path:
+            return
+        job.result_path = path
+        try:
+            envelope = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(envelope, dict):
+            job.result_summary = {
+                "label": envelope.get("label"),
+                "metrics": envelope.get("metrics"),
+            }
 
     def _gpu_guard(
         self,
@@ -743,6 +778,14 @@ class JobManager:
         # one. A command job's extra_env is applied AFTER this, so it stays the
         # highest-priority layer (daemon-env ← captured_env ← extra_env).
         env.update(job.captured_env or {})
+
+        # Phase 1a — result envelope lift. Advertise the job's identity + dir so a
+        # bench script running inside it can drop a `result_path.json` pointer
+        # (bench/_common.write_result reads these). Absent → the script runs as a
+        # plain inline invocation and writes no pointer (zero coupling). Set for
+        # every kind so any GPU job that happens to emit an envelope is lifted.
+        env["ANIMA_DAEMON_JOB_ID"] = job.id
+        env["ANIMA_DAEMON_JOB_DIR"] = str(job.dir)
 
         # Command jobs (preprocess / mask): a plain task invocation under
         # pythonw.exe (windowless). A uv-venv python.exe re-execs the real

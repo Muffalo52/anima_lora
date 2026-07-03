@@ -9,6 +9,7 @@ path without launching torch/accelerate.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -746,6 +747,28 @@ def test_command_job_end_to_end(real_cmd_daemon):
     assert "shuf=7" in log
 
 
+def test_command_job_result_lift_end_to_end(real_cmd_daemon):
+    """End-to-end Phase 1a: a command job reads the daemon-exported
+    ANIMA_DAEMON_JOB_DIR, writes an envelope + `result_path.json` pointer (as
+    bench/_common + write_gen_manifest do), and the monitor lifts `result_path`
+    + `result_summary` onto the record on the terminal transition."""
+    cl, _ = real_cmd_daemon
+    script = (
+        "import os, json;"
+        "d = os.environ['ANIMA_DAEMON_JOB_DIR'];"
+        "env = os.path.join(d, 'gen_manifest.json');"
+        "open(env, 'w').write(json.dumps("
+        "{'label': 'foo-lora', 'metrics': {'n_images': 3}}));"
+        "open(os.path.join(d, 'result_path.json'), 'w').write("
+        "json.dumps({'path': env}))"
+    )
+    jid = cl.submit_command(label="gen", argv=["-c", script])["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+    job = cl.get(jid)
+    assert job["result_path"] == str(config.job_dir(jid) / "gen_manifest.json")
+    assert job["result_summary"] == {"label": "foo-lora", "metrics": {"n_images": 3}}
+
+
 def test_command_job_missing_argv_rejected(real_cmd_daemon):
     """A command submission without argv is a 400 (urllib raises HTTPError)."""
     import urllib.error
@@ -1196,3 +1219,78 @@ def test_scripts_daemon_compat_shim_aliases_same_objects():
         old = importlib.import_module(f"scripts.daemon.{name}")
         new = importlib.import_module(f"anima_daemon.{name}")
         assert old is new, f"scripts.daemon.{name} is not anima_daemon.{name}"
+
+
+# --------------------------------------------------------------------------
+# Phase 1a: result-envelope lift (bench/test-* jobs become citizens)
+# --------------------------------------------------------------------------
+
+
+def test_build_cmd_exports_job_identity_env(tmp_path, monkeypatch):
+    """Every spawned job learns its id + dir via env, so a bench script inside
+    it can drop a result_path.json pointer (train and command kinds alike)."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    mgr = JobManager.__new__(JobManager)
+    for kind, argv in (("command", ["tasks.py", "x"]), ("train", [])):
+        job = jobs.Job(
+            id=f"j-{kind}", method="lora", preset="default", kind=kind, argv=argv
+        )
+        _, env = mgr._build_cmd(job)
+        assert env["ANIMA_DAEMON_JOB_ID"] == f"j-{kind}"
+        assert env["ANIMA_DAEMON_JOB_DIR"] == str(config.job_dir(f"j-{kind}"))
+
+
+def test_lift_result_reads_pointer_and_digest(tmp_path, monkeypatch):
+    """_lift_result follows <job_dir>/result_path.json to the envelope and lifts
+    its abs path + {label, metrics} digest onto the record."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    job = jobs.Job(id="bench1", method="bench:dcw", preset="", kind="command")
+    job.dir.mkdir(parents=True, exist_ok=True)
+    envelope = tmp_path / "results" / "20260703-1200" / "result.json"
+    envelope.parent.mkdir(parents=True, exist_ok=True)
+    envelope.write_text(
+        json.dumps({"label": "lambda-sweep", "metrics": {"cmmd": 0.12}})
+    )
+    (job.dir / "result_path.json").write_text(json.dumps({"path": str(envelope)}))
+
+    mgr = JobManager.__new__(JobManager)
+    mgr._lift_result(job)
+    assert job.result_path == str(envelope)
+    assert job.result_summary == {"label": "lambda-sweep", "metrics": {"cmmd": 0.12}}
+
+
+def test_lift_result_no_pointer_is_noop(tmp_path, monkeypatch):
+    """A job that wrote no envelope (training, corrupt/absent pointer) leaves the
+    result fields None — the common case, never an error."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    job = jobs.Job(id="train1", method="lora", preset="default")
+    job.dir.mkdir(parents=True, exist_ok=True)
+    mgr = JobManager.__new__(JobManager)
+    mgr._lift_result(job)  # no pointer file
+    assert job.result_path is None and job.result_summary is None
+    (job.dir / "result_path.json").write_text("{ not json")  # corrupt
+    mgr._lift_result(job)
+    assert job.result_path is None and job.result_summary is None
+
+
+def test_write_result_drops_daemon_pointer(tmp_path, monkeypatch):
+    """Under a daemon spawn (ANIMA_DAEMON_JOB_DIR set), write_result drops a
+    pointer to its envelope; inline (unset) it's a no-op."""
+    from bench import _common
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    args = argparse.Namespace(x=1)
+
+    # Inline: no daemon env → no pointer.
+    monkeypatch.delenv("ANIMA_DAEMON_JOB_DIR", raising=False)
+    _common.write_result(run_dir, script=__file__, args=args, metrics={"a": 1})
+    assert not (job_dir / "result_path.json").exists()
+
+    # Daemon spawn: pointer written to the envelope we just wrote.
+    monkeypatch.setenv("ANIMA_DAEMON_JOB_DIR", str(job_dir))
+    out = _common.write_result(run_dir, script=__file__, args=args, metrics={"a": 1})
+    pointer = json.loads((job_dir / "result_path.json").read_text())
+    assert pointer["path"] == str(out.resolve())

@@ -1,6 +1,6 @@
 # Daemon as the first-class run manager — disposable daemon, attach-by-default, bench as jobs
 
-Status: **Phase 0 + repo relocation shipped (2026-07-03); Phases 1 / 1.5 / 2 remain proposals.**
+Status: **Phase 0 + repo relocation + Phase 1a + `make gen` (1c command-job chokepoint) shipped (2026-07-03); Phases 1b / 1c-rest / 1.5 / 2 remain proposals.**
 Motivation: the daemon is architecturally
 sound (serial GPU queue, disk-backed state, self-describing surface) but
 socially opt-in — training grew `--queue`, preprocess/mask submit, and
@@ -146,7 +146,19 @@ feels like inline with a ~1s first-time daemon boot.
 
 ## Phase 1 — coverage (bench and tests become citizens)
 
-### 1a. Result envelope lift (the hook, not a schema)
+### 1a. Result envelope lift (the hook, not a schema) — ✅ SHIPPED 2026-07-03
+
+Implemented as described below. Landed surface: `_build_cmd` exports
+`ANIMA_DAEMON_JOB_ID` + `ANIMA_DAEMON_JOB_DIR` into every job's env (train +
+command kinds); `bench/_common.write_result` drops
+`<job_dir>/result_path.json` → `{"path": <abs result.json>}` when
+`ANIMA_DAEMON_JOB_DIR` is set (no-op inline); `Job` grew `result_path` +
+`result_summary`; the monitor's `_finalize` calls `_lift_result` on every
+terminal transition to follow the pointer and record the abs path + a
+`{label, metrics}` digest. Best-effort + schema-blind (envelope stays
+bench-owned). Covered by `tests/test_daemon.py` (Phase 1a section). 1b/1c
+(the `make bench` dispatcher + `test-*` routing) remain proposals — migrate
+opportunistically.
 
 Mechanism — deliberately env-var-shaped so bench scripts stay standalone:
 
@@ -196,6 +208,20 @@ it runs the moment the card frees. For deliberate concurrent use (tiny test
 beside a training run that fits), `--inline` bypasses — the GPU guard
 (`ANIMA_DAEMON_GPU_BUSY_FRAC`) is the daemon's own launch gate, not a global
 lock on the card.
+
+### 1c partial — `make gen` (batch generation) — ✅ SHIPPED 2026-07-03
+
+The generic command-job chokepoint the `test-*` migration needs shipped first,
+via the highest-demand surface (batch generation): `scripts/tasks/_common.py::
+run_command(label, argv, mode=…)` — `run_gpu(command_job(…))` for non-train GPU
+work, attach-by-default with the same `_resolve_run_mode` three modes as
+`train`. `make gen` routes `inference.py` through it (shares `_base_test_args`,
+so NOLORA/SPECTRUM/MOD/DAVE/FSG compose identically to `make test`); the
+generation side of the result-lift is `inference.py`'s `write_gen_manifest`
+(dropped a `gen_manifest.json` + pointer under `ANIMA_DAEMON_JOB_DIR`, no-op
+inline). Covered by `tests/test_gen_manifest.py` + an end-to-end lift test in
+`tests/test_daemon.py`. The remaining `test-*` bodies can now migrate by swapping
+their `run([...])` for `run_command("test:<x>", argv)` opportunistically.
 
 ## Phase 1.5 — pause/resume a running job (tree-freeze)
 

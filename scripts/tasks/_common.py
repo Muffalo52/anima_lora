@@ -743,6 +743,37 @@ def queue_command(label: str, argv: list[str]) -> None:
     )
 
 
+def run_command(label: str, argv: list[str], *, mode: str = "attach") -> None:
+    """Run a GPU command job through the daemon, attach-by-default (Phase 1c).
+
+    The generic ``run_gpu(command_job(...))`` chokepoint for non-train GPU work
+    (bench / ``test-*`` / ``gen``): submit a ``kind="command"`` job and stream its
+    stdout to this terminal, exiting with the job's exit code (ctrl-C detaches,
+    the run survives). Same three modes as ``train`` (``_resolve_run_mode``):
+    ``attach`` (default), ``detach`` (``--queue`` — submit + return), ``inline``
+    (``--inline`` — run the child directly, no daemon; the debugging path).
+
+    ``argv`` is the child argv **without** the interpreter — the daemon prepends
+    its resolved venv python, and the inline path prepends ``PY``. The daemon
+    exports ``ANIMA_DAEMON_JOB_DIR`` so a script that emits a bench envelope /
+    generation manifest gets result-lifted (Phase 1a); inline it's a plain run.
+    """
+    if mode == "inline":
+        run([PY, *argv])
+        return
+
+    from anima_daemon import client as _daemon_client
+
+    cl = _daemon_client.ensure_daemon()
+    job_id = cl.submit_command(label=label, argv=list(argv)).get("job_id")
+    if mode == "detach":
+        _print_queued(cl, job_id, f"command={label}")
+        return
+    rc = _attach_and_wait(cl, job_id)
+    if rc:
+        sys.exit(rc)
+
+
 def train(
     method: str, extra, preset: str | None = None, methods_subdir: str | None = None
 ):

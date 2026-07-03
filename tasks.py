@@ -180,6 +180,14 @@ COMMANDS = {
         "MOD=1 adds the latest distilled pooled_text_proj (modulation guidance); "
         "NOLORA=1 runs against the bare DiT (skips --lora_weight).",
     ),
+    "gen": (
+        inference.cmd_gen,
+        "Batch generation via the daemon (attach-by-default): queues behind a "
+        "live train run instead of OOM-colliding, survives the terminal, and "
+        "lands a result manifest in the job record. Same argv/env levers as "
+        "'test' (NOLORA/SPECTRUM/MOD/DAVE/FSG). --queue detaches; --inline "
+        "bypasses the daemon. Target adapters/prompts/seeds via ARGS.",
+    ),
     "test-hydra": (
         inference.cmd_test_hydra,
         "Inference with latest HydraLoRA moe (router-live)",
