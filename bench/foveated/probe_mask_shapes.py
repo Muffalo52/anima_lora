@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import sys
 import zlib
 
@@ -68,16 +67,15 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 # ── Mask builders (on the 2×2-token cell grid; 1 cell = pool latent px) ─────────
 
 
-def _rect_cells(hp: int, wp: int, frac: float, cy: float, cx: float) -> torch.Tensor:
-    """Same rounding as P0's ``build_fovea_mask`` so ``rect`` ≡ the 1b oracle."""
-    s = math.sqrt(frac)
-    rh = min(hp, max(1, round(hp * s)))
-    rw = min(wp, max(1, round(wp * s)))
-    top = min(max(0, round(cy * hp - rh / 2)), hp - rh)
-    left = min(max(0, round(cx * wp - rw / 2)), wp - rw)
-    m = torch.zeros(hp, wp, dtype=torch.bool)
-    m[top : top + rh, left : left + rw] = True
-    return m
+# Promoted to networks/foveated.py (2026-07-03) — the bench imports the shipped
+# home (bespoke-loop mirroring lesson) and keeps the historical leading-underscore
+# aliases so the sibling probes' imports stay stable.
+from networks.foveated import (  # noqa: E402
+    cells_to_mask4 as _cells_to_mask4,
+    dilate as _dilate,
+    erode as _erode,
+    rect_cells as _rect_cells,
+)
 
 
 def _rect_miss_cells(hp, wp, frac, oracle: torch.Tensor, gen) -> torch.Tensor:
@@ -116,31 +114,7 @@ def _scatter_cells(hp, wp, n_cells: int, gen) -> torch.Tensor:
     return m.reshape(hp, wp)
 
 
-def _cells_to_mask4(cells: torch.Tensor, f: int, device) -> torch.Tensor:
-    m = cells.float()[None, None].to(device)
-    return m.repeat_interleave(f, -2).repeat_interleave(f, -1)
-
-
 # ── Pixel-space mask metrics/overlays ────────────────────────────────────────────
-
-
-def _shift(m: np.ndarray, dy: int, dx: int) -> np.ndarray:
-    """np.roll without wraparound (zero fill)."""
-    out = np.zeros_like(m)
-    ys = slice(max(dy, 0), m.shape[0] + min(dy, 0))
-    xs = slice(max(dx, 0), m.shape[1] + min(dx, 0))
-    yd = slice(max(-dy, 0), m.shape[0] + min(-dy, 0))
-    xd = slice(max(-dx, 0), m.shape[1] + min(-dx, 0))
-    out[ys, xs] = m[yd, xd]
-    return out
-
-
-def _dilate(m: np.ndarray) -> np.ndarray:
-    return m | _shift(m, 1, 0) | _shift(m, -1, 0) | _shift(m, 0, 1) | _shift(m, 0, -1)
-
-
-def _erode(m: np.ndarray) -> np.ndarray:
-    return m & _shift(m, 1, 0) & _shift(m, -1, 0) & _shift(m, 0, 1) & _shift(m, 0, -1)
 
 
 def _cells_px(cells: torch.Tensor, px_per_cell: int) -> np.ndarray:

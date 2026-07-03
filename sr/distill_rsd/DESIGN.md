@@ -67,7 +67,7 @@ color term is an addition (official `mse_loss` is off).
 
 - `q_sample(x0, y0, t)`: `x_t = η_t·(y0 − x0) + x0 + κ·√η_t·ε`  (Eq 4; `e0=y0−x0`).
 - Schedule: `exponential`, power 0.3, `steps=15`, **κ=2.0**, min_noise 0.04, etas_end
-  0.99, `predict_type='xstart'` (from `configs/realsr_swinunet_realesrgan256.yaml`).
+  0.99, `predict_type='xstart'` (from `sr/resshift/configs/realsr_swinunet_realesrgan256.yaml`).
 - Chain ends at `z_T ~ N(z_y, κ²η_T·I)`, η_T≈1 → `N(z_y, κ²I)` (Gaussian centered on
   the **LR latent**, not pure noise — the ResShift property).
 - x0 prediction: `p_mean_variance(model, x_t, y0, t)['pred_xstart']`.

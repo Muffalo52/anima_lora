@@ -7,7 +7,7 @@ consistency term (Term B) is inert on Anima in **both** the paper-faithful
 (`renoise`) and the off-trajectory (`rollout`) variants, so the objective reduces
 to per-step flow-matching distillation onto the teacher's instantaneous field —
 which renders blurry at 4 steps by construction. **Code removed** (loss loop,
-config knobs, EMA plumbing, `make scfm`, tests, `scfm.toml`); the design proposal
+config knobs, EMA plumbing, the `scfm` target, tests, `scfm.toml`); the design proposal
 is archived at `_archive/proposals/turbo_scfm.md`. Do not re-propose a pure
 velocity-fidelity / self-consistency distiller for Anima.
 

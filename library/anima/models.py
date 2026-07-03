@@ -1863,6 +1863,7 @@ class Anima(nn.Module):
         skip_pooled_text_proj: bool = False,
         return_block_features: Optional[set] = None,
         return_features_early: bool = False,
+        token_merger=None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1892,6 +1893,13 @@ class Anima(nn.Module):
                 blocks up to the tap. With ``return_block_features`` but NOT early,
                 the method returns ``(velocity, feature_dict)``. Both default off →
                 bit-exact no-op (plain velocity return). Unsupported with block swap.
+            token_merger: Optional foveated token merger
+                (``networks.foveated.FoveatedTokenMerge``): the block stack runs
+                on a reduced sequence (fovea tokens 1:1, periphery cells
+                averaged) with the merged rope, broadcast back to the full grid
+                before ``final_layer``. Rides the same fake-5D
+                ``(B, 1, L_red, 1, D)`` layout as native flatten, so Block code
+                is unaffected. ``None`` (default) → bit-exact no-op.
         """
         if return_features_early and not return_block_features:
             raise ValueError(
@@ -1933,7 +1941,18 @@ class Anima(nn.Module):
         # flat token order, so Block code is unaffected. No padding → native flash,
         # bit-exact to the eager 5D path; eager forwards skip the reshape.
         _native_flatten_info = None
-        if self._native_flatten:
+        _merge_shape = None
+        if token_merger is not None:
+            # Foveated token merge: the merged sequence already IS the fake-5D
+            # (B, 1, L_red, 1, D) native-flatten layout, so this branch replaces
+            # the flatten (never both). Rope is reduced to match (fovea rows
+            # pass through; periphery cells get the exact mean-position rope).
+            B_s = x_B_T_H_W_D.shape[0]
+            _merge_shape = (B_s, x_B_T_H_W_D.shape[-1])
+            x_B_T_H_W_D = token_merger.merge(x_B_T_H_W_D)
+            if rope_cos_sin is not None:
+                rope_cos_sin = token_merger.merge_rope(rope_cos_sin)
+        elif self._native_flatten:
             B_s, T_s, H_s, W_s, D_s = x_B_T_H_W_D.shape
             seq_len = T_s * H_s * W_s
             _native_flatten_info = (T_s, H_s, W_s, seq_len)
@@ -2046,6 +2065,11 @@ class Anima(nn.Module):
         # pool over the spatial/token axes, which is shape-agnostic across both.
         if return_features_early:
             return feature_sink
+
+        # Foveated merge: broadcast the reduced sequence back to the full grid
+        # (group-shared periphery rows) before final_layer/unpatchify.
+        if _merge_shape is not None:
+            x_B_T_H_W_D = token_merger.unmerge(x_B_T_H_W_D, *_merge_shape)
 
         # Native flatten: restore the original 5D shape. Delegated to a
         # @torch.compiler.disable'd helper so the bucket-dependent tuple never

@@ -72,6 +72,10 @@ _SPECTRUM_RUNNER = None
 # Spectrum. networks/spd.py self-registers on import; --spd dispatches to it.
 _SPD_RUNNER = None
 
+# Deferred-foveated merge runner registry — same pattern. networks/foveated.py
+# self-registers on import; --fovea_sigma_c > 0 dispatches to it.
+_FOVEATED_RUNNER = None
+
 
 def _setup_soft_tokens(args, anima, device):
     """Build + apply the soft_tokens network from ``--soft_tokens_weight``.
@@ -160,6 +164,18 @@ def register_spd_runner(fn):
     """
     global _SPD_RUNNER
     _SPD_RUNNER = fn
+
+
+def register_foveated_runner(fn):
+    """Plug in a foveated_denoise implementation (deferred-foveated merge).
+
+    The runner must match networks.foveated.foveated_denoise's signature: the
+    core positional args, a ``SamplerSideChannels`` (shared side-channels),
+    then the foveation-specific keyword knobs. Called by networks/foveated.py
+    at import time, mirroring register_spectrum_runner.
+    """
+    global _FOVEATED_RUNNER
+    _FOVEATED_RUNNER = fn
 
 
 def _resolve_spd_schedule(args) -> Tuple[List[float], List[float]]:
@@ -789,7 +805,36 @@ def generate_body(
         soft_tokens_neg_seqlens=soft_tokens_neg_seqlens,
     )
 
-    if getattr(args, "spd", False):
+    _fovea_sigma_c = float(getattr(args, "fovea_sigma_c", 0.0) or 0.0)
+    if _fovea_sigma_c > 0.0:
+        if getattr(args, "spd", False) or getattr(args, "spectrum", False):
+            raise ValueError(
+                "--fovea_sigma_c is mutually exclusive with --spd / --spectrum "
+                "(all replace the denoise loop). The foveated-Spectrum compose "
+                "was closed by bench/foveated P3 — do not re-propose."
+            )
+        if _FOVEATED_RUNNER is None:
+            raise RuntimeError(
+                "--fovea_sigma_c was passed but no foveated runner is "
+                "registered. Import networks.foveated before calling generate()."
+            )
+        latents = _FOVEATED_RUNNER(
+            anima,
+            latents,
+            timesteps,
+            sigmas,
+            embed,
+            negative_embed,
+            padding_mask,
+            args.guidance_scale,
+            er_sde,
+            device,
+            _side_channels,
+            sigma_c=_fovea_sigma_c,
+            fovea_frac=getattr(args, "fovea_frac", 0.35),
+            mask_source=getattr(args, "fovea_mask_source", "combo"),
+        )
+    elif getattr(args, "spd", False):
         if getattr(args, "spectrum", False):
             raise ValueError(
                 "--spd and --spectrum are mutually exclusive (both replace the "

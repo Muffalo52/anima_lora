@@ -1,10 +1,10 @@
 # Foveated denoise — selective effort in the detail phase
 
-> **Canonical roadmap: `docs/proposal/foveated_denoise.md`** (written after Phase 0
-> passed). The Phase-1 cost sketch below reshaped the plan: standalone merge speed is
-> marginal, so the proposal's next gate is Phase 0b (compose with Spectrum — spend its
-> refresh budget spatially) and Phases 1–3 branch from that. The phases listed further
-> down this file are the original pre-arithmetic sketch, kept for history.
+> **BENCH COMPLETE (P0→P3, 2026-07-03).** Digest: **`bench/foveated/report.md`**.
+> Ship-side follow-up: **`docs/proposal/foveated_denoise.md`** (now the SHIP proposal
+> for production wiring; the original research proposal is archived at
+> `_archive/proposals/foveated_denoise_research.md`). This file is the full run
+> history with per-phase kill criteria and numbers.
 
 Premise (inverse of SPD, spatial instead of temporal): keep the **full-res grid through
 the high-σ authority window** (composition decided identically to baseline), then below a
@@ -375,8 +375,203 @@ no mask at all (region-independent); blend/recompute region — any shape. Phase
 sources therefore target the merge mask only, with the blend side free to reuse
 whatever mask (or none) falls out.
 
-## Phase 3 — true grid coarsening (paper mechanism, time-gated) — GATED on P1
+## Phase 3 — partial recompute + aggressive settings (designed 2026-07-03)
 
-Actual token-count reduction post-σ_c (phase-aligned mixed-res RoPE, probably a
-post-trained adapter, low-res VAE decode + blend). Only if P1's savings are worth less
-than this buys.
+> The original Phase-3 sketch ("true grid coarsening — paper mechanism") is **retired**:
+> 1b's whole-stack merge already delivers the token-count reduction (4096→2107 through
+> all blocks, exact mean-rope, no adapter, no VAE blending); the paper mechanism's
+> residual win is a low-res VAE decode at the cost of post-training, which forfeits the
+> training-free selling point. Phase 3 is the partial-recompute endgame instead, plus
+> the aggression sweep the 2b stretch leg left open.
+
+Four legs, gated in order. Suggested execution: **3s and 3-pre first** (both cheap,
+both reuse existing probes almost verbatim), then 3a, then 3b only if 3a leaves fovea
+fidelity on the table.
+
+**Eval protocol (all legs)** — same discipline as 2b: default + `channel6` + `ootomo`
+prompts, 2 seeds, `combo` mask via the 2b source+morphology pipeline, subject-box RMSE
+bracketed between oracle rect and `rect_miss`, ring Laplacian, verdict eyeball-first.
+**Wall-clock matched in full-forward equivalents** — partial refreshes count ~⅓,
+merged forwards ~0.47 — and the accounting must be explicit in the result envelope or
+the "matched compute" claim is soft.
+
+### 3-pre — anchoring degradation, zero surgery (the pre-gate 1a/P2f owed)
+
+Partial recompute means the periphery never gets actual updates below σ_c — but every
+blend arm so far ran with Chebyshev fits anchored to *full* actuals. Isolate exactly
+that: reuse the `spectrum_arm` machinery (`probe_foveated_spectrum.py`), run full
+forwards (compute unchanged), but below σ_c feed the fits **only fovea-token actuals**.
+
+| arm | tests |
+|---|---|
+| `noperiph` | periphery fits frozen at crossing-time state, extrapolating the whole tail — the honest partial-recompute emulation |
+| `catchup_k` (K∈{2,3}) | one full re-anchor every K refreshes — this **is** the open 1c periphery catch-up, folded in as the rescue arm |
+
+Kill/shape: periphery degradation vs the merge line's bokeh standard + fovea
+contamination check. `noperiph` fails but `catchup_2` passes → Phase 3 pays a small
+re-anchor tax; both fail → 3b dies (3a survives — it re-anchors every refresh).
+
+### 3a — `mergefresh`: the cheap competitor that sets the bar
+
+Before any attention surgery, compose what already passed: below σ_c, Spectrum's
+*refresh* forwards run through the 1b merged path (×2.15/forward → ~2× refresh cadence
+at matched wall-clock). Zero new mechanism, and unlike partial recompute it re-anchors
+the periphery every refresh (at pooled resolution), so it may dodge 3-pre's degradation
+entirely. Claim at matched compute: beats plain aggressive `spec` on subject fidelity.
+This is the arm most likely to ship.
+
+### 3b — true partial recompute — GATED on 3a not sufficing
+
+Fovea queries only (~35% rows) against per-block K/V where fovea rows are fresh and
+periphery rows are **cached from the last full/merged forward**. Spectrum's forecast
+exists only at the emit level, so periphery K/V inside blocks must come from a cache —
+stale in σ (staleness partially proxied by 3-pre). Design constraints:
+
+- Store periphery K/V **pooled** (2×2, riding the 1b merge layout): full-row caching
+  across 28 blocks is ~1GB+ at 1024²; pooled drops it ~4× and matches what the merged
+  path computes anyway.
+- Cost ≈ ⅓ forward → ~3× refresh cadence at matched wall-clock. The claim is the one
+  1a failed to deliver (P2t re-attribution): *fovea re-anchored 3× more often beats
+  plain aggressive Spectrum on subject fidelity at matched compute* — and it must also
+  beat `mergefresh`, not just `spec`, to justify the surgery.
+- Recompute region is freely choosable per P2f (blend side accepts any shape); the
+  *merge-layout* side of the cache still wants the compact combo mask.
+
+### 3s — aggressive-settings sweep (standalone merge line, orthogonal — can run first)
+
+All arms on the real 1b merge path with the `combo` source, hard prompts included:
+
+The aggression knob is the **fovea fraction** — how much area runs full-res (owner
+clarification 2026-07-03: the 2×2 periphery pooling stays fixed; area is what matters).
+Fraction ladder on the real merge path, `combo` source, σ_c=0.75:
+
+| arm | eff. tokens | question |
+|---|---|---|
+| `rect`@0.35 | 51% | the status-quo reference (1b/2b configuration) |
+| `combo`@0.35 | 51% | 2b winner — carryover check |
+| `combo`@{0.25, 0.20, 0.15, 0.10} | 44/40/36/33% | where does subject quality break as the fovea shrinks? Multi-subject channel6 is the stress case (3 subjects competing for the budget); the stretch gate is `combo`@low-frac ≈ `rect`@0.35 subject quality (mask intelligence → speed). |
+
+Optional follow-ups if the ladder motivates them: 4×4 periphery pooling (merge-side
+aggression — `FoveatedTokenMerge(merge_edge=4)` is already generalized), σ_c=0.85.
+
+### Result — thin reward, knee at 0.25, cliff below 0.15 (2026-07-03, run
+### `20260703-2036-p3s`, `probe_fraction_stretch.py`)
+
+Subject RMSE (cover, e2e×) — `combo`@0.35 reproduces 2b exactly (regression ✓):
+
+| frac | default | channel6 | ootomo |
+|---|---|---|---|
+| `rect`@0.35 | **0.0647** (100%, ×1.37) | 0.1961 (68%, ×1.36) | 0.1329 (93%, ×1.35) |
+| 0.35 | 0.0664 (68%, ×1.38) | **0.1393** (95%, ×1.36) | **0.1250** (95%, ×1.37) |
+| 0.25 | 0.0849 (58%, ×1.41) | 0.1655 (89%, ×1.39) | 0.1362 (90%, ×1.43) |
+| 0.20 | 0.0986 (47%, ×1.48) | 0.1766 (86%, ×1.44) | 0.1517 (84%, ×1.47) |
+| 0.15 | 0.1125 (38%, ×1.54) | 0.1926 (74%, ×1.49) | 0.1526 (82%, ×1.51) |
+| 0.10 | 0.1243 (28%, ×1.54) | 0.2476 (58%, ×1.54) | 0.1832 (67%, ×1.55) |
+
+- **No free stretch** — decay vs `combo`@0.35 is strictly monotone on every prompt;
+  each fraction step costs ~0.01–0.03 subject RMSE. Vs the *static rect* the stretch
+  partially works (combo@0.25 still −16% on channel6, tie on ootomo — mask
+  intelligence spends the saved area well), but the 2b stretch hope "0.20–0.25
+  matching rect-at-0.35 quality *on every prompt*" fails on default, where the rect
+  is the oracle.
+- **The speed reward is thin and bounded**: ×1.37 → ×1.48 at frac 0.20, ×1.55 floor —
+  effective tokens f + (1−f)/4 cap the whole ladder at ~×1.6 even as f→0. The knob
+  works but pays little; the next real speed lever is `merge_edge=4` pooling
+  (eff → f + (1−f)/16), not a smaller fovea.
+- **Cliff below 0.15 on multi-subject**: channel6 cover 95→86→74→58%; at 0.10 the
+  mask starts dropping faces (subject 0.2476, +78% vs 0.35). Eyeball at 0.20: all
+  three faces stay crisp (mechanism holds) but torsos/hands/bags blur to mush — on
+  subject-dense prompts the periphery IS the characters, and the "anime DOF" contract
+  stops reading as intentional. At 0.10 face edges start smearing too.
+- **Ship setting**: default frac **0.35**; expose fraction as the aggressiveness knob
+  with a practical floor of **0.25** (0.20 acceptable for centered single-subject
+  content); ≤0.15 falsified for multi-subject.
+
+### Phase-3 roll-up (2026-07-03)
+
+3-pre: anchoring degrades at sane cadence, 1c catch-up (k=2) restores exact
+neutrality — recorded, moot. 3a/3b: the composed foveated-Spectrum line is CLOSED
+(no headroom at sane schedules, baseline collapse at aggressive ones; partial
+recompute's ceiling ties spec at both points — do not build). 3s: fraction ladder
+knee 0.25, cliff ≤0.15, speed ceiling ~×1.6. **What ships from the foveated bench:
+the standalone deferred-foveated merge — 1b mechanism + 2b combo mask, σ_c=0.75,
+frac 0.35 (knob floor 0.25), ×1.37 e2e — plus production Spectrum's existing
+`schedule="sea"` as the separate quality-side win (P2t). Next step: production
+wiring (2b follow-up iii).**
+
+### Result — 3-pre PASS, 3b DEAD, mergefresh free discount; and the aggressive
+### Spectrum point itself COLLAPSES on hard prompts (2026-07-03, run
+### `20260703-2019-p3`, `probe_phase3.py`)
+
+Aggressive point (window 3 / flex 3 / warmup 4 = the 0b/1a/2t setting), combo mask
+built endogenously at the crossing, σ_c=0.5 (composed knee; `mergeall75` at 0.75),
+default + channel6 + ootomo × 2 seeds. One design upgrade over the sketch above: the
+3-pre arms (`pr_all`/`pr_catchup2`) run at partial-recompute's REAL cadence (every
+below-σ_c step is a fovea-anchored actual, frozen-periphery fits), which makes
+`pr_all`'s subject RMSE double as the **3b quality ceiling** at its emulated ~⅓ cost.
+Regression check: `spec` on default = 0.1983 fovea RMSE ≡ 1a exactly.
+
+- **3-pre gate PASS** — `pr_all` complement RMSE Δ+0.0017 vs `spec` (aggregate;
+  neutrality standard ≲0.003), `pr_catchup2` Δ+0.0008. Periphery extrapolating from a
+  crossing-frozen fit degrades nothing measurable even at every-step cadence; the 1c
+  catch-up rescue is unnecessary. `fovblend` neutrality extends to the no-anchor regime.
+- **3b is DEAD at this operating point** — the ceiling ties the cheap competitor:
+  `pr_all` subject 0.3250 @ ~9.0 emulated FFE vs `mergeall` realized 0.3252 @ 9.2
+  measured FFE. Zero headroom for fovea-query/cached-K/V attention surgery. Do not
+  build it.
+- **`mergefresh` is a free discount and the only 3a gate met**: subject RMSE ties spec
+  on every prompt (Δ ≤ 0.002) at **FFE 8.3 vs 10.0** (e2e 4.4s vs 5.0s) — running
+  post-crossing refreshes through the 1b merged stack costs nothing measurable.
+  `mergeall` (every below-step a merged actual) also only *ties* spec at 9.2 FFE — the
+  "beats spec at matched compute" gate is NOT met, because post-crossing effort is not
+  where spec's error lives (see next point).
+- **The load-bearing eyeball finding: plain aggressive Spectrum collapses on hard
+  prompts.** channel6 `spec` (no foveation anywhere) renders inverted hair colors, red
+  corrupted faces, dissolved twintails, striped bodies — subject RMSE 0.41 vs 0.20 on
+  default. Every arm inherits this: the damage is written in the PRE-crossing
+  σ∈[0.5,0.85] forecast steps, which is exactly why all σ_c=0.5 arms tie. `mergeall75`'s
+  numeric "wins" (−8% channel6, −5% default) are a partial *rescue* — it replaces
+  forecast steps 14–21 with real merged forwards, visibly less corrupted faces — NOT a
+  quality gain over a sane baseline. RMSE certified change, not improvement, exactly as
+  the no-quality-metric invariant warns. The whole 0b/1a/2t/2f line calibrated its
+  operating point on the default prompt only, where spec's damage is moderate and
+  localized.
+- Consequence: quality-allocation claims at the aggressive point are malformed on hard
+  content. Re-run at the production Spectrum point → next section.
+
+### Result — production point: the composed foveated-Spectrum line CLOSES
+### (2026-07-03, run `20260703-2028-p3prod` — window 2 / flex 0.25 / warmup 6 =
+### `spectrum_denoise` defaults, ~16/28 forwards; same arms/prompts/σ_c)
+
+- **Sanity restored, headroom gone.** `spec` at the production point renders even
+  channel6 essentially indistinguishable from `full` (subject 0.096–0.14 vs the
+  aggressive point's 0.20–0.41 collapse; eyeball: near-identical). The 0b premise —
+  "forecast error concentrates in the fovea, reallocate refreshes spatially" — only
+  exists at the aggressive point, where the baseline is unusable on hard prompts
+  anyway. Where the baseline is usable there is nothing to reallocate.
+- **3-pre honestly FAILS at sane cadence — and `catchup2` rescues it exactly.**
+  `pr_all` complement RMSE degrades Δ+0.017/+0.032/+0.017 (default/channel6/ootomo)
+  vs `spec` — far over the 0.003 standard; the aggressive-point "PASS" was masked by
+  spec's own periphery damage. `pr_catchup2` (full re-anchor every 2nd below-step)
+  restores exact neutrality (Δ ≤ 0.0002 everywhere). So frozen-periphery
+  extrapolation does degrade over a real post-crossing tail; any partial-recompute
+  build needs the 1c catch-up cadence. Recorded for posterity — moot given the next
+  point.
+- **3b stays dead at both operating points**: `pr_all`'s subject ceiling ties `spec`
+  (0.0970 vs 0.0960 default; 0.1179 vs 0.1148 channel6) despite every-step fovea
+  actuals below σ_c — full-res-fovea re-anchoring buys nothing a sane schedule
+  doesn't already have.
+- **Merge arms now cost quality**: `mergefresh`/`mergeall` subject +0.006…+0.020 vs
+  spec at only −5–7% FFE (e2e 7.6s vs 7.9–8.2s), and the eyeball shows the real
+  contract problem — at frac 0.35 on 3-subject prompts the periphery contains legs /
+  hair tails, which the pooled readout washes to mush. Visible damage for negligible
+  savings.
+
+**Net Phase-3 composed-line verdict: CLOSED.** The foveated-Spectrum reframe (0b/1a)
+dies by squeeze: aggressive schedule → baseline collapses on hard content (foveation
+can only partially rescue, not fix); production schedule → no headroom, merge
+discount negligible, periphery cost visible. Partial recompute (3b) is dead at both
+points; do not build. What survives Phase 3: the **standalone deferred-merge line**
+(1b mechanism + 2b combo mask) as its own ×1.37 speed knob — its aggressive-fraction
+ladder is Phase 3s (next), and it remains the only inference-stack candidate from
+this bench.

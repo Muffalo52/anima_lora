@@ -47,6 +47,9 @@ import networks.spectrum  # noqa: F401, E402
 # Same pattern for SPD (Spectral Progressive Diffusion) — registers spd_denoise.
 import networks.spd  # noqa: F401, E402
 
+# Same pattern for the deferred-foveated merge — registers foveated_denoise.
+import networks.foveated  # noqa: F401, E402
+
 from library.log import setup_logging  # noqa: E402
 
 setup_logging()

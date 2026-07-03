@@ -67,7 +67,7 @@ Artifacts: `sr/data/{hr_eval,lr_eval,results,montage}/`, `sr/data/phase0_summary
 
 ## Next (Phase 1, gated on the above)
 
-Finetune the **×2** config (`configs/realsr_realesrgan256_x2.yaml`) from the released
+Finetune the **×2** config (`sr/resshift/configs/realsr_realesrgan256_x2.yaml`) from the released
 checkpoint on our HR pool; first ablation = `bicsr` vs light-Real-ESRGAN degradation.
 The realsr inference path is ×4-only (`assert scale==4`); wiring ×2 inference is a
 Phase-1 task. See proposal §3 Phase 1.

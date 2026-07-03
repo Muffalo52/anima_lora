@@ -64,87 +64,14 @@ from bench.foveated.probe_velocity_foveation import (
     build_fovea_mask,
 )
 
+# The mechanism shipped: FoveatedTokenMerge was promoted to networks/foveated.py
+# (2026-07-03, docs/proposal/foveated_denoise.md wiring item 1). The bench keeps
+# importing the promoted home — bespoke-loop mirroring lesson — so regressions
+# here ARE regressions in the shipped code. Re-exported for the sibling probes.
+from networks.foveated import FoveatedTokenMerge  # noqa: F401
+
 log = logging.getLogger("bench.foveated.merge")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-
-class FoveatedTokenMerge:
-    """Fixed-mask foveated token merge: index maps + merged rope for one
-    (grid, mask) pair, applied at the block-stack boundary.
-
-    ``mask4`` is the P0 latent-pixel mask (1,1,h_lat,w_lat), built on the pool
-    grid so every 2×2-token cell is uniformly fovea or periphery.
-    """
-
-    def __init__(self, anima, mask4: torch.Tensor, device: torch.device):
-        p = anima.patch_spatial  # latent px per token edge (2)
-        h_lat, w_lat = mask4.shape[-2:]
-        self.H_t, self.W_t = h_lat // p, w_lat // p
-        if self.H_t % 2 or self.W_t % 2:
-            raise SystemExit("token grid must be even for 2x2 merge cells")
-        self.H_c, self.W_c = self.H_t // 2, self.W_t // 2
-
-        tok_mask = mask4[0, 0, ::p, ::p] > 0.5  # (H_t, W_t) — uniform per token
-        cell_fovea = tok_mask[::2, ::2]  # uniform per 2x2-token cell
-        tokf = tok_mask.flatten()
-        cellp = (~cell_fovea).flatten()
-
-        self.fovea_tok_idx = torch.nonzero(tokf).flatten().to(device)
-        self.periph_cell_idx = torch.nonzero(cellp).flatten().to(device)
-        self.n_f = int(self.fovea_tok_idx.numel())
-        self.L_red = self.n_f + int(self.periph_cell_idx.numel())
-        self.L_full = self.H_t * self.W_t
-
-        # full token index → reduced index (fovea rank, or n_f + its cell's rank)
-        fov_rank = torch.cumsum(tokf.long(), 0) - 1
-        cell_rank = torch.cumsum(cellp.long(), 0) - 1
-        ti = torch.arange(self.L_full)
-        cell_of_tok = (ti // self.W_t // 2) * self.W_c + (ti % self.W_t) // 2
-        self.gather_idx = torch.where(
-            tokf, fov_rank, self.n_f + cell_rank[cell_of_tok]
-        ).to(device)
-        self._rope_cache: tuple | None = None
-
-    def _cell_mean(self, flat_tok: torch.Tensor) -> torch.Tensor:
-        """(..., L_full, D*) row-major token rows → (..., H_c*W_c, D*) cell means."""
-        lead = flat_tok.shape[:-2]  # () for 2D rope rows, (B,) for token batches
-        rest = flat_tok.shape[-1:]
-        x = flat_tok.reshape(-1, self.H_t, self.W_t, *rest)
-        x = x.reshape(-1, self.H_c, 2, self.W_c, 2, *rest).mean(dim=(2, 4))
-        return x.reshape(*lead, self.H_c * self.W_c, *rest)
-
-    def merge(self, x_BTHWD: torch.Tensor) -> torch.Tensor:
-        """(B,1,H_t,W_t,D) grid → fake-5D (B,1,L_red,1,D) merged sequence."""
-        B, T, H, W, D = x_BTHWD.shape
-        flat = x_BTHWD.reshape(B, H * W, D)
-        fov = flat[:, self.fovea_tok_idx]
-        per = self._cell_mean(flat)[:, self.periph_cell_idx]
-        return torch.cat([fov, per], dim=1).unsqueeze(1).unsqueeze(3)
-
-    def unmerge(self, x_red: torch.Tensor, B: int, D: int) -> torch.Tensor:
-        """fake-5D (B,1,L_red,1,D) → (B,1,H_t,W_t,D) with group-broadcast periphery."""
-        flat = x_red.reshape(B, self.L_red, D)
-        return flat[:, self.gather_idx].reshape(B, 1, self.H_t, self.W_t, D)
-
-    def merge_rope(self, rope_cos_sin: tuple) -> tuple:
-        """Merged (cos, sin): fovea rows pass through; periphery cell rows are the
-        renormalized elementwise mean of their 4 members — exact mean-position
-        rope for a symmetric 2×2 group. Cached (rope is constant across steps)."""
-        if self._rope_cache is not None:
-            return self._rope_cache
-        cos_, sin_ = rope_cos_sin  # (L_full, 1, 1, D_head), seq on dim 0
-        c32, s32 = cos_.float(), sin_.float()
-        cm = self._cell_mean(c32.reshape(self.L_full, -1)).reshape(
-            self.H_c * self.W_c, *cos_.shape[1:]
-        )[self.periph_cell_idx]
-        sm = self._cell_mean(s32.reshape(self.L_full, -1)).reshape(
-            self.H_c * self.W_c, *sin_.shape[1:]
-        )[self.periph_cell_idx]
-        norm = torch.sqrt(cm * cm + sm * sm).clamp_min(1e-6)
-        cos_red = torch.cat([c32[self.fovea_tok_idx], cm / norm], dim=0).to(cos_.dtype)
-        sin_red = torch.cat([s32[self.fovea_tok_idx], sm / norm], dim=0).to(sin_.dtype)
-        self._rope_cache = (cos_red, sin_red)
-        return self._rope_cache
 
 
 def dit_forward(anima, x5, t_scalar, context, pad, merger: FoveatedTokenMerge | None):

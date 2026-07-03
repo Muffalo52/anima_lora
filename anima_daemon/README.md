@@ -119,7 +119,7 @@ The job record plus two live fields:
 - `latest` — last event from `progress.jsonl` (training progress; `null` for command jobs)
 - `stale_for` — seconds since the last progress tick (heartbeat staleness)
 
-A GPU job that writes a bench envelope (`bench/_common.write_result`) gets two
+A GPU job that writes a bench envelope (`write_result` in `bench/_common.py`) gets two
 more fields on the terminal transition (Phase 1a — result-envelope lift): the
 daemon exports `ANIMA_DAEMON_JOB_ID` / `ANIMA_DAEMON_JOB_DIR` into every job's
 env, the script drops a `result_path.json` pointer into its job dir, and the

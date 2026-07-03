@@ -1,196 +1,178 @@
-# Deferred foveation — spatial effort allocation in the detail phase
+# Deferred-foveated merge — SHIP proposal
 
-> **Naming (2026-07-03)**: the method is **deferred foveation** — the name encodes the
-> load-bearing inversion (foveation locked out until σ ≤ σ_c, because foveating during
-> the high-σ authority window produces a *different image*; deferring it preserves image
-> identity and is what makes the line training-free). "Deferred-foveated merge" = the
-> real token-merge mechanism (Phase 1b); the static rectangle is the *mask* being
-> "fixed", a Phase-2-replaceable detail, not part of the method name. σ_c is a knob,
-> not a constant: emulation knee [0.5, 0.75] bare-loop, ≈0.5 under aggressive Spectrum.
+> **This replaced the research proposal on 2026-07-03.** The research arc (P0→P3) is
+> COMPLETE: full digest in `bench/foveated/report.md`, per-phase detail and kill
+> criteria in `bench/foveated/plan.md`, the original research proposal in
+> `_archive/proposals/foveated_denoise_research.md`. This doc is the plan for wiring
+> the one surviving deliverable into production.
 
-Status: **Phases 0, 0b, 1b, and 1a ALL PASS (2026-07-03, `bench/foveated/`).** 0b:
-headroom confirmed (forecast error ×1.6–1.7 fovea-concentrated; compose knee σ_c≈0.5).
-1b (**deferred-foveated merge**, owner-reordered first): real whole-stack token merge
-ships **×1.37 e2e @ σ_c=0.75** (fwd ×2.15 at 51% tokens), fovea 0.065/0.027 — better
-than the emulation; standalone knee 0.75. 1a (**foveated Spectrum**): fovea-cropped SEA
-trigger beats plain aggressive Spectrum on fovea fidelity at *identical* forward count
-(0.1909 vs 0.1983, visibly cleaner sign text; periphery also −10%), and the
-periphery-rides-forecast emit is exactly neutral — partial-recompute foundation
-validated. Remaining: production wiring, 1c periphery catch-up, asymmetric cadence /
-partial recompute (Phase 3), mask sources (Phase 2). Full run history:
-`bench/foveated/plan.md`. Origin: *Foveated Diffusion* (Chao,
-Yariv, Xiao, Wetzstein — arXiv:2603.23491, same Wetzstein-lab lineage as SPD), inverted
-to fit Anima's output contract.
+## What ships
 
-## The idea, and why it isn't the paper
+**Deferred-foveated merge** — training-free inference acceleration, image-identity
+preserving (same image where it matters; periphery = intentional soft blur):
 
-The paper allocates tokens non-uniformly in **space** (full density in a gaze-derived
-foveal mask, 2×2-merged periphery) at **all** steps, and needs a post-trained LoRA +
-mixed-res RoPE because naïve mixed-resolution denoising breaks *global structure
-negotiation* (their Fig. 4/5: duplicated entities, scale mismatch). Its quality claim is
-gaze-contingent — the periphery genuinely loses resolution, acceptable only when you know
-where the user is looking. Anima's outputs are freely-viewed art; there is no gaze.
+- Above σ_c: baseline full-grid sampling, unchanged. Composition/identity are decided
+  identically to no-foveation.
+- During the pre-crossing steps, accumulate two free signals: **cfgdelta**
+  (per-cell |v_cond − v_uncond|, prompt-aware) and **x0var** (x̂₀ Laplacian energy at
+  the crossing).
+- At the σ_c crossing, build the **combo** mask: normalized signal sum → threshold →
+  morphological open → close → dilate-1 → re-solve threshold so the final fraction
+  hits target. Compact, subject-following, per (prompt, seed).
+- Below σ_c: run the DiT block stack on the reduced sequence — fovea tokens 1:1,
+  each 2×2-token periphery group averaged to one token (4096→~2100 at frac 0.35);
+  merged rope = renormalized elementwise mean of the members' (cos, sin) rows (exact
+  mean-position rope for symmetric groups); broadcast before `final_layer`.
+- Final readout: periphery read from the merged representation (avg-pool → bicubic
+  up), fovea untouched.
 
-The inversion that fits here: **keep the full-res grid through the high-σ authority
-window** — composition, content addressing, and identity are decided *identically to
-baseline* — then below a cut σ_c stop spending detail effort outside a foveal mask.
-The σ-timing is backed by repo findings:
+**Measured** (bench, bare DiT, eager, 1024², 28 steps, CFG 4): fwd ×2.15, **e2e
+×1.37**, fovea visually baseline-identical, subject RMSE ties-or-beats a static
+center rect on every prompt tested (−29 % on 3-subject hard prompts).
 
-- Cross-attn addressing burst lives at σ>0.9; text drive decays below σ≈0.85
-  ([[project_crossattn_drive_frontloaded]], `docs/findings/crossattn_self_attn_dominance.md`)
-  — content placement completes inside the full-effort window.
-- Low bands lock by σ≈0.75; the top band resolves only by σ≈0.29 (`bench/spd/` Phase 1)
-  — the periphery forfeits exactly the late top-band work, which is the *definition* of
-  "less important there".
-- Detail is written by self-attn+MLP, which grow into low σ — that's where the effort
-  (and any saving) lives.
+## Knobs and defaults
 
-Because structure is locked before any mixed-effort computation starts, the paper's
-naïve-failure mode is dodged by construction — no post-training, no RoPE surgery, in the
-emulated form. Distinct from SPD (which runs *globally* low-res early and produces a
-**genuinely different image**; this line's contract is *fidelity*: same image where it
-matters). Guard check: the resolution-curriculum shelf entry
-([[project_shelved_explorations]]) explicitly left "σ×res coupling in a genuinely
-compute-bound setup" as the one coherent residual — inference is that setup; this is the
-σ×res×**space** instance. The killed low-σ tag levers were attention-*reweighting*;
-compute *placement* is a different lever and not covered by that guard.
+| knob | default | notes |
+|---|---|---|
+| `fovea_sigma_c` | 0.75 | standalone knee (P0/P1b). 0 disables. |
+| `fovea_frac` | 0.35 | knob floor **0.25** (3s ladder knee); ≤0.15 falsified on multi-subject. |
+| mask source | `combo` | needs CFG for cfgdelta; CFG=1 fallback → x0var-only, or static center rect. |
+| periphery pool | 2×2 tokens, fixed | `FoveatedTokenMerge(merge_edge=4)` exists (exact-rope carries) but is unbenched — speed escalation only, not a launch knob. |
 
-## Phase 0 — quality contract, training-free ✅ PASS (2026-07-03)
+## Wiring plan
 
-`bench/foveated/probe_velocity_foveation.py` — emulates masked token merging at the
-sampler boundary with zero attention surgery: below σ_c the DiT evaluates on a composite
-where the periphery is `pool(z)` (the merged-token view real merged attention would see),
-the periphery velocity is group-pooled (all tokens in a 2×2-token group share one
-update), the latent itself is never rewritten, and the periphery is read from the merged
-representation once at decode (bicubic up — the paper's smooth Up(·)). Full run history
-and kill criteria in `bench/foveated/plan.md`; the load-bearing lessons:
+> **Status 2026-07-03: items 1–5 SHIPPED** — `networks/foveated.py` (runner +
+> mask pipeline), `--fovea_sigma_c` / `--fovea_frac` / `--fovea_mask_source`
+> on `inference.py`, `tests/test_foveated_merge.py`, bench probes re-import
+> the promoted home. Item 6 (ComfyUI) is the remaining work — plan below.
 
-1. **Never rewrite the latent.** The "principled" transition re-noising (pooled x̂₀ +
-   variance-renormalized pooled ε) matches per-pixel variance but not distribution —
-   group-constant ε is off-manifold block noise (f²× per-mode LF power) and the DiT reads
-   it as content; the periphery never converges. Emulate merging as *what the compute
-   sees*, not what the state stores.
-2. **`tome_eval` beats `frozen`**: letting the model keep seeing σ_c-scale HF noise in
-   the periphery (`frozen`) produces speckle; the pooled composite view is both the
-   faithful emulation and the cleaner one.
-3. **Readout matters**: nearest broadcast reads as mosaic; bicubic reads as anime
-   DOF/bokeh — a *natural* look for these images.
+1. ~~**Promote the mechanism out of the bench**~~ DONE: `FoveatedTokenMerge` +
+   the mask pipeline (`score_to_cells`, morphology, `rect_cells`,
+   `cells_to_mask4`) live in `networks/foveated.py`; `foveated_denoise`
+   self-registers with `library.inference.generation` (SPD pattern). One
+   refinement over the plan: the merged forward runs through the model's own
+   `forward` via a `token_merger` kwarg on `forward_mini_train_dit`
+   (merge/rope-swap at the `_run_blocks` boundary, riding the fake-5D
+   native-flatten layout) — no duplicated external forward path, so the
+   "custom-runner ≡ `anima()`" invariant is structural. The bench imports the
+   promoted home (bespoke-loop mirroring lesson).
+2. ~~**CLI surface**~~ DONE: `--fovea_sigma_c` (0 = off) / `--fovea_frac` /
+   `--fovea_mask_source {combo,cfgdelta,x0var,rect}` in
+   `library/inference/args.py`; dispatched from `generate_body` on
+   `fovea_sigma_c > 0`, mutually exclusive with `--spectrum`/`--spd`.
+   `GenerationRequest` reaches them via `extra_argv` (routes through
+   `inference.parse_args`).
+3. **Compile interaction** — scoped to eager for v1 as planned: a compiled
+   model (`_native_flatten`) gets a one-time warning (one extra token count
+   per mask, outside the tier's `dynamic_seq` band → expect a recompile per
+   generation). Validation before default-on with `torch_compile` is still
+   open.
+4. ~~**Plug-in posture**~~ DONE: DCW / SMC-CFG / FSG / CFG++ warn-and-ignore
+   (SPD posture); stochastic samplers fall back to Euler with a warning.
+   Spectrum composition stays closed — mutual exclusion raises at dispatch
+   with a "P3 closed, don't re-propose" message.
+5. ~~**Tier 1.5 obligations**~~ DONE: `tests/test_foveated_merge.py` — all-fovea
+   mask ≡ identity (bit-exact through the shipped `token_merger` path),
+   group-shared periphery velocity, exact mean-position rope, mask-fraction +
+   compactness contracts, CPU end-to-end runner smoke. Bench regression =
+   re-run `probe_mask_sources` / `probe_fraction_stretch` (they now import the
+   shipped code, so the p2b/p3s numbers certify the production pipeline).
+6. **ComfyUI node** — see the integration plan below.
 
-Result (bare DiT, 1024², 28 steps, CFG 4, flow_shift 3, 2 seeds): fovea near-identical at
-σ_c=0.5 (RMSE 0.032 vs baseline), composition-identical with minor drift at 0.75 (0.089),
-real detail drift at 0.9 (0.20). Periphery = clean soft blur, no grain/seams/tone shift.
-Quality knee **σ_c ∈ [0.5, 0.75]** — the same single-late knee SPD found. Inverse-mask
-control destroys the subject symmetrically (probe has teeth); fovea/periphery isolation
-through attention is strong.
+## Invariants for the implementer (hard-won, do not rediscover)
 
-## The arithmetic that reshapes the plan
+- **Never rewrite the latent.** The latent stays full-res end-to-end; merging is
+  what the *compute* sees. Group-constant renormalized noise is off-manifold garbage
+  even with correct per-pixel variance (P0 run 1).
+- Mask lives on the pooled cell grid — no group may straddle the fovea boundary;
+  every 2×2-token cell uniformly fovea or periphery.
+- Masks must be **compact blobs** (morph open/close/dilate) — scattered fovea cells
+  lose fidelity because their whole attention neighborhood is merged (P2, +47 %).
+- The **final bicubic readout is part of the quality contract** — skipping it leaves
+  never-denoised HF detail in the periphery at decode; nearest-neighbor reads as
+  mosaic.
+- 5D/4D discipline: pooling ops are 4D; `squeeze(2)`/`unsqueeze(2)` explicitly
+  (CLAUDE.md dim-2 invariant).
+- σ_c is a knob but **0.75 is load-bearing**: foveating inside the authority window
+  makes a *different image* (that's the "deferred" in the name).
+- Verdicts are eyeball-first on full-res montages; RMSE certifies change, not
+  improvement — and calibrate on **hard prompts** (multi-subject, texture-heavy),
+  not the centered default; the composed line survived four phases on a collapsed
+  baseline because nobody rendered channel6 (P3 lesson).
 
-Phase-1-style real merging (fovea 35%, 2×2-token groups → ~51% effective tokens post-σ_c)
-saves ~×1.1 at σ_c=0.5, ~×1.25–1.3 at 0.75 — **standalone speed cannot be the point**
-(Spectrum ships ×3.75). Composing *with* Spectrum is structurally clean but marginally
-valuable as speed: Spectrum is step-level whole-DiT caching (Chebyshev per-token feature
-forecasting; cached steps skip all 28 blocks), so it reduces the *count* of actual
-forwards while merging reduces *cost per forward* — orthogonal, multiplicative, and
-unlike SPD the token layout never changes so the forecaster's per-token time series
-survives σ_c intact (no SPEED-style naive-reset; just force one actual forward at the
-crossing, machinery Spectrum already has). But at ×3.75 only ~4–5 actual forwards remain
-below σ_c → merging buys ×3.75→~×4.2. Real, not compelling.
+## Explicit non-goals (closed by the bench — don't re-propose)
 
-**The reframing that survives: spend Spectrum's error budget spatially.** The bokeh
-periphery is exactly the regime where feature forecasting is strongest (smooth,
-low-frequency, slowly-evolving), and the fovea is where forecast error hurts. So the
-prize is not "merge ∘ Spectrum" but **foveated Spectrum**: periphery rides the forecast
-nearly permanently; the refresh budget concentrates on the fovea. At matched wall-clock
-the claim becomes *"aggressive-Spectrum + foveation beats aggressive-Spectrum alone on
-subject fidelity"* — a quality-allocation claim, immune to the speed arithmetic, and the
-honest version of "concentrate denoise where it's needed".
+- **Composed foveated-Spectrum** (spatial refresh allocation): no headroom at sane
+  schedules, baseline collapse at aggressive ones (P3).
+- **Partial recompute** (fovea queries vs cached K/V): quality ceiling ties plain
+  Spectrum at both operating points. If ever revisited: catch-up-every-2 re-anchor
+  is mandatory (frozen-periphery fits degrade at sane cadence; catchup-2 restores
+  exact neutrality).
+- **Fovea-region SEA triggers / asymmetric cadence**: trigger is region-independent
+  (P2t); the timing win ships as `schedule="sea"`.
+- **True grid coarsening** (paper mechanism, post-trained adapter): 1b already
+  delivers the token reduction training-free.
 
-## Phase 0b — Spectrum compose smoke ✅ PASS at σ_c=0.5 (2026-07-03)
+## ComfyUI integration (item 6 — the remaining wiring)
 
-`bench/foveated/probe_spectrum_compose.py`; wiring = `spectrum_denoise(foveation=...)`
-hook points (composite input on actual forwards, output-side pooling of every emitted
-v — forecast steps included, post-unpatchify so forecaster state is untouched, final
-readout pool, plus the forced actual forward at the σ_c crossing; DCW/SMC warned and
-ignored while active). Run `20260703-1701-p0b`: aggressive Spectrum (window 3 / flex 3 /
-warmup 4 → 10/28 forwards, ×2.8), 2 seeds:
+Ship as an option in the **Spectrum-KSampler repo**
+(`ComfyUI-Spectrum-KSampler`, which already hosts the SPEED and FSG ports —
+same "sampler-level runner" family), not a standalone node: the mechanism
+needs a custom sampling loop anyway, and that repo owns the KSampler-compat
+plumbing. Vendor the promoted math verbatim from `networks/foveated.py`
+(`FoveatedTokenMerge`, `score_to_cells`, morphology, readout) — the module is
+numpy/torch-only with no repo-internal imports beyond the runner half, so the
+mechanism classes vendor cleanly; keep edits upstream-first and re-vendor
+(never fork the math — the `spd_core.py` precedent).
 
-- **Headroom CONFIRMED** — the readout that de-risks the whole reframe: plain aggressive
-  Spectrum's forecast error concentrates in the fovea (fovea/periph RMSE ratio
-  1.62–1.74; errmap bright on sign lettering / face / hands, near-black sky). Its
-  visible damage is *subject* damage (garbled sign text, smear artifacts on hands)
-  while the periphery survives — exactly the allocation asymmetry foveated Spectrum
-  wants to exploit.
-- **Composition stable and free at σ_c=0.5**: fovea RMSE +0.002 over plain spec
-  (visually identical drift), same forward count, periphery clean bokeh, no
-  instability through the σ_c feature discontinuity.
-- **σ_c=0.75 fails under aggressive caching** (+0.029 fovea RMSE, visibly worse text):
-  the bare-loop knee [0.5, 0.75] shrinks to **≈0.5** when most post-crossing steps are
-  forecast. Phase 1a operates at σ_c=0.5.
-- Scope: 0b's wiring doesn't reallocate refresh budget yet, so foveated arms only
-  *matched* spec's fovea — the "beats aggressive Spectrum on subject fidelity at
-  matched compute" claim is Phase 1a's to demonstrate, now with its premise measured.
+**How the pieces map onto comfy:**
 
-## Phase 1 — pick the mechanism — NEXT GATE (0b passed → default branch is 1a)
+- **The merge is a runner, not a weight patch.** Comfy's cosmos backbone uses
+  split q/k/v while our training DiT fuses them — irrelevant here: the merge
+  sits at the block-stack boundary (tokens + rope), touching no projection
+  weights. It ports as a `model_options` wrapper the same way the EasyControl
+  KSampler node patches the block loop.
+- **Forward hook point**: wrap the cosmos model's block loop (the equivalent
+  of our `_run_blocks` boundary — after patch-embed + rope build, before
+  `final_layer`): merge tokens, swap in `merge_rope`'s reduced (cos, sin),
+  run blocks on the reduced sequence, broadcast back. On comfy's predict2
+  cosmos the rope tensors are per-block arguments — reduce once per mask and
+  cache, exactly as `merge_rope` does.
+- **Signal accumulation**: cfgdelta needs both CFG branches. In comfy the
+  clean tap is a `sampler_post_cfg_function` (it receives `cond_denoised` /
+  `uncond_denoised` per step) — accumulate the per-cell |Δ| there; x̂₀
+  Laplacian comes from the same callback's denoised output at the crossing.
+  No extra forwards, mirroring the CLI runner.
+- **σ_c crossing + mask build**: the custom sampler owns the σ schedule
+  (comfy sigmas are the flow σ directly for cosmos), so the crossing check,
+  `score_to_cells`, and merger construction happen inside the sampler
+  function; below σ_c it sets the block-loop wrapper into the model options
+  for the remaining steps.
+- **Final readout** (part of the quality contract): apply the avg-pool →
+  bicubic periphery blend to the final latent inside the sampler, before the
+  latent returns for VAE decode.
+- **Knobs**: same three — `sigma_c` (default 0.75), `fovea_frac` (0.35,
+  UI-min 0.25), `mask_source` (combo/cfgdelta/x0var/rect). CFG=1 workflows
+  auto-fall back to x0var, as in the CLI.
 
-Two branches; 0b's outcome picked the default:
+**Gotchas carried from the node fleet** (don't rediscover):
 
-- **1a. Foveated Spectrum decisions** (if 0b shows the quality-allocation win): make the
-  refresh decision spatially aware. Cheapest form first — global refresh cadence
-  unchanged, but *periphery* features keep riding the forecast even on refresh steps
-  (only fovea features update from the actual forward: mask-blend actual vs forecast at
-  the final_layer hook). No attention surgery at all. Then, if worth more: per-region SEA
-  accumulators driving asymmetric cadences.
-- **1b. Real ToMe merge inside blocks** (if 0b shows composition is fragile and
-  standalone fidelity-preserving speedup is wanted): merge 2×2 periphery token groups
-  before each block's attn/MLP, broadcast after; latent stays full-res end-to-end. RoPE
-  for a merged group = its mean position (approximation is the known ToMe cost).
-  Measure actual wall-clock at the P0 knee. Bench + invariant test per CONTRIBUTING
-  Tier 1.5.
+- **AnimaBlockCompile rebuilds the DiT and strands hooks**
+  ([[project_blockcompile_rebuilds_dit_strands_hooks]]): bind the block-loop
+  wrapper at *sample time* against `executor.class_obj.diffusion_model`, not
+  at node-construction time, or a downstream BlockCompile node silently drops
+  the foveation.
+- **Euler-only**, like the CLI runner: the node exposes its own sampler entry
+  (or validates the selected one), not a compose with `er_sde_cns` etc.
+- **Mutually exclusive with the Spectrum caching path** in the same repo —
+  the P3 closure applies identically; the node UI should make them an
+  either/or choice, not stackable toggles.
+- Register-token checkpoints (kept-live `num_registers` LoRAs) extend the
+  sequence and rope at inference — merging + register injection is
+  unvalidated; refuse or warn when both are active.
 
-## Phase 2 — mask sources (gated on Phase 1 shipping anything)
-
-P0's movable rectangle is a stand-in, and it showed the contract issue: a rectangular
-sharpness boundary is invisible crossing bokeh-able background but would read as an
-artifact crossing the subject. Real masks, both training-free and endogenous:
-
-- **FreeText Stage-1 localizer** — I2T cross-attn "where is concept X" (concentration
-  2–3.6× uniform, L6–L17, mid-t; the one reusable win from the FreeText line) read
-  during the full-res steps, union over subject tags.
-- **Local x̂₀ variance** across early steps — "which regions are still undecided" (x̂₀
-  wander tracks scene complexity and is base-owned, [[project_x0_contradiction_bench]]).
-- Snap the union to pool groups, dilate one group, keep a `--fovea_frac` floor.
-
-Gate: masks must cover the subject on a 10–20 prompt sweep (montage eyeball) without
-exceeding ~50% area (or the saving/allocation evaporates).
-
-## Phase 3 — heavy variants (gated on Phase 1 + demand)
-
-Only if the line earns it:
-
-- **Partial recompute** (foveated-Spectrum endgame): on refresh steps run fovea queries
-  only against cached/forecast K/V per block; MLP on fovea tokens only. Real savings on
-  refresh steps (~65% of block cost at 35% fovea) without changing token layout.
-- **True grid coarsening** (the paper's mechanism, time-gated): actual sequence-length
-  reduction post-σ_c — phase-aligned mixed-res RoPE, likely a post-trained adapter
-  (SPD-Case-B-style analytic targets, no teacher), low-res VAE decode + blend (their
-  known boundary color-artifact risk). Biggest speed, most surgery; competes with 1b.
-
-## Invariants / gotchas for whoever builds this
-
-- On-manifold lesson from P0 run 1: never rewrite the latent's noise; group-constant
-  renormalized noise is off-manifold garbage even with correct per-pixel variance.
-- Mask must be built on the pooled grid (no group straddles the boundary) — see
-  `build_fovea_mask`.
-- Force an actual forward at the σ_c crossing when composing with Spectrum (feature
-  discontinuity vs the Chebyshev fit).
-- Final readout is part of the contract: periphery is *read from the merged
-  representation* (bicubic up), otherwise never-denoised HF noise/detail survives to
-  decode.
-- 5D/4D boundary discipline: all pooling ops are 4D `(B,C,H,W)` — `squeeze(2)` /
-  `unsqueeze(2)` explicitly (see CLAUDE.md dim-2 invariant).
-- DCW/SMC compose with Spectrum at the same boundary and should compose here, but are
-  unvalidated against pooled velocities — warn-and-ignore until checked (mirror SPD's
-  posture).
-- No metric we have tracks Anima sample quality ([[project_shelved_explorations]],
-  Null-TTA lesson): every gate above is a full-res montage eyeball; RMSE/Laplacian
-  numbers certify *change*, not *improvement*.
+**Definition of done**: parity render against the CLI (`--fovea_sigma_c 0.75`)
+at matched seed/schedule — fovea pixel-close, same mask (dump `cells` from
+both paths), e2e speedup within noise of ×1.37 at 1024²/28-step/CFG 4; the
+usual hard-prompt eyeball (channel6-class multi-subject, not just the centered
+default — the P3 lesson).

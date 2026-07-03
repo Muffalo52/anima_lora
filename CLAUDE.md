@@ -94,7 +94,7 @@ The DiT forward (and `PatchEmbed`, which `assert x.dim() == 5`) takes a **5D** l
 
 Adapter families (training methods) below — one-line orientation plus the load-bearing gotcha; read the linked deep-dive before working on one.
 
-**Training-free inference stacks** (Spectrum, SPD, DCW, SMC-CFG, CNS, mod-guidance, embedding inversion, DAVE) are documented separately under [`docs/inference/`](docs/inference/README.md) — read the relevant doc when you touch one rather than carrying their details here. Most ride on the sampler boundary and compose with any checkpoint (DAVE is the exception — a block-forward hook for same-prompt diversity). Channel scaling (per-channel LoRA gradient rebalance, on by default) is a training-time feature — see [`docs/optimizations/channel_scaling.md`](docs/optimizations/channel_scaling.md); note it's exactly inert on frozen-basis ortho variants.
+**Training-free inference stacks** (Spectrum, SPD, foveated merge, DCW, SMC-CFG, CNS, mod-guidance, embedding inversion, DAVE) are documented separately under [`docs/inference/`](docs/inference/README.md) — read the relevant doc when you touch one rather than carrying their details here. Most ride on the sampler boundary and compose with any checkpoint (DAVE is the exception — a block-forward hook for same-prompt diversity). Channel scaling (per-channel LoRA gradient rebalance, on by default) is a training-time feature — see [`docs/optimizations/channel_scaling.md`](docs/optimizations/channel_scaling.md); note it's exactly inert on frozen-basis ortho variants.
 
 | Method | What it is | Gotcha / pointer |
 |---|---|---|

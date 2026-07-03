@@ -20,6 +20,7 @@ Pluggable adapter implementations selected at runtime via the `network_module` c
 | `attention_dispatch.py` | Unified `dispatch_attention()` — backend router (SDPA / FA2 / FA3 / sageattn / flex). |
 | `spectrum.py` | Spectrum inference acceleration (Chebyshev feature forecasting). See root CLAUDE.md §Spectrum and `docs/inference/spectrum.md`. |
 | `spd.py` | Spectral Progressive Diffusion — training-free inference acceleration (grow spatial resolution along the trajectory, spectral noise-expansion handoff). Sampler-level runner registered like Spectrum. See `docs/inference/spd.md`. |
+| `foveated.py` | Deferred-foveated merge — training-free inference acceleration (full grid above σ_c, then fovea tokens 1:1 + periphery 2×2-token groups merged via the `token_merger` forward kwarg; endogenous `combo` mask). Sampler-level runner registered like Spectrum/SPD. See `docs/inference/foveated.md`. |
 | `dcw.py` | DCW post-step correction for SNR-t bias on flow-matching DiTs at the sampler boundary. See `docs/inference/dcw.md`. |
 | `calibration/` | Shipped calibration artifacts: `channel_stats.safetensors` + `cond_channel_stats.safetensors` (per-channel scaling, main + EasyControl cond stream — see `docs/optimizations/channel_scaling.md`; inert on frozen-basis ortho variants) + `cns_gamma.npz` (CNS γ schedule, also auto-downloaded from a release) + `dave_alpha.npz` (DAVE). |
 

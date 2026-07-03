@@ -425,6 +425,36 @@ def build_parser() -> argparse.ArgumentParser:
         "len = len(stages)-1. Default: 0.7 per handoff (single-late knee).",
     )
 
+    # Deferred-foveated merge (bench/foveated/ P0→P3): training-free, forces
+    # Euler, mutually exclusive with --spectrum / --spd. See networks/foveated.py
+    # + docs/inference/foveated.md.
+    parser.add_argument(
+        "--fovea_sigma_c",
+        type=float,
+        default=0.0,
+        help="Enable deferred-foveated merge below this σ: full-grid sampling "
+        "above, reduced token sequence (fovea 1:1, periphery 2×2-token groups "
+        "merged) below. 0 (default) disables. 0.75 is the benched knee — "
+        "foveating inside the authority window makes a different image.",
+    )
+    parser.add_argument(
+        "--fovea_frac",
+        type=float,
+        default=0.35,
+        help="Target fovea fraction of the image (default 0.35). Knob floor "
+        "0.25; ≤0.15 falsified on multi-subject prompts. Speed ceiling ~×1.6.",
+    )
+    parser.add_argument(
+        "--fovea_mask_source",
+        choices=["combo", "cfgdelta", "x0var", "rect"],
+        default="combo",
+        help="Fovea mask source, derived at the σ_c crossing from signals the "
+        "pre-crossing steps already compute. 'combo' (default) = cfgdelta + "
+        "x0var, never loses to the static rect. cfgdelta needs CFG "
+        "(guidance_scale != 1) — CFG=1 auto-falls-back to x0var. 'rect' = "
+        "static center rect.",
+    )
+
     # DCW (arXiv:2604.16044): opposite-sign on Anima -- see bench/dcw/findings.md.
     parser.add_argument(
         "--dcw",

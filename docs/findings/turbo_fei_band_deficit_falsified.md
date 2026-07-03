@@ -122,7 +122,7 @@ no-over-low directly supports that — the DP-DMD anchor + `dm_x0_norm`
 ## What survives
 
 - `bench/turbo/probe_fei_band.py` — the reusable Phase-0 instrument (Site A σ-matched
-  by construction; envelope under `bench/turbo_fei_band/results/`). Re-run on a future
+  by construction; envelope under `bench/turbo/results/`). Re-run on a future
   checkpoint only if the loop's diversity mechanism changes materially.
 - **The mechanism is sound, just mis-sited *and* un-needed.** The DoG LP/HP split +
   bounded per-sample deficit is correct and reusable, but do not resurrect `ca_band.py`

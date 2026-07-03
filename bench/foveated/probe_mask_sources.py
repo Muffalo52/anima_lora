@@ -71,29 +71,10 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 SOURCES = ["rect", "rect_miss", "x0var", "cfgdelta", "combo"]
 
 
-# ── Score → compact mask ────────────────────────────────────────────────────────
-
-
-def score_to_cells(score: np.ndarray, target: float, tol: float = 0.02):
-    """Bisect the pre-morphology keep-fraction so the FINAL mask (after open →
-    close → dilate-1 margin) lands on the target fraction."""
-    lo, hi = 0.005, 0.95
-    cells = None
-    for _ in range(16):
-        f0 = (lo + hi) / 2
-        m = score >= np.quantile(score, 1.0 - f0)
-        m = _dilate(_erode(m))  # open: drop specks / thin structures
-        m = _erode(_dilate(m))  # close: fill gaps
-        m = _dilate(m)  # 1-cell boundary margin (subject-clipping contract)
-        frac = float(m.mean())
-        cells = m
-        if abs(frac - target) <= tol:
-            break
-        if frac > target:
-            hi = f0
-        else:
-            lo = f0
-    return torch.from_numpy(cells), float(cells.mean())
+# Score → compact mask: promoted to networks/foveated.py (2026-07-03) — the
+# bench imports the shipped home so this probe regression-tests the production
+# mask pipeline verbatim.
+from networks.foveated import score_to_cells  # noqa: E402, F401
 
 
 # ── Adaptive denoise: accumulate signals full-res, build mask at crossing ───────

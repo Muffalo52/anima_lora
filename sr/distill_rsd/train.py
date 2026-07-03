@@ -48,7 +48,7 @@ def dc_loss(a, b, k=32):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=3000, help="generator updates")
+    ap.add_argument("--iters", type=int, default=12000, help="generator updates")
     ap.add_argument("--K", type=int, default=5, help="fake updates per generator update")
     ap.add_argument("--bs", type=int, default=4,
                     help="batch size (default 4: benched 2026-07-02 on the 16GB 5070 Ti — "
@@ -99,10 +99,10 @@ def main():
     ap.add_argument("--src", default=None,
                     help="HR source dir (default image_dataset; pass the prep_rsd_cache "
                          "4096-capped cache for faster decode at the right 1024->4096 scale)")
-    ap.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
+    ap.add_argument("--num_workers", type=int, default=6, help="DataLoader workers")
     ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "rsd"))
     ap.add_argument("--log_every", type=int, default=40)
-    ap.add_argument("--save_every", type=int, default=1000)
+    ap.add_argument("--save_every", type=int, default=2000)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
     args = ap.parse_args()
 
