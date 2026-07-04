@@ -125,13 +125,53 @@ def save_mask(path: Path, alpha_mask: np.ndarray) -> None:
     Image.fromarray(alpha_mask, mode="L").save(path)
 
 
-def _load_ctd(onnx_path: str):
+def _load_ctd(onnx_path: str, device: str = "cuda"):
+    """Return forward(canvas_1024_rgb) -> raw output list.
+
+    onnxruntime CUDAExecutionProvider when available (~17 ms/forward vs seconds
+    on cv2.dnn CPU — same lever as sr/scripts/detect_text_boxes.py), cv2.dnn
+    CPU as fallback.
+    """
+    if device != "cpu":
+        try:
+            import onnxruntime as ort
+
+            ort.preload_dlls()  # resolve cudnn/cublas from the venv's nvidia-* wheels
+            sess = ort.InferenceSession(
+                str(onnx_path),
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+            if "CUDAExecutionProvider" in sess.get_providers():
+                inp = sess.get_inputs()[0].name
+
+                def forward(canvas: np.ndarray) -> list[np.ndarray]:
+                    blob = canvas.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+                    return sess.run(None, {inp: blob})
+
+                return forward
+            print(
+                "WARNING: onnxruntime CUDAExecutionProvider unavailable — CTD gate falls back to cv2.dnn CPU"
+            )
+        except Exception as e:  # noqa: BLE001 — any ORT init failure degrades to CPU
+            print(
+                f"WARNING: onnxruntime CUDA init failed ({e}) — CTD gate falls back to cv2.dnn CPU"
+            )
+
     net = cv2.dnn.readNetFromONNX(str(onnx_path))
-    return net, net.getUnconnectedOutLayersNames()
+    uoln = net.getUnconnectedOutLayersNames()
+
+    def forward(canvas: np.ndarray) -> list[np.ndarray]:
+        net.setInput(
+            cv2.dnn.blobFromImage(canvas, scalefactor=1 / 255.0, size=(1024, 1024))
+        )
+        return list(net.forward(uoln))
+
+    return forward
 
 
-def _ctd_text_boxes(net, uoln, img: np.ndarray, conf_th=0.4, nms_th=0.35,
-                    seg_th=0.3, seg_cov=0.03) -> list[tuple[int, int, int, int]]:
+def _ctd_text_boxes(
+    ctd_forward, img: np.ndarray, conf_th=0.4, nms_th=0.35, seg_th=0.3, seg_cov=0.03
+) -> list[tuple[int, int, int, int]]:
     """Text-block boxes (yolo blk head + stroke-coverage cross-check) in img coords.
 
     Mirrors sr/scripts/detect_text_boxes.py::_detect — see there for why the blk
@@ -142,9 +182,8 @@ def _ctd_text_boxes(net, uoln, img: np.ndarray, conf_th=0.4, nms_th=0.35,
     nw, nh = int(round(w0 * r)), int(round(h0 * r))
     canvas = np.zeros((1024, 1024, 3), np.uint8)
     canvas[:nh, :nw] = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    net.setInput(cv2.dnn.blobFromImage(canvas, scalefactor=1 / 255.0, size=(1024, 1024)))
-    outs = net.forward(uoln)
-    blk = next(o for o in outs if o.ndim == 3)[0]                         # (N,7)
+    outs = ctd_forward(canvas)
+    blk = next(o for o in outs if o.ndim == 3)[0]  # (N,7)
     seg = next(o for o in outs if o.ndim == 4 and o.shape[1] == 1)[0, 0]  # stroke prob
     conf = blk[:, 4] * blk[:, 5:].max(axis=1)
     keep = conf > conf_th
@@ -153,7 +192,9 @@ def _ctd_text_boxes(net, uoln, img: np.ndarray, conf_th=0.4, nms_th=0.35,
     b, c = blk[keep], conf[keep]
     xywh = np.concatenate([b[:, :2] - b[:, 2:4] / 2, b[:, 2:4]], axis=1)
     boxes = []
-    for i in np.array(cv2.dnn.NMSBoxes(xywh.tolist(), c.tolist(), conf_th, nms_th)).flatten():
+    for i in np.array(
+        cv2.dnn.NMSBoxes(xywh.tolist(), c.tolist(), conf_th, nms_th)
+    ).flatten():
         x, y, w, h = xywh[i]
         cx0, cy0 = max(int(x), 0), max(int(y), 0)
         cx1, cy1 = min(int(x + w), 1024), min(int(y + h), 1024)
@@ -161,8 +202,14 @@ def _ctd_text_boxes(net, uoln, img: np.ndarray, conf_th=0.4, nms_th=0.35,
             continue
         if (seg[cy0:cy1, cx0:cx1] > seg_th).mean() < seg_cov:
             continue
-        boxes.append((max(int(x / r), 0), max(int(y / r), 0),
-                      min(int((x + w) / r), w0), min(int((y + h) / r), h0)))
+        boxes.append(
+            (
+                max(int(x / r), 0),
+                max(int(y / r), 0),
+                min(int((x + w) / r), w0),
+                min(int((y + h) / r), h0),
+            )
+        )
     return boxes
 
 
@@ -242,10 +289,12 @@ def main() -> None:
     ctd = None
     if args.ctd_gate:
         if Path(args.ctd_onnx).exists():
-            ctd = _load_ctd(args.ctd_onnx)
+            ctd = _load_ctd(args.ctd_onnx, device=args.device)
         else:
-            print(f"WARNING: --ctd-gate on but {args.ctd_onnx} missing — gating "
-                  f"disabled (run `make download-models` or pass --no-ctd-gate)")
+            print(
+                f"WARNING: --ctd-gate on but {args.ctd_onnx} missing — gating "
+                f"disabled (run `make download-models` or pass --no-ctd-gate)"
+            )
 
     image_dir = Path(args.image_dir)
     masks_dir = Path(args.mask_dir)
@@ -303,7 +352,7 @@ def main() -> None:
 
         if ctd is not None and combined_mask.any():
             boxmask = np.zeros(combined_mask.shape, bool)
-            for x0, y0, x1, y1 in _ctd_text_boxes(*ctd, img_np):
+            for x0, y0, x1, y1 in _ctd_text_boxes(ctd, img_np):
                 boxmask[y0:y1, x0:x1] = True
             _, lab = cv2.connectedComponents(combined_mask)
             keep_ids = np.unique(lab[boxmask])
