@@ -47,6 +47,40 @@ alpha_rank_scale = 1.0
 network_dim = 64
 ```
 
+## Findings (bench-backed)
+
+Does the mask earn its complexity? Benched twice; the answer depends on where
+`min_rank` sits relative to the rank the model would use anyway.
+
+**Inert when the floor ≥ the natural learned rank** (2026-06-07,
+`bench/timestep_mask/results/20260607-*`): at `network_dim=48, min_rank=16`,
+mask on/off/σ-uniform all land at participation ratio ≈16 of 48. The binding
+constraint is the data, not the mask — the scheduled band above the floor is
+idle capacity. Corollary: dim=48 is ~3× over-provisioned in that regime.
+
+**Active when the floor bites below it** (2026-07-04,
+`results/20260704-1741-learned-rank-dim16-minrank1`): at `network_dim=16,
+min_rank=1` (plain LoRA + REPA, single-artist subset), the mask *raises*
+effective rank — PR(median) 10.9 → 12.25, energy-weighted PR 5.2 → 9.8. The
+plain run concentrates high-energy modules into a few dominant directions; the
+mask flattens the spectrum (top columns see gradient only on low-σ steps). It
+acts as a spectral regularizer, not a budget cut. σ-sampler shape (sigmoid vs
+uniform) is irrelevant in both benches.
+
+**Memorization: mitigation, not a fix** (2026-07-04,
+`bench/memorization/results/20260704-18*-sincos_half_*`): matched
+`sample_ratio=0.5` arms, `loss_gap.py` member-vs-same-artist-holdout gate.
+Both arms flag member-specific overfit; the mask trims the AUC 0.82 → 0.77,
+with the reduction concentrated at σ=0.5 (0.86 → 0.71) — exactly where
+sigmoid-σ sampling mass peaks and the schedule halves the rank — while σ=0.9
+ticks up slightly (0.62 → 0.68). Single seed, so the headline ΔAUC is within
+noise; the σ=0.5 delta is the trustworthy part.
+
+**Open**: whether the masked arm matches the plain arm on style fidelity
+(seed-matched render grid / CMMD) — a memorization reduction bought by
+learning less style would be worthless. Until that lands, the mask stays
+opt-in; don't tune `alpha_rank_scale` (settled inert both times).
+
 ## Implementation
 
 | File | Role |
