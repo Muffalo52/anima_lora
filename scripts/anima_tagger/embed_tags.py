@@ -48,6 +48,16 @@ def build_tag_texts(
     for t in vocab["tags"]:
         name = t["name"]
         cat = str(t.get("category", "general"))
+        sentinel_for = t.get("sentinel_for")
+        if sentinel_for:
+            # Synthetic "<none:group>" rejection class — describe the absence
+            # rather than template-falling-back on the marker name.
+            group_words = str(sentinel_for).replace("_", " ")
+            texts.append(
+                f"none of the {group_words} tags applies — no identifiable "
+                f"{group_words} attribute in this image."
+            )
+            continue
         info = kb.describe(name)
         if info is None and name in rename_recovery:
             info = kb.describe(rename_recovery[name])

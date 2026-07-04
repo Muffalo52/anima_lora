@@ -569,6 +569,41 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
             groups_src = derived_path
     if groups_src is not None and groups_src.exists():
         groups = tg.load_groups(groups_src)
+        name_to_cat = {
+            t["name"]: str(t.get("category", "general")) for t in vocab["tags"]
+        }
+        # ``$category:<cat>`` member markers expand against the kept vocab —
+        # must happen before resolve AND before the snapshot write below, so
+        # the shipped groups.yaml carries concrete names for inference.
+        groups = tg.expand_category_members(groups, name_to_cat)
+        # One synthetic "<none:group>" tag slot per sentinel group, appended
+        # after every real tag (indices stay stable). Category inherits the
+        # member majority so dual-encoder routing keeps the sentinel logit on
+        # the same feature side as the tags it competes with. freq=0 — the
+        # slot never appears in captions; BCE never supervises it (trainer
+        # masks sentinel cells) and decode never emits it.
+        n_sentinels = 0
+        for g in groups.groups:
+            if not (g.sentinel and g.mode in ("softmax", "softmax_when_solo")):
+                continue
+            member_cats = Counter(name_to_cat[t] for t in g.tags if t in name_to_cat)
+            vocab["tags"].append(
+                {
+                    "name": tg.sentinel_tag_name(g.name),
+                    "index": len(vocab["tags"]),
+                    "category": (
+                        member_cats.most_common(1)[0][0] if member_cats else "general"
+                    ),
+                    "freq": 0,
+                    "median_pos": 999.0,
+                    "sentinel_for": g.name,
+                }
+            )
+            n_sentinels += 1
+        if n_sentinels:
+            logger.info(
+                "appended %d sentinel tag slot(s) for typed groups", n_sentinels
+            )
         tag_to_idx = {t["name"]: t["index"] for t in vocab["tags"]}
         resolved, dropped = tg.resolve_groups(groups, tag_to_idx)
         vocab["groups"] = tg.resolved_to_dict(resolved)

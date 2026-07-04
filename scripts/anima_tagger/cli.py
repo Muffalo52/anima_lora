@@ -207,16 +207,28 @@ def parse_args() -> argparse.Namespace:
         "training on this scale.",
     )
     p.add_argument("--d_hidden", type=int, default=1024)
-    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--dropout", type=float, default=0.25)
     p.add_argument(
         "--label_smooth",
         type=float,
-        default=0.0,
+        default=0.05,
         help="Label-smoothing ε for the tag head (train only). Softens the "
         "multi-label BCE targets to [ε/2, 1−ε/2] and feeds the same ε to the "
         "softmax-group cross-entropy, regularizing against the overconfidence "
         "that drives the train/val tag-loss gap. 0.0 (default) is inert; "
         "0.05–0.1 is the usual range. Val loss is always reported unsmoothed.",
+    )
+    p.add_argument(
+        "--ce_maxsup",
+        action="store_true",
+        help="Swap the softmax-group CE regularizer from label smoothing to "
+        "MaxSup (arXiv:2502.15798): hard CE + ε·(z_max − mean z) with ε = "
+        "--label_smooth. Also adds the same ε-weighted MaxSup term to the "
+        "rating and people-count heads (which carry no smoothing otherwise). "
+        "Keeps LS's overconfidence regularization but drops its "
+        "error-amplification term on misclassified samples (ambiguous "
+        "exclusive groups). BCE-target smoothing is unaffected — MaxSup has "
+        "no per-tag sigmoid analog. Inert when --label_smooth is 0.",
     )
     p.add_argument(
         "--inactive_neg_weight",

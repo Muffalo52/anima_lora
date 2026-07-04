@@ -17,6 +17,16 @@ import torch.nn.functional as F
 from .constants import _COUNT_RE
 
 
+def maxsup_term(logits: torch.Tensor) -> torch.Tensor:
+    """MaxSup regularizer (arXiv:2502.15798): batch-mean of ``z_max − mean(z)``.
+
+    Added as ``ε · maxsup_term(logits)`` on top of *hard* CE, in place of
+    ``label_smoothing=ε`` — same regularization pressure as LS on correct
+    predictions, without LS's error-amplification term on misclassified ones.
+    """
+    return (logits.max(dim=1).values - logits.mean(dim=1)).mean()
+
+
 def pos_weight_sqrt(multi_hot: torch.Tensor) -> torch.Tensor:
     """``sqrt(n_neg / n_pos)`` per tag — softens BCE long-tail without overshoot."""
     n_pos = multi_hot.sum(dim=0).clamp_min(1.0)
@@ -89,8 +99,13 @@ class _SoftmaxGroup:
 
     name: str
     mode: str  # "softmax_when_solo" | "softmax"
-    tag_indices: torch.Tensor  # LongTensor [K_g]
+    tag_indices: torch.Tensor  # LongTensor [K_g] (includes sentinel when present)
     escape_indices: torch.Tensor  # LongTensor [E_g]
+    # Local position of the group's synthetic "none of these" class inside
+    # ``tag_indices``, or None for legacy exactly-one groups. With a sentinel,
+    # CE fires on every applicable sample (target = sentinel when no member
+    # label), instead of only on samples carrying a member label.
+    sentinel_local: Optional[int] = None
 
 
 @dataclass
@@ -121,6 +136,9 @@ class GroupRouter:
     bce_pos_weight: torch.Tensor  # FloatTensor [n_tags]
     softmax_groups: List[_SoftmaxGroup] = field(default_factory=list)
     softmax_member_indices: Optional[torch.Tensor] = None  # LongTensor [Σ K_g]
+    # All sentinel vocab indices across groups — CE-only slots, masked from
+    # BCE unconditionally (their multi_hot column is always 0 by construction).
+    sentinel_indices: Optional[torch.Tensor] = None  # LongTensor [S]
     solo_indices: Optional[torch.Tensor] = None  # LongTensor [s]
     multi_indices: Optional[torch.Tensor] = None  # LongTensor [m]
     # Per-tag group id over ALL groups (any mode), for group-conditional
@@ -143,6 +161,7 @@ class GroupRouter:
 
         softmax_member: List[int] = []
         softmax_groups: List[_SoftmaxGroup] = []
+        sentinel_idx_list: List[int] = []
         for g in groups_raw:
             mode = g["mode"]
             if mode in ("softmax_when_solo", "softmax"):
@@ -150,6 +169,11 @@ class GroupRouter:
                 esc = list(g.get("escape_indices") or [])
                 if not idxs:
                     continue
+                sent = g.get("sentinel_index")
+                sentinel_local: Optional[int] = None
+                if sent is not None:
+                    sentinel_local = idxs.index(int(sent))
+                    sentinel_idx_list.append(int(sent))
                 softmax_member.extend(idxs)
                 softmax_groups.append(
                     _SoftmaxGroup(
@@ -159,6 +183,7 @@ class GroupRouter:
                         escape_indices=torch.tensor(
                             esc, dtype=torch.long, device=device
                         ),
+                        sentinel_local=sentinel_local,
                     )
                 )
             # multilabel groups are documentation-only — they stay in BCE.
@@ -213,6 +238,11 @@ class GroupRouter:
             bce_pos_weight=bce_pos_weight,
             softmax_groups=softmax_groups,
             softmax_member_indices=softmax_member_indices,
+            sentinel_indices=(
+                torch.tensor(sorted(sentinel_idx_list), dtype=torch.long, device=device)
+                if sentinel_idx_list
+                else None
+            ),
             solo_indices=solo_indices,
             multi_indices=multi_indices,
             group_of_tag=group_of_tag,
@@ -248,6 +278,7 @@ def compute_grouped_loss(
     router: GroupRouter,
     label_smooth: float = 0.0,
     inactive_neg_weight: float = 1.0,
+    ce_maxsup: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Return ``(total_tag_loss, per_group_metrics_for_logging)``.
 
@@ -258,6 +289,11 @@ def compute_grouped_loss(
     supervision. Samples without that gate (multi-subject, escape, no
     in-group label) keep BCE on the group's tags as a fallback.
 
+    Groups carrying a sentinel slot (``sentinel_local`` set) relax the
+    exactly-one assumption to at-most-one: CE fires on *every* applicable
+    sample, targeting the sentinel class when no member label is present.
+    Sentinel cells are excluded from BCE unconditionally — they are CE-only.
+
     ``label_smooth`` (ε ∈ [0, 1)) applies classic label smoothing as a
     train-time regularizer against the overconfidence that blows up the
     memorized-train / held-out gap on this head. The per-tag BCE targets
@@ -266,6 +302,18 @@ def compute_grouped_loss(
     softmax-group ``cross_entropy`` so both tag objectives smooth
     consistently. Pass ``0.0`` (default) on the val/metric path so reported
     loss stays the true unsmoothed objective and is comparable across ε.
+
+    ``ce_maxsup`` swaps the softmax-group regularizer from label smoothing
+    to MaxSup (arXiv:2502.15798): hard CE plus ``ε·(z_max − mean(z))`` over
+    the group logits. Same regularization term as LS when the prediction is
+    correct, but drops LS's error-amplification term (LS penalizes z_gt even
+    when a *larger* wrong logit exists, reinforcing confident mistakes —
+    common in genuinely ambiguous exclusive groups like hair/eye color).
+    BCE targets keep the binary smoothing above: per-tag sigmoid has no
+    competing-logit structure, so the MaxSup analysis doesn't apply there
+    (its binary degenerate form is a global |z| penalty ≈ Logit Penalty,
+    which the paper itself shows harms representations). ε=0 is inert either
+    way, so the unsmoothed val/metric path is unaffected by this flag.
 
     ``inactive_neg_weight`` (λ ∈ (0, 1]) implements group-conditional negative
     weighting: a negative (sample, tag) cell whose group is *inactive* for that
@@ -303,6 +351,11 @@ def compute_grouped_loss(
 
     # BCE applies everywhere by default; CE-supervised positions get masked off below.
     bce_mask = torch.ones(B, n_tags, dtype=torch.bool, device=tag_logits.device)
+    # Sentinel slots are CE-only: their multi_hot column is always 0, so BCE
+    # would just push them down everywhere, fighting the CE that raises them
+    # on group-inactive samples.
+    if router.sentinel_indices is not None:
+        bce_mask[:, router.sentinel_indices] = False
 
     ce_total = tag_logits.new_zeros(())
     if router.softmax_groups:
@@ -320,14 +373,34 @@ def compute_grouped_loss(
             group_logits = tag_logits.index_select(1, g.tag_indices)  # [B, K_g]
             group_target = multi_hot.index_select(1, g.tag_indices)  # [B, K_g]
             has_label = group_target.sum(dim=1) > 0
-            ce_samples = applicable & has_label
+            # Sentinel groups supervise every applicable sample — no member
+            # label means the CE target IS the sentinel class ("none of
+            # these"), which is also what lets decode reject instead of
+            # always emitting an argmax winner.
+            if g.sentinel_local is not None:
+                ce_samples = applicable
+            else:
+                ce_samples = applicable & has_label
             n_keep = int(ce_samples.sum().item())
             if n_keep == 0:
                 metrics[f"ce_{g.name}"] = 0.0
                 continue
             sel_logits = group_logits[ce_samples]  # [n_keep, K_g]
             sel_target = group_target[ce_samples].argmax(dim=1)  # [n_keep]
-            l_ce = F.cross_entropy(sel_logits, sel_target, label_smoothing=label_smooth)
+            if g.sentinel_local is not None:
+                sel_target = torch.where(
+                    has_label[ce_samples],
+                    sel_target,
+                    torch.full_like(sel_target, g.sentinel_local),
+                )
+            if ce_maxsup and label_smooth > 0.0:
+                l_ce = F.cross_entropy(
+                    sel_logits, sel_target
+                ) + label_smooth * maxsup_term(sel_logits)
+            else:
+                l_ce = F.cross_entropy(
+                    sel_logits, sel_target, label_smoothing=label_smooth
+                )
             ce_total = ce_total + l_ce
             metrics[f"ce_{g.name}"] = float(l_ce.detach().item())
 

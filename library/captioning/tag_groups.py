@@ -71,6 +71,29 @@ GROUP_MODES: FrozenSet[str] = frozenset(
     }
 )
 
+# ``sentinel: true`` on a softmax group adds a synthetic "none of this group"
+# class: the vocab build appends a tag slot named ``sentinel_tag_name(group)``,
+# CE supervises it on applicable samples with no member label (so the gate
+# flips from "exactly one member present" to "at most one"), and decode emits
+# nothing when it wins the argmax. The angle-bracket name can never collide
+# with a caption tag (canonical tags are bare space-form words).
+_SENTINEL_FMT = "<none:{group}>"
+
+# ``tags: ["$category:artist"]`` expands at vocab-build time to every kept
+# vocab tag of that category — used for groups whose membership is the whole
+# category (artist) and would otherwise drift as the vocab is rebuilt.
+_CATEGORY_MEMBER_PREFIX = "$category:"
+
+
+def sentinel_tag_name(group_name: str) -> str:
+    """Synthetic vocab-tag name for a group's "none of these" class."""
+    return _SENTINEL_FMT.format(group=group_name)
+
+
+def is_sentinel_name(tag_name: str) -> bool:
+    """True for names produced by :func:`sentinel_tag_name` — never emitted."""
+    return tag_name.startswith("<none:") and tag_name.endswith(">")
+
 
 @dataclass(frozen=True)
 class TagGroup:
@@ -81,6 +104,7 @@ class TagGroup:
     description: str
     escape: Tuple[str, ...]
     tags: Tuple[str, ...]
+    sentinel: bool = False
 
 
 @dataclass(frozen=True)
@@ -111,6 +135,8 @@ class TagGroups:
                 body["description"] = g.description
             if g.escape:
                 body["escape"] = list(g.escape)
+            if g.sentinel:
+                body["sentinel"] = True
             out[g.name] = body
         return out
 
@@ -144,6 +170,11 @@ def load_groups(path: str | Path) -> TagGroups:
         description = str(body.get("description", "") or "")
         escape = tuple(str(t) for t in (body.get("escape") or []))
         tags = tuple(str(t) for t in (body.get("tags") or []))
+        sentinel = bool(body.get("sentinel", False))
+        if sentinel and mode == "multilabel":
+            raise ValueError(
+                f"group {name!r}: sentinel=true only makes sense on softmax modes"
+            )
 
         for t in tags:
             existing = tag_to_group.get(t)
@@ -160,6 +191,7 @@ def load_groups(path: str | Path) -> TagGroups:
                 description=description,
                 escape=escape,
                 tags=tags,
+                sentinel=sentinel,
             )
         )
 
@@ -184,6 +216,7 @@ def from_dict(d: dict) -> TagGroups:
         description = str(body.get("description", "") or "")
         escape = tuple(str(t) for t in (body.get("escape") or []))
         tags = tuple(str(t) for t in (body.get("tags") or []))
+        sentinel = bool(body.get("sentinel", False))
         for t in tags:
             existing = tag_to_group.get(t)
             if existing is not None:
@@ -198,6 +231,7 @@ def from_dict(d: dict) -> TagGroups:
                 description=description,
                 escape=escape,
                 tags=tags,
+                sentinel=sentinel,
             )
         )
     return TagGroups(version=version, groups=tuple(groups), tag_to_group=tag_to_group)
@@ -221,6 +255,12 @@ class ResolvedGroup:
     # Names kept for snapshot/debug; dropped names are omitted.
     tag_names: Tuple[str, ...]
     escape_names: Tuple[str, ...]
+    # Vocab index of the group's synthetic "none of these" class, when the
+    # group declares ``sentinel: true`` AND the vocab carries the slot. It is
+    # folded into ``tag_indices`` (always last — the synthetic slot is
+    # appended after every real tag, so it sorts highest) and duplicated here
+    # so consumers don't index-guess.
+    sentinel_index: Optional[int] = None
 
 
 def resolve_groups(
@@ -254,6 +294,17 @@ def resolve_groups(
             kept_escape.append((idx, t))
         kept_tags.sort()
         kept_escape.sort()
+        sentinel_index: Optional[int] = None
+        if g.sentinel and g.mode in ("softmax", "softmax_when_solo"):
+            s_name = sentinel_tag_name(g.name)
+            sentinel_index = vocab_tag_to_idx.get(s_name)
+            if sentinel_index is None:
+                # Vocab was built without the slot (pre-sentinel build) —
+                # degrade to legacy exactly-one behavior rather than error.
+                dropped[s_name] = "sentinel_slot_not_in_vocab"
+            else:
+                kept_tags.append((sentinel_index, s_name))
+                kept_tags.sort()
         resolved.append(
             ResolvedGroup(
                 name=g.name,
@@ -263,6 +314,7 @@ def resolve_groups(
                 tag_names=tuple(n for _, n in kept_tags),
                 escape_indices=tuple(i for i, _ in kept_escape),
                 escape_names=tuple(n for _, n in kept_escape),
+                sentinel_index=sentinel_index,
             )
         )
     return tuple(resolved), dropped
@@ -279,6 +331,54 @@ def resolved_to_dict(resolved: Tuple[ResolvedGroup, ...]) -> List[dict]:
             "tag_names": list(g.tag_names),
             "escape_indices": list(g.escape_indices),
             "escape_names": list(g.escape_names),
+            "sentinel_index": g.sentinel_index,
         }
         for g in resolved
     ]
+
+
+def expand_category_members(
+    groups: TagGroups,
+    name_to_category: Mapping[str, str],
+) -> TagGroups:
+    """Expand ``$category:<cat>`` member entries against a built vocab.
+
+    Returns a new :class:`TagGroups` whose ``tags`` tuples carry the concrete
+    vocab tag names — run this before :func:`resolve_groups` AND before
+    snapshotting to the checkpoint dir, so the shipped ``groups.yaml`` is
+    self-contained (the inference wrapper re-resolves names, never markers).
+    Expanded names claimed by another group raise, same as the loader.
+    """
+    out_groups: List[TagGroup] = []
+    tag_to_group: Dict[str, str] = {}
+    for g in groups.groups:
+        expanded: List[str] = []
+        for t in g.tags:
+            if t.startswith(_CATEGORY_MEMBER_PREFIX):
+                cat = t[len(_CATEGORY_MEMBER_PREFIX) :]
+                expanded.extend(
+                    sorted(n for n, c in name_to_category.items() if c == cat)
+                )
+            else:
+                expanded.append(t)
+        for t in expanded:
+            existing = tag_to_group.get(t)
+            if existing is not None:
+                raise ValueError(
+                    f"tag {t!r} listed under both {existing!r} and {g.name!r} "
+                    f"after $category expansion"
+                )
+            tag_to_group[t] = g.name
+        out_groups.append(
+            TagGroup(
+                name=g.name,
+                mode=g.mode,
+                description=g.description,
+                escape=g.escape,
+                tags=tuple(expanded),
+                sentinel=g.sentinel,
+            )
+        )
+    return TagGroups(
+        version=groups.version, groups=tuple(out_groups), tag_to_group=tag_to_group
+    )

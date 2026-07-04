@@ -29,6 +29,7 @@ from .train_common import (
     GroupRouter,
     build_warmup_cosine_scheduler,
     compute_grouped_loss,
+    maxsup_term,
     people_class_weights,
     rating_class_weights,
     save_history_plot,
@@ -152,6 +153,7 @@ def _save_cfg_dict(args, cfg, d_in, best_f1):
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "label_smooth": args.label_smooth,
+        "ce_maxsup": args.ce_maxsup,
         "inactive_neg_weight": args.inactive_neg_weight,
         "lambda_rating": args.lambda_rating,
         "lambda_people": args.lambda_people,
@@ -272,7 +274,11 @@ def _eval_via_token_loader(
             gl = tag_logits.index_select(1, g.tag_indices)
             gt = multi_hot.index_select(1, g.tag_indices)
             has_label = gt.sum(dim=1) > 0
-            keep = applicable & has_label
+            # Sentinel groups are scored on every applicable sample — a
+            # label-less sample's ground truth is the sentinel class.
+            keep = (
+                applicable if g.sentinel_local is not None else applicable & has_label
+            )
             n_keep = int(keep.sum().item())
             if n_keep == 0:
                 out[f"acc_{g.name}"] = 0.0
@@ -280,6 +286,12 @@ def _eval_via_token_loader(
                 continue
             pred_idx = gl[keep].argmax(dim=1)
             true_idx = gt[keep].argmax(dim=1)
+            if g.sentinel_local is not None:
+                true_idx = torch.where(
+                    has_label[keep],
+                    true_idx,
+                    torch.full_like(true_idx, g.sentinel_local),
+                )
             out[f"acc_{g.name}"] = (pred_idx == true_idx).float().mean().item()
             out[f"n_{g.name}"] = n_keep
     return out
@@ -562,11 +574,21 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
                     router,
                     label_smooth=args.label_smooth,
                     inactive_neg_weight=args.inactive_neg_weight,
+                    ce_maxsup=args.ce_maxsup,
                 )
                 l_rate = ce(rating_logits, rate)
+                # MaxSup extends to the single-label heads too (they carry no
+                # label smoothing, so this is purely additive regularization).
+                use_maxsup = args.ce_maxsup and args.label_smooth > 0.0
+                if use_maxsup:
+                    l_rate = l_rate + args.label_smooth * maxsup_term(rating_logits)
                 loss = l_tag + args.lambda_rating * l_rate
                 if ce_people is not None and people_logits is not None:
                     l_people = ce_people(people_logits, people)
+                    if use_maxsup:
+                        l_people = l_people + args.label_smooth * maxsup_term(
+                            people_logits
+                        )
                     loss = loss + args.lambda_people * l_people
                 else:
                     l_people = loss.new_zeros(())

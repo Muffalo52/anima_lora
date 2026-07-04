@@ -427,6 +427,16 @@ _EN_KEY: Dict[str, str] = {
 # tags co-occur (closed eyes + tsurime), so forcing a single pick would be wrong
 # supervision; it stays multilabel. The eye/hair-color/length entries only fire
 # when there is no preserved groups.yaml to defer to.
+#
+# Two tiers by measured solo multi-rate (P(≥2 members | ≥1 member) on solo
+# images, recorded in each group's description at derive time):
+#   ≤2%  — truly exclusive (the original set).
+#   ≤~17% — the borderline tier, promoted 2026-07-04: near-exclusive families
+#   where the residual co-fires are rare stacks, not routine ones. All
+#   promoted groups now carry a sentinel class (see merge_apply), which
+#   relaxes supervision/decode from "exactly one" to "at most one" — without
+#   it, decode would stamp an argmax winner on every applicable image even
+#   when the family is absent (the old lighting/age hallucination).
 _PROMOTE_SOFTMAX = {
     "얼굴/눈 > 눈 색상",
     "머리카락 > 머리 색상",
@@ -434,6 +444,17 @@ _PROMOTE_SOFTMAX = {
     "인물 > 연령 변화",
     "효과/연출 > 조명",
     "인물 > 성별",
+    # Borderline tier (multi-rate in parens, from the 2026-07 corpus).
+    "메타 > 매체",  # medium (5%)
+    "메타 > 구도기법",  # composition_technique (11%)
+    "인물 > 패션 스타일",  # fashion_style (12%)
+    "색상/패턴 > 패턴/무늬",  # pattern (12%)
+    "메타 > 장르",  # genre (12%)
+    "인물 > 종족/비인간",  # species_nonhuman (13%)
+    "신체 > 체형",  # body_shape (14%)
+    "표정/감정 > 제스처",  # gesture (16%)
+    "포즈/구도 > 프레이밍",  # framing (16%)
+    "효과/연출 > 날씨",  # weather (17%)
 }
 
 
@@ -489,6 +510,11 @@ def merge_apply(
         escape = _escape_hints(members)
         if mode == "softmax_when_solo" and escape:
             body["escape"] = escape
+        if mode == "softmax_when_solo":
+            # Derived families never have guaranteed presence — the sentinel
+            # ("none of these") class lets CE supervise absence and decode
+            # reject, instead of always emitting an argmax winner.
+            body["sentinel"] = True
         body["description"] = (
             f"[{path}] {r['multi_rate']:.0%} solo multi-rate, n={r['n_any']}"
         )

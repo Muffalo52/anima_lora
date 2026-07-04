@@ -135,6 +135,13 @@ def predict_with_inference_rule(
         winner_local = tag_logits[:, g.tag_indices].argmax(dim=1)
         pred[rows[:, None], g.tag_indices[None, :]] = False
         pred[rows, g.tag_indices[winner_local[rows]]] = True
+        # Sentinel winner = "none of this group" — the assignment above set
+        # the sentinel column for those rows; the global clear below drops it.
+    if getattr(router, "sentinel_indices", None) is not None:
+        # Sentinel slots are never emitted: not as argmax winners (cleared
+        # here) and not via the sigmoid-threshold path (their calibrated
+        # threshold is skipped like all softmax members).
+        pred[:, router.sentinel_indices] = False
     return pred
 
 
