@@ -35,7 +35,7 @@ DEFAULT_THEME_COLOR = "#3c78c8"
 DEFAULT_THEME = "dark"
 
 
-def _read_gui_settings() -> dict:
+def read_gui_settings() -> dict:
     """Whole gui_settings.json as a dict (``{}`` if absent/unparseable)."""
     if not GUI_SETTINGS_FILE.exists():
         return {}
@@ -48,12 +48,12 @@ def _read_gui_settings() -> dict:
 
 def get_setting(key: str, default=None):
     """Read one preference from gui_settings.json, or ``default`` if missing."""
-    return _read_gui_settings().get(key, default)
+    return read_gui_settings().get(key, default)
 
 
 def set_setting(key: str, value) -> None:
     """Persist one preference into gui_settings.json (merge, don't clobber)."""
-    settings = _read_gui_settings()
+    settings = read_gui_settings()
     settings[key] = value
     try:
         GUI_SETTINGS_FILE.write_text(json.dumps(settings), encoding="utf-8")

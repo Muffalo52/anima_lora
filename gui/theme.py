@@ -253,7 +253,7 @@ def action_button_qss(
     rule composes with the proxy and keeps the label centred. Also handy for a
     button that flips between a variant and a non-variant look (the TensorBoard
     current-run button). Don't add a ``::menu-button`` rule here — that re-breaks
-    the centring (see :class:`gui.tabs.config_tab.SplitButtonStyle`)."""
+    the centring (see :class:`gui.widgets.buttons.SplitButtonStyle`)."""
     base = ACTION_COLORS[variant]
     return f"{selector}{{background:{base};color:white;font-weight:bold;padding:4px 16px;}}"
 

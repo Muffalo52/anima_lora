@@ -12,7 +12,7 @@ import html
 
 import toml
 from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPen, QTextCursor
+from PySide6.QtGui import QDesktopServices, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -24,12 +24,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
-    QProxyStyle,
     QPushButton,
     QScrollArea,
     QSplitter,
-    QStyle,
-    QStyleOptionToolButton,
     QTextBrowser,
     QToolButton,
     QVBoxLayout,
@@ -77,6 +74,7 @@ from gui.widgets import (
     ClickableLabel,  # noqa: F401 — re-exported; sibling tabs import it from here
     DirtyTrackingMixin,
     ImageViewerDialog,
+    SplitButtonStyle,  # noqa: F401 — re-exported; preprocess_tab imports it from here
     action_button,
     apply_variant,
     make_field_label,
@@ -111,48 +109,6 @@ _FIELD_ORDER = {
     "sample_at_first": 12,
     "sample_decode_inline": 13,
 }
-
-
-class SplitButtonStyle(QProxyStyle):
-    """Widen a ``QToolButton``'s dropdown indicator and paint a divider + tint.
-
-    Styling ``QToolButton::menu-button`` via a stylesheet disables Qt's
-    reservation of the arrow region for layout, which snaps the label to the
-    *full*-button centre. Driving the indicator width from the style metric
-    instead keeps Qt's reservation intact, so the label stays centred in the
-    action (non-arrow) segment — what we actually want for a split button —
-    while still giving a wide, visually distinct dropdown half. The divider +
-    subtle dark tint are painted over the menu sub-control (a stylesheet rule
-    there would re-break the centring).
-
-    Apply with ``button.setStyle(style)`` and keep a reference alive (the widget
-    does not take ownership). Set the style BEFORE the stylesheet.
-    """
-
-    INDICATOR = 22
-
-    def pixelMetric(self, metric, option=None, widget=None):
-        if metric == QStyle.PM_MenuButtonIndicator:
-            return self.INDICATOR
-        return super().pixelMetric(metric, option, widget)
-
-    def drawComplexControl(self, control, option, painter, widget=None):
-        super().drawComplexControl(control, option, painter, widget)
-        if (
-            control == QStyle.CC_ToolButton
-            and isinstance(option, QStyleOptionToolButton)
-            and option.features & QStyleOptionToolButton.HasMenu
-        ):
-            rect = self.subControlRect(
-                QStyle.CC_ToolButton, option, QStyle.SC_ToolButtonMenu, widget
-            )
-            painter.save()
-            painter.fillRect(rect, QColor(0, 0, 0, 46))
-            painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
-            painter.drawLine(
-                rect.left(), rect.top() + 3, rect.left(), rect.bottom() - 3
-            )
-            painter.restore()
 
 
 class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):

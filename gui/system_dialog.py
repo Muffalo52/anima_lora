@@ -12,7 +12,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from PySide6.QtCore import QProcess, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QTextCursor
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import ROOT
+from gui._paths import get_setting, set_setting
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
 from gui.theme import tok
@@ -374,7 +374,6 @@ RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 MANIFEST_FILE = ROOT / ".anima_release.json"
 
 # Release-tag cache (gui_settings.json) so the on-launch badge check doesn't hit GitHub every start; 6h balances freshness vs per-launch network cost.
-_GUI_SETTINGS_FILE = Path(__file__).resolve().parent / "gui_settings.json"
 UPDATE_CACHE_TTL_SECONDS = 6 * 3600
 _UPDATE_CACHE_KEY = "update_check"
 
@@ -390,24 +389,8 @@ def _load_local_version() -> str | None:
     return data.get("version")
 
 
-def _read_gui_settings() -> dict:
-    if not _GUI_SETTINGS_FILE.exists():
-        return {}
-    try:
-        return json.loads(_GUI_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _write_gui_settings(settings: dict) -> None:
-    try:
-        _GUI_SETTINGS_FILE.write_text(json.dumps(settings), encoding="utf-8")
-    except OSError:
-        pass
-
-
 def _load_cached_latest_tag(ttl: int = UPDATE_CACHE_TTL_SECONDS) -> str | None:
-    entry = _read_gui_settings().get(_UPDATE_CACHE_KEY)
+    entry = get_setting(_UPDATE_CACHE_KEY)
     if not isinstance(entry, dict):
         return None
     tag = entry.get("latest_tag")
@@ -422,9 +405,7 @@ def _load_cached_latest_tag(ttl: int = UPDATE_CACHE_TTL_SECONDS) -> str | None:
 def _save_cached_latest_tag(tag: str) -> None:
     if not tag:
         return
-    settings = _read_gui_settings()
-    settings[_UPDATE_CACHE_KEY] = {"latest_tag": tag, "checked_at": int(time.time())}
-    _write_gui_settings(settings)
+    set_setting(_UPDATE_CACHE_KEY, {"latest_tag": tag, "checked_at": int(time.time())})
 
 
 class _UpdateCheckThread(QThread):

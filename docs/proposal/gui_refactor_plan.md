@@ -1,6 +1,6 @@
 # gui/ refactor — module layout catch-up
 
-Status: **PROPOSED — not started.**
+Status: **IN PROGRESS — Phase 1 and Phase 2 done (2026-07-04); Phase 3/4 not started.**
 
 Scope: file organization only. The architecture (Qt-free `config_io.py`/`_paths.py`,
 the three shared mixins, theme tokens, daemon-observer model) is good and is
@@ -38,7 +38,14 @@ implementations** — `_paths.py:38` (the canonical one, with `get_setting`/`set
 - **No tab-architecture changes.** Mixin composition order, LazyTabMixin
   semantics, and the daemon contract stay exactly as documented.
 
-## Phase 1 — one owner for `gui_settings.json` (~30 min, lowest risk)
+## Phase 1 — one owner for `gui_settings.json` (~30 min, lowest risk) — DONE
+
+`system_dialog.py`, `i18n/__init__.py`, and `tabs/preprocess_tab.py` now go
+through `_paths.get_setting`/`set_setting`/`read_gui_settings` (the latter
+promoted from the private `_read_gui_settings`) instead of their own
+private file/read/write copies. `grep -rn "gui_settings.json" gui/
+--include="*.py"` shows path construction in `_paths.py` only (the remaining
+hits are comments/docstrings).
 
 `_paths.py` is already the intended owner: dependency-free foundation module,
 `GUI_SETTINGS_FILE` + `_read_gui_settings()` + `get_setting()` + `set_setting()`.
@@ -62,7 +69,22 @@ The fix is migration, not new code:
 Acceptance: `grep -rn "gui_settings.json" gui/ --include="*.py"` shows path
 construction in `_paths.py` only.
 
-## Phase 2 — explode `widgets.py` into `gui/widgets/` (mechanical, ~1–2 h)
+## Phase 2 — explode `widgets.py` into `gui/widgets/` (mechanical, ~1–2 h) — DONE
+
+Landed as planned, with one addition not called out in the original table:
+`_no_wheel` couldn't live only in `fields.py` as written, because
+`sample_prompts.py`'s `_SamplePromptRow` also calls it and `fields.py` already
+imports `target_res.py`/`sample_prompts.py` for the `_widget`/`_read` dispatch
+— `sample_prompts.py` importing back from `fields.py` would cycle. Added a
+tiny leaf `gui/widgets/_qt_utils.py` holding just `_no_wheel`, imported by both
+`fields.py` and `sample_prompts.py`; `SplitButtonStyle` moved into
+`buttons.py` as planned, with `tabs/config_tab.py` re-exporting it (`from
+gui.widgets import SplitButtonStyle`) since `tabs/preprocess_tab.py` imports
+it from there. All acceptance checks passed: every old `widgets.py` public
+name resolves via `gui.widgets`, `import gui.app` still shows no torch, and
+`tests/test_gui_*.py`/`test_doc_refs.py` pass (the launch-speed budget test
+is flaky under machine load — reproduces identically on unmodified `main`,
+not a regression from this split).
 
 Split along the five concern boundaries already visible in the file. New
 package, **`gui/widgets/__init__.py` re-exports every current name** so all 11

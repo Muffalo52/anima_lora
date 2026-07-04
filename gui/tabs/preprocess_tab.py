@@ -74,6 +74,7 @@ from gui import (
 )
 from gui import daemon as gui_daemon
 from gui._job_mixin import DaemonJobMixin
+from gui._paths import read_gui_settings
 from gui.explanations import (
     field_help_html,
     preprocess_field_help,
@@ -100,7 +101,6 @@ from library.preprocess.resize_preview import (
 
 SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
 PREPROCESS_TOML = ROOT / "configs" / "preprocess.toml"
-SETTINGS_FILE = Path(__file__).resolve().parent.parent / "gui_settings.json"
 
 # Defaults match the historical hardcoded values in scripts/tasks/preprocess.py
 # and scripts/preprocess/generate_masks_mit.py so a freshly installed GUI runs the
@@ -215,15 +215,6 @@ class _ResizeCropAnchorWidget(QWidget):
             btn.blockSignals(False)
         if emit:
             self.changed.emit()
-
-
-def _load_settings() -> dict:
-    if not SETTINGS_FILE.exists():
-        return {}
-    try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
 
 
 def _load_preprocess_toml() -> dict:
@@ -529,7 +520,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         form_layout = QVBoxLayout(form_host)
         form_layout.setContentsMargins(0, 0, 0, 0)
 
-        settings = _load_settings()
+        settings = read_gui_settings()
         pp_cfg = _load_preprocess_toml()
         sam_yaml = _load_sam_yaml()
         sam_rules = _load_rules(sam_yaml)
@@ -888,7 +879,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
                 self._loading_variant = False
         self._variant = variant
         meta = self._variant_preprocess_meta(variant)
-        settings = _load_settings()
+        settings = read_gui_settings()
         pp_cfg = _load_preprocess_toml()
 
         # path_scope is layered on top at submit time by _gui_scoped_paths, so this field shows/edits the *unscoped* root, not the scoped run path.
