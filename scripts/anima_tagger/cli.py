@@ -207,7 +207,7 @@ def parse_args() -> argparse.Namespace:
         "training on this scale.",
     )
     p.add_argument("--d_hidden", type=int, default=1024)
-    p.add_argument("--dropout", type=float, default=0.25)
+    p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument(
         "--label_smooth",
         type=float,

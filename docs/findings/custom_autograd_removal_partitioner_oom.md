@@ -120,8 +120,14 @@ Two operational notes:
   `torch._functorch.config.debug_partitioner`), not just outputs/grads.
 * **`activation_memory_budget` is the sanctioned knob** for "the partitioner
   saves too much" — prefer it over hand-written recompute Functions, and try
-  it before reaching for gradient checkpointing on OOM (it's free at 0.85 on
-  this workload; grad-ckpt cost ~18% step time here).
+  it before reaching for gradient checkpointing on OOM (it was free at 0.85 on
+  the 2026-06-10 workload; grad-ckpt cost ~18% step time here).
+  **Update 2026-07-04 (post-free-fit):** the free region has since shrunk —
+  a re-sweep on the current free-fit workload put the knee exactly at the
+  shipped `0.99` (1.0 OOMs, 0.99 trains at ~13.1 GB), while `0.85` bought only
+  a few hundred MB more at a real step-time cost. The knapsack's cheap-recompute
+  tail is workload-dependent; re-measure after any change to the compiled
+  block's op mix rather than trusting this doc's 0.85 number.
 * **Bisect with the real job.** Config-level guesses (five of them above) all
   pattern-matched and all missed; two bounded 26-step runs at adjacent commits
   settled it in minutes.
