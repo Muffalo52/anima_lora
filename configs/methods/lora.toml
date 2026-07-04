@@ -25,9 +25,9 @@ network_alpha = 90
 network_dim = 16
 
 learning_rate = 5e-5
-max_train_epochs = 8
-save_every_n_epochs = 8
-checkpointing_epochs = 8
+max_train_epochs = 4
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
 use_shuffled_caption_variants = true
 # use_randomized_caption_variants = true
@@ -36,12 +36,13 @@ caption_dropout_rate = 0.1
 
 # output_name = "anima_register_quarter"
 
-output_name = "anima_tenth16"
+output_name = "anima_sincos_t1"
 down_init = "weight_svd"
 
 
 # sigmoid_bias = 0.5
-# path_pattern = "sincos/*"
+path_pattern = "sincos/*"
+# timestep_sampling = "uniform"
 # artists_shard="4_4"
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0

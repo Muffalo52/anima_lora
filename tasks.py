@@ -89,6 +89,12 @@ COMMANDS = {
         "Train from a self-contained configs/gui-methods/<variant>.toml "
         "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora).",
     ),
+    "soup": (
+        training.cmd_soup,
+        "Uncond-init soup (TARGET=<artist> required): uncond inter-train on the "
+        "target's artist shard (reused if it exists) → 3 seeded fine-tunes → ΔW "
+        "soup SVD-truncated to network_dim (bench/memorization/report.md).",
+    ),
     "turbo": (
         training.cmd_turbo,
         "Turbo (DP-DMD) distillation — bakes CFG=4 / 28-step Anima into a 4-step "
