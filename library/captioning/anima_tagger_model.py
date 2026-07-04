@@ -45,11 +45,13 @@ training computes per-head losses and combines with ``λ_rating`` / ``λ_people`
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 @dataclass
@@ -76,8 +78,22 @@ class AnimaTaggerConfig:
     # Hard routing partition (must partition [0, n_tags)): PE-Core reads identity/global (character / copyright / artist / count), PE-Spatial reads the localized complement.
     tag_indices_core: List[int] = field(default_factory=list)
     tag_indices_spatial: List[int] = field(default_factory=list)
+    # Tag sub-head kind: "linear" (free per-tag weight vectors, the v2 default)
+    # or "label_embed" (cosine against per-tag text-description embeddings —
+    # trunk output is projected to d_label_emb and scored against the KB-derived
+    # label matrix, sharing statistical strength across related tags).
+    tag_head_kind: str = "linear"
+    d_label_emb: int = 0
+    label_emb_trainable: bool = False
 
     def __post_init__(self) -> None:
+        if self.tag_head_kind not in ("linear", "label_embed"):
+            raise ValueError(f"unknown tag_head_kind={self.tag_head_kind!r}")
+        if self.tag_head_kind == "label_embed" and self.d_label_emb <= 0:
+            raise ValueError(
+                "tag_head_kind='label_embed' requires d_label_emb > 0 (the "
+                "text-embedding width, e.g. 1024 for Qwen3-Embedding-0.6B)."
+            )
         combined = sorted(list(self.tag_indices_core) + list(self.tag_indices_spatial))
         if combined != list(range(self.n_tags)):
             raise ValueError(
@@ -146,6 +162,9 @@ class AnimaTaggerConfig:
             "pool_use_mean_aux": self.pool_use_mean_aux,
             "tag_indices_core": list(self.tag_indices_core),
             "tag_indices_spatial": list(self.tag_indices_spatial),
+            "tag_head_kind": self.tag_head_kind,
+            "d_label_emb": self.d_label_emb,
+            "label_emb_trainable": self.label_emb_trainable,
         }
 
     @classmethod
@@ -181,6 +200,10 @@ class AnimaTaggerConfig:
             pool_use_mean_aux=bool(d.get("pool_use_mean_aux", True)),
             tag_indices_core=[int(i) for i in d["tag_indices_core"]],
             tag_indices_spatial=[int(i) for i in d["tag_indices_spatial"]],
+            # Absent in pre-label-embed checkpoints — default to the linear head.
+            tag_head_kind=str(d.get("tag_head_kind", "linear")),
+            d_label_emb=int(d.get("d_label_emb", 0)),
+            label_emb_trainable=bool(d.get("label_emb_trainable", False)),
         )
 
 
@@ -218,6 +241,53 @@ class MAPHead(nn.Module):
         kv = self.norm_kv(tokens)
         out, _ = self.attn(q, kv, kv, need_weights=False)
         return out
+
+
+class LabelEmbedHead(nn.Module):
+    """Tag sub-head scoring against per-tag text-description embeddings.
+
+    ``logits = exp(logit_scale) * cos(proj(h), emb) + bias`` — the trunk output
+    is projected into the label-embedding space and scored by cosine against
+    the (unit-normalized) per-tag description embeddings, plus a free per-tag
+    bias so each tag keeps its own prior. Related tags share geometry through
+    ``emb`` instead of each learning an isolated weight vector from its own
+    few positives — the point of the head is long-tail sharing, and it also
+    admits open-vocab extension (a new tag is just a new embedding row).
+
+    ``emb`` rows are in the *side-local* order (the same order the routing
+    partition scatters back from) and persist in the state_dict either way
+    (buffer when frozen, Parameter when ``trainable``) so checkpoints stay
+    self-contained — inference never needs the KB.
+    """
+
+    SCALE_MAX = 100.0
+
+    def __init__(
+        self,
+        d_hidden: int,
+        n_tags_side: int,
+        d_emb: int,
+        trainable: bool = False,
+        scale_init: float = 10.0,
+    ):
+        super().__init__()
+        self.proj = nn.Linear(d_hidden, d_emb)
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(scale_init)))
+        self.bias = nn.Parameter(torch.zeros(n_tags_side))
+        emb = torch.zeros(n_tags_side, d_emb)
+        if trainable:
+            self.emb = nn.Parameter(emb)
+        else:
+            self.register_buffer("emb", emb, persistent=True)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        z = F.normalize(self.proj(h), dim=-1)
+        # Normalize in the buffer's (fp32) precision, then match compute dtype.
+        e = F.normalize(self.emb, dim=-1).to(z.dtype)
+        # Keep every term in z.dtype: fp32 scale/bias would promote the output
+        # and break the bf16 index_copy_ scatter under autocast.
+        scale = self.logit_scale.exp().clamp(max=self.SCALE_MAX).to(z.dtype)
+        return scale * (z @ e.T) + self.bias.to(z.dtype)
 
 
 class AnimaTaggerHead(nn.Module):
@@ -276,10 +346,21 @@ class AnimaTaggerHead(nn.Module):
         # Tag sub-heads over the disjoint vocab partition, guarded so a degenerate all-one-side partition still builds.
         n_core = len(cfg.tag_indices_core)
         n_spatial = len(cfg.tag_indices_spatial)
-        self.tag_head_core = nn.Linear(cfg.d_hidden, n_core) if n_core > 0 else None
-        self.tag_head_spatial = (
-            nn.Linear(cfg.d_hidden, n_spatial) if n_spatial > 0 else None
-        )
+
+        def _tag_head(n_side: int) -> Optional[nn.Module]:
+            if n_side <= 0:
+                return None
+            if cfg.tag_head_kind == "label_embed":
+                return LabelEmbedHead(
+                    cfg.d_hidden,
+                    n_side,
+                    cfg.d_label_emb,
+                    trainable=cfg.label_emb_trainable,
+                )
+            return nn.Linear(cfg.d_hidden, n_side)
+
+        self.tag_head_core = _tag_head(n_core)
+        self.tag_head_spatial = _tag_head(n_spatial)
         self.rating_head = nn.Linear(cfg.d_hidden, cfg.n_ratings)
         self.people_head: Optional[nn.Linear] = (
             nn.Linear(cfg.d_hidden, cfg.n_people_counts)
@@ -298,6 +379,42 @@ class AnimaTaggerHead(nn.Module):
             torch.tensor(cfg.tag_indices_spatial, dtype=torch.long),
             persistent=True,
         )
+
+    def load_label_embeddings(self, full_emb: torch.Tensor) -> None:
+        """Copy a full-vocab ``[n_tags, d_label_emb]`` matrix into the sub-heads.
+
+        Rows are in *vocab* order; each side takes its slice via the routing
+        partition so ``emb`` row k scores side-local logit k (the same
+        alignment ``index_copy_`` scatters back from). Works for both frozen
+        (buffer) and trainable (Parameter) heads.
+        """
+        if self.cfg.tag_head_kind != "label_embed":
+            raise ValueError("load_label_embeddings on a linear-head model")
+        if full_emb.shape != (self.cfg.n_tags, self.cfg.d_label_emb):
+            raise ValueError(
+                f"label embeddings shape {tuple(full_emb.shape)} != expected "
+                f"({self.cfg.n_tags}, {self.cfg.d_label_emb})"
+            )
+        full_emb = full_emb.float()
+        if self.tag_head_core is not None:
+            self.tag_head_core.emb.data.copy_(full_emb[self.tag_idx_core.cpu()])
+        if self.tag_head_spatial is not None:
+            self.tag_head_spatial.emb.data.copy_(full_emb[self.tag_idx_spatial.cpu()])
+
+    def init_tag_bias_from_prior(self, tag_prior: torch.Tensor) -> None:
+        """Set label-embed per-tag bias to ``logit(p_train)`` — one epoch of
+        prior-matching for free, so cosine capacity goes to ranking, not base
+        rates. No-op contractually limited to label_embed heads (the linear
+        baseline keeps its default init untouched).
+        """
+        if self.cfg.tag_head_kind != "label_embed":
+            raise ValueError("init_tag_bias_from_prior on a linear-head model")
+        p = tag_prior.float().clamp(1e-4, 1 - 1e-4)
+        logit = torch.log(p / (1 - p))
+        if self.tag_head_core is not None:
+            self.tag_head_core.bias.data.copy_(logit[self.tag_idx_core.cpu()])
+        if self.tag_head_spatial is not None:
+            self.tag_head_spatial.bias.data.copy_(logit[self.tag_idx_spatial.cpu()])
 
     @staticmethod
     def _pool_one(

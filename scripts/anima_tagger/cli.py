@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
             "predict",
             "scan_role_markers",
             "derive_groups",
+            "embed_tags",
         ],
         default="build_vocab",
     )
@@ -464,6 +465,49 @@ def parse_args() -> argparse.Namespace:
         "preserved verbatim and claim their tags first (no regression).",
     )
 
+    # Label-embedding tag head (embed_tags builds the matrix; train consumes it).
+    p.add_argument(
+        "--tag_head_kind",
+        choices=["linear", "label_embed"],
+        default="linear",
+        help="Tag sub-head architecture. 'linear' (default): free per-tag "
+        "weight vectors (the v2 baseline). 'label_embed': cosine against "
+        "per-tag text-description embeddings (run --mode embed_tags first) — "
+        "related tags share geometry, which mainly helps the long tail.",
+    )
+    p.add_argument(
+        "--tag_emb",
+        default=None,
+        help="Label-embedding matrix for --tag_head_kind label_embed "
+        "(default: <out_dir>/tag_text_emb.safetensors).",
+    )
+    p.add_argument(
+        "--label_emb_trainable",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Make the label embeddings a trainable Parameter (description "
+        "init as a prior) instead of a frozen buffer (description as the "
+        "geometry; default). Frozen is the safer long-tail choice.",
+    )
+    p.add_argument(
+        "--tag_desc_csv",
+        default="models/danbooru_tags_classified.en.csv",
+        help="embed_tags: English KB CSV with per-tag wiki descriptions "
+        "(make download-danbooru-tags builds it via build_english_tag_csv).",
+    )
+    p.add_argument(
+        "--embed_model",
+        default="Qwen/Qwen3-Embedding-0.6B",
+        help="embed_tags: HF text-embedding model (last-token pooling).",
+    )
+    p.add_argument("--embed_batch_size", type=int, default=32)
+    p.add_argument(
+        "--embed_max_tokens",
+        type=int,
+        default=256,
+        help="embed_tags: tokenizer truncation length per description.",
+    )
+
     # --out_dir holds the checkpoint + vocab; bulky feature caches are decoupled
     # into --feature_cache_dir under post_image_dataset/.
     p.add_argument(
@@ -548,6 +592,10 @@ def main() -> None:
         from .derive_groups import cmd_derive_groups
 
         cmd_derive_groups(args)
+    elif args.mode == "embed_tags":
+        from .embed_tags import cmd_embed_tags
+
+        cmd_embed_tags(args)
     else:
         raise SystemExit(f"unknown --mode={args.mode!r}")
 

@@ -72,6 +72,33 @@ def _routing_indices_from_vocab(
     return core, spatial
 
 
+def _load_label_embeddings(args, out_dir: Path, n_tags: int):
+    """Load the full-vocab label-embedding matrix for the label_embed head.
+
+    Returns ``None`` for the linear head. Built by ``--mode embed_tags``;
+    row count must match the vocab exactly (rebuild after any vocab change).
+    """
+    if getattr(args, "tag_head_kind", "linear") != "label_embed":
+        return None
+    from safetensors.torch import load_file as st_load
+
+    emb_path = (
+        Path(args.tag_emb) if args.tag_emb else out_dir / "tag_text_emb.safetensors"
+    )
+    if not emb_path.exists():
+        raise SystemExit(
+            f"missing {emb_path} — run `--mode embed_tags` first (builds the "
+            f"per-tag description embeddings the label_embed head scores against)."
+        )
+    emb = st_load(str(emb_path))["emb"].float()
+    if emb.shape[0] != n_tags:
+        raise SystemExit(
+            f"{emb_path} has {emb.shape[0]} rows but the vocab has {n_tags} "
+            f"tags — rebuild with `--mode embed_tags` against this vocab."
+        )
+    return emb
+
+
 def _make_cfg_from_args(
     args,
     d_in,
@@ -81,6 +108,7 @@ def _make_cfg_from_args(
     *,
     d_in_aux: int,
     routing: Tuple[List[int], List[int]],
+    d_label_emb: int = 0,
 ):
     from library.captioning.anima_tagger_model import AnimaTaggerConfig
 
@@ -105,6 +133,9 @@ def _make_cfg_from_args(
         pool_use_mean_aux=args.pool_use_mean_aux,
         tag_indices_core=tag_core,
         tag_indices_spatial=tag_spatial,
+        tag_head_kind=getattr(args, "tag_head_kind", "linear"),
+        d_label_emb=d_label_emb,
+        label_emb_trainable=bool(getattr(args, "label_emb_trainable", False)),
     )
 
 
@@ -129,6 +160,8 @@ def _save_cfg_dict(args, cfg, d_in, best_f1):
         "pool_kind_aux": args.pool_kind_aux,
         "n_tag_indices_core": len(cfg.tag_indices_core),
         "n_tag_indices_spatial": len(cfg.tag_indices_spatial),
+        "tag_head_kind": cfg.tag_head_kind,
+        "tag_emb": getattr(args, "tag_emb", None),
     }
 
 
@@ -357,6 +390,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         len(routing[0]),
         len(routing[1]),
     )
+    label_emb = _load_label_embeddings(args, out_dir, train_ds.n_tags)
     cfg = _make_cfg_from_args(
         args,
         d_in=train_ds.d_in,
@@ -365,8 +399,17 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         n_people_counts=train_ds.n_people_counts,
         d_in_aux=d_in_aux,
         routing=routing,
+        d_label_emb=int(label_emb.shape[1]) if label_emb is not None else 0,
     )
     model = AnimaTaggerHead(cfg).to(device)
+    if label_emb is not None:
+        model.load_label_embeddings(label_emb)
+        logger.info(
+            "label-embed tag head: d_emb=%d trainable=%s (per-tag bias "
+            "prior-initialized from train frequencies below)",
+            cfg.d_label_emb,
+            cfg.label_emb_trainable,
+        )
     logger.info(
         "head: core pool_kind=%s n_q=%d n_h=%d use_cls=%s use_mean=%s trunk_in=%d  "
         "spatial pool_kind=%s n_q=%d n_h=%d use_cls=%s use_mean=%s trunk_in=%d  d_hidden=%d",
@@ -388,6 +431,8 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     train_mh_full = train_ds.multi_hot.to(device)
     train_rate_full = train_ds.rating_idx.to(device)
     train_people_full = train_ds.people_idx.to(device)
+    if label_emb is not None:
+        model.init_tag_bias_from_prior(train_mh_full.mean(dim=0).cpu())
     router = GroupRouter.from_vocab(vocab_dict, train_mh_full, device=device)
     rating_w = rating_class_weights(train_rate_full, train_ds.n_ratings).to(device)
     ce = torch.nn.CrossEntropyLoss(weight=rating_w)
