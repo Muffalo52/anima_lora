@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 import threading
 from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QElapsedTimer,
-    QProcess,
-    QProcessEnvironment,
     Qt,
     QThreadPool,
     QTimer,
@@ -55,7 +51,6 @@ from PySide6.QtWidgets import (
 )
 
 from gui import (
-    DEFAULT_AUTOTAG_CONFIDENCE,
     DEFAULT_GROUP_CELL_MATCH_MIN,
     DEFAULT_GROUP_MATCH_FRAC_MIN,
     ROOT,
@@ -75,6 +70,12 @@ from gui.config_io import default_resized_dir
 from gui._job_mixin import DaemonJobMixin
 from gui.i18n import current_language, t
 from gui.progress import TqdmProgressTracker, make_progress_bar
+from gui.tabs._autotag import (
+    STATUS_LOADING,
+    STATUS_READY,
+    STATUS_RUNNING,
+    _AutotagWorker,
+)
 from gui.tabs._caption_editor import (
     BoxedCaptionEdit,
     CaptionVersionsDialog,
@@ -117,17 +118,6 @@ from library.preprocess.resize_preview import (
     compute_resize_preview,
 )
 
-# Stdio protocol sentinels of the resident autotag worker (kept in sync with
-# ``scripts/anima_tagger/autotag_server.py``). Hardcoded rather than imported
-# because that module pulls in torch, which the GUI must stay free of.
-_AUTOTAG_READY = "ANIMA_AUTOTAG_READY"
-_AUTOTAG_RESULT_PREFIX = "ANIMA_AUTOTAG_RESULT\t"
-_AUTOTAG_ERROR_PREFIX = "ANIMA_AUTOTAG_ERROR\t"
-
-# Free the resident tagger (VRAM) after this many ms with no autotag request.
-_AUTOTAG_IDLE_MS = 10 * 60 * 1000
-# Poll cadence (ms) for "did some other GPU job start?" while resident.
-_AUTOTAG_GPU_WATCH_MS = 700
 # Debounce (ms) before loading the selected image. Holding an arrow key
 # auto-repeats currentItemChanged many times/sec; each _show() does a full-res
 # QPixmap decode + caption/meta refresh, so loading every intermediate leaf
@@ -169,16 +159,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._suspend_dirty = False  # while we set text programmatically
         # Resident autotag worker: a torch QProcess holding the tagger model so
         # consecutive clicks skip the reload; torn down before any other GPU
-        # work frees the card. See _run_autotag / _kill_tagger_worker.
-        self._tagger_proc: QProcess | None = None
-        self._tagger_ready = False
-        self._tagger_buf = ""  # partial-line buffer for the worker's stdout
-        self._autotag_inflight_image: Path | None = None  # image awaiting a result
-        self._autotag_idle = QElapsedTimer()
-        # Polls "did another GPU job start?" only while the worker is resident.
-        self._gpu_watch_timer = QTimer(self)
-        self._gpu_watch_timer.setInterval(_AUTOTAG_GPU_WATCH_MS)
-        self._gpu_watch_timer.timeout.connect(self._autotag_gpu_watch_tick)
+        # work frees the card. Signals wired to UI once autotag_btn/status exist
+        # (see below). See gui/tabs/_autotag.py.
+        self._tagger = _AutotagWorker(self)
         # Coalesces rapid tree selection (arrow-key auto-repeat) into a single
         # image load once navigation settles. See _NAV_DEBOUNCE_MS.
         self._pending_show_idx: int | None = None
@@ -205,7 +188,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         # Make sure the resident worker (and its VRAM) dies with the app.
         _app = QApplication.instance()
         if _app is not None:
-            _app.aboutToQuit.connect(self._kill_tagger_worker)
+            _app.aboutToQuit.connect(self._tagger.kill)
         self._search_text: str = ""
         self._sort_desc: bool = False
         self._group_sort_mode: str = "name"
@@ -392,6 +375,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.autotag_btn.setToolTip(t("caption_autotag_tooltip"))
         apply_variant(self.autotag_btn, "info")
         self.autotag_btn.clicked.connect(self._run_autotag)
+        self._tagger.status.connect(self._on_autotag_status)
+        self._tagger.busy.connect(self.autotag_btn.setDisabled)
+        self._tagger.result.connect(self._on_autotag_result)
+        self._tagger.error.connect(self._on_autotag_error)
         self.caption_correct_btn = self._make_button_with_menu(
             t("caption_correct"),
             t("caption_correct_tooltip"),
@@ -577,7 +564,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             return
         # Grouping is GPU work — free the resident tagger first so they don't
         # fight over VRAM.
-        self._kill_tagger_worker()
+        self._tagger.kill()
         # Busy UI before the submit so a cold-start daemon spin-up feels responsive.
         self.group_btn.setEnabled(False)
         self._progress_tracker.reset()
@@ -643,7 +630,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         stays alive so later clicks just stream an image path to it. The
         predicted tags are appended into the editor when the result comes back —
         the user reviews, then Save writes the ``.txt`` (creating it if absent).
-        The worker is freed before any other GPU work (see _kill_tagger_worker).
+        The worker itself lives in ``gui.tabs._autotag._AutotagWorker``; this tab
+        only feeds it an image and reacts to its status/busy/result/error signals.
         """
         idx = self._current_index()
         if not 0 <= idx < len(self._images):
@@ -653,90 +641,26 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         if gui_daemon.active_job_id():
             QMessageBox.information(self, "", t("caption_autotag_busy"))
             return
-        if self._autotag_inflight_image is not None:
-            return  # a request is already in flight; ignore the double-click
-        image_path = self._images[idx]
-        self._autotag_inflight_image = image_path
-        self._autotag_idle.restart()
-        self.autotag_btn.setEnabled(False)
-        if self._tagger_proc is None:
-            self._spawn_tagger_worker()
-            self._set_autotag_status(t("caption_autotag_loading"))
-        elif self._tagger_ready:
-            self._set_autotag_status(t("caption_autotag_running"))
-            self._send_autotag_request(image_path)
-        # else: worker still loading — _on_tagger_stdout sends it on READY.
+        self._tagger.request(self._images[idx])
 
-    def _spawn_tagger_worker(self) -> None:
-        """Launch the resident worker subprocess (torch lives here, not the GUI)."""
-        proc = QProcess(self)
-        proc.setProgram(sys.executable)
-        proc.setArguments(["-m", "scripts.anima_tagger.autotag_server"])
-        proc.setWorkingDirectory(str(ROOT))
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("PYTHONUNBUFFERED", "1")  # stream sentinel lines live
-        proc.setProcessEnvironment(env)
-        proc.readyReadStandardOutput.connect(self._on_tagger_stdout)
-        proc.finished.connect(self._on_tagger_finished)
-        proc.errorOccurred.connect(lambda _e: self._on_tagger_finished(-1, None))
-        self._tagger_proc = proc
-        self._tagger_ready = False
-        self._tagger_buf = ""
-        self.autotag_status.setVisible(True)
-        self._gpu_watch_timer.start()
-        proc.start()
+    def _on_autotag_status(self, phase: str) -> None:
+        status_keys = {
+            STATUS_LOADING: "caption_autotag_loading",
+            STATUS_RUNNING: "caption_autotag_running",
+            STATUS_READY: "caption_autotag_ready",
+        }
+        text = t(status_keys[phase]) if phase else ""
+        self.autotag_status.setText(text)
+        self.autotag_status.setVisible(bool(text))
 
-    def _send_autotag_request(self, image_path: Path) -> None:
-        if self._tagger_proc is None:
-            return
-        # Read the confidence floor fresh each request so a settings change
-        # applies without respawning the resident worker.
-        try:
-            conf = float(get_setting("autotag_confidence", DEFAULT_AUTOTAG_CONFIDENCE))
-        except (TypeError, ValueError):
-            conf = DEFAULT_AUTOTAG_CONFIDENCE
-        conf = max(0.0, min(1.0, conf))
-        self._tagger_proc.write(f"{conf}\t{image_path}\n".encode("utf-8"))
-
-    def _on_tagger_stdout(self) -> None:
-        if self._tagger_proc is None:
-            return
-        self._tagger_buf += bytes(self._tagger_proc.readAllStandardOutput()).decode(
-            "utf-8", "replace"
-        )
-        *lines, self._tagger_buf = self._tagger_buf.split("\n")
-        for line in lines:
-            line = line.rstrip("\r")
-            if not line:
-                continue
-            if line == _AUTOTAG_READY:
-                self._tagger_ready = True
-                self._set_autotag_status(t("caption_autotag_ready"))
-                # Send the click that spawned the worker, now that it's loaded.
-                if self._autotag_inflight_image is not None:
-                    self._set_autotag_status(t("caption_autotag_running"))
-                    self._send_autotag_request(self._autotag_inflight_image)
-            elif line.startswith(_AUTOTAG_RESULT_PREFIX):
-                self._apply_autotag_result(line[len(_AUTOTAG_RESULT_PREFIX) :])
-            elif line.startswith(_AUTOTAG_ERROR_PREFIX):
-                self._finish_autotag_request()
-                QMessageBox.warning(
-                    self,
-                    t("error"),
-                    t("caption_autotag_error", err=line[len(_AUTOTAG_ERROR_PREFIX) :]),
-                )
-
-    def _apply_autotag_result(self, caption: str) -> None:
+    def _on_autotag_result(self, image: Path, caption: str) -> None:
         """Append the predicted caption into the editor (dirty → Save lights up)."""
-        image = self._autotag_inflight_image
-        self._finish_autotag_request()
-        caption = caption.strip()
         if not caption:
             QMessageBox.information(self, "", t("caption_autotag_empty"))
             return
         # The user may have navigated away while the worker ran — only apply the
         # result if it still belongs to the caption currently on screen.
-        if image is None or self._current_caption_path != image.with_suffix(".txt"):
+        if self._current_caption_path != image.with_suffix(".txt"):
             return
         existing = self.cap.toPlainText().strip()
         if existing:
@@ -748,6 +672,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._set_caption_text(combined)
         self._refresh_buttons()
         self._refresh_inline_diff()
+
+    def _on_autotag_error(self, err: str) -> None:
+        QMessageBox.warning(self, t("error"), t("caption_autotag_error", err=err))
 
     def _caption_correction_options(self) -> CaptionCorrectionOptions:
         return CaptionCorrectionOptions(
@@ -988,72 +915,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         else:
             QMessageBox.information(
                 self, "", t("caption_correct_visible_done", n=changed)
-            )
-
-    def _finish_autotag_request(self) -> None:
-        """Clear the in-flight state and re-arm the button after a reply."""
-        self._autotag_inflight_image = None
-        self.autotag_btn.setEnabled(True)
-        self._autotag_idle.restart()
-        if self._tagger_ready:
-            self._set_autotag_status(t("caption_autotag_ready"))
-
-    def _set_autotag_status(self, text: str) -> None:
-        self.autotag_status.setText(text)
-        self.autotag_status.setVisible(bool(text))
-
-    def _autotag_gpu_watch_tick(self) -> None:
-        """While the worker is resident: free it on any other GPU job or idle."""
-        if self._tagger_proc is None:
-            self._gpu_watch_timer.stop()
-            return
-        if gui_daemon.active_job_id():  # train/preprocess/group grabbed the card
-            self._kill_tagger_worker()
-            return
-        if (
-            self._autotag_inflight_image is None
-            and self._autotag_idle.isValid()
-            and self._autotag_idle.hasExpired(_AUTOTAG_IDLE_MS)
-        ):
-            self._kill_tagger_worker()
-
-    def _kill_tagger_worker(self) -> None:
-        """Tear down the resident worker and free its VRAM. Idempotent."""
-        self._gpu_watch_timer.stop()
-        proc = self._tagger_proc
-        self._tagger_proc = None
-        self._tagger_ready = False
-        self._tagger_buf = ""
-        self._autotag_inflight_image = None
-        self.autotag_btn.setEnabled(True)
-        self._set_autotag_status("")
-        if proc is None:
-            return
-        try:
-            proc.readyReadStandardOutput.disconnect()
-            proc.finished.disconnect()
-            proc.errorOccurred.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        if proc.state() != QProcess.NotRunning:
-            proc.closeWriteChannel()  # EOF on stdin → worker exits cleanly
-            proc.kill()
-            proc.waitForFinished(2000)
-        proc.deleteLater()
-
-    def _on_tagger_finished(self, _code, _status) -> None:
-        """Worker exited (crash, kill, or EOF) — reset to the no-worker state."""
-        was_inflight = self._autotag_inflight_image is not None
-        self._gpu_watch_timer.stop()
-        self._tagger_proc = None
-        self._tagger_ready = False
-        self._tagger_buf = ""
-        self._autotag_inflight_image = None
-        self.autotag_btn.setEnabled(True)
-        self._set_autotag_status("")
-        if was_inflight:
-            QMessageBox.warning(
-                self, t("error"), t("caption_autotag_error", err="exit")
             )
 
     def _load_dir(self, name: str, *, preserve_selection: bool = False):

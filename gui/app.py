@@ -8,52 +8,30 @@ from pathlib import Path
 
 import toml
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QDoubleSpinBox,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
-    QSpinBox,
     QStackedWidget,
     QTabWidget,
-    QTextBrowser,
     QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
-from gui import (
-    DEFAULT_AUTOTAG_CONFIDENCE,
-    DEFAULT_GROUP_CELL_MATCH_MIN,
-    DEFAULT_GROUP_MATCH_FRAC_MIN,
-    get_setting,
-    set_setting,
-)
+from gui import get_setting
 from gui import daemon as gui_daemon
 from gui import theme as gui_theme
-from gui._paths import (
-    DEFAULT_CAPTION_INSERT_NO_ARTIST,
-    DEFAULT_CAPTION_VALIDATE_ARTIST_TAGS,
-)
+from gui.dialogs import GuidebookDialog, _guidebook_path
 from gui.gpu_status import GpuStatusBar
 from gui.widgets import action_button, wrap_tooltip
-from gui.i18n import (
-    available_languages,
-    current_language,
-    load_language,
-    save_language,
-    t,
-)
+from gui.i18n import load_language, t
+from gui.settings_dialog import SettingsDialog
 from gui.tabs.easycontrol_tab import EasyControlTab
 from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
@@ -70,22 +48,7 @@ from gui.system_dialog import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_GUIDELINES = _REPO_ROOT / "docs" / "guidelines"
-_GUIDEBOOK_BY_LANG: dict[str, Path] = {
-    "en": _GUIDELINES / "guidebook.md",
-    "ko": _GUIDELINES / "가이드북.md",
-    "cn": _GUIDELINES / "指南书.md",
-    "ja": _GUIDELINES / "ガイドブック.md",
-}
-_GUIDEBOOK_FALLBACK = _GUIDEBOOK_BY_LANG["en"]
 ICON_PATH = Path(__file__).resolve().parent / "icon.ico"
-
-
-def _guidebook_path() -> Path:
-    return _GUIDEBOOK_BY_LANG.get(current_language(), _GUIDEBOOK_FALLBACK)
-
-
-LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文", "ja": "日本語"}
 
 # Keeps the live MainWindow alive across the in-place rebuild that applies a
 # language change (main() seeds it; MainWindow._reload_ui swaps it).
@@ -98,387 +61,6 @@ def _dark(app: QApplication):
     Thin wrapper kept for call-site stability; the palette + stylesheet now live
     in ``gui.theme`` so individual widgets can share the same tokens."""
     gui_theme.apply_theme(app)
-
-
-class GuidebookDialog(QDialog):
-    """In-app markdown viewer for the guidebook."""
-
-    def __init__(self, md_path: Path, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(t("guidebook"))
-        self.resize(900, 720)
-        self._md_path = md_path
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
-
-        self.browser = QTextBrowser()
-        self.browser.setOpenExternalLinks(True)
-        self.browser.setSearchPaths([str(md_path.parent)])
-        self.browser.document().setBaseUrl(
-            QUrl.fromLocalFile(str(md_path.parent) + "/")
-        )
-        # Default anchor color is pure blue — illegible on the dark bg.
-        self.browser.document().setDefaultStyleSheet(
-            "a { color: #ffb86b; text-decoration: underline; }"
-            "a:visited { color: #e6944e; }"
-            "code { background:#2a2a2a; padding:1px 4px; border-radius:3px; }"
-            "pre { background:#2a2a2a; padding:8px; border-radius:4px; }"
-        )
-        self.browser.setStyleSheet(
-            "QTextBrowser { background:#1e1e1e; color:#dcdcdc; "
-            "border:1px solid #444; padding:12px; }"
-        )
-        try:
-            text = md_path.read_text(encoding="utf-8")
-        except OSError as e:
-            text = f"# Error\n\nCould not read `{md_path}`:\n\n`{e}`"
-        self.browser.setMarkdown(text)
-        lay.addWidget(self.browser)
-
-        btn_bar = QHBoxLayout()
-        btn_bar.addStretch()
-        open_ext = QPushButton(t("guidebook_open_external"))
-        open_ext.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._md_path)))
-        )
-        close = QPushButton(t("guidebook_close"))
-        close.clicked.connect(self.close)
-        btn_bar.addWidget(open_ext)
-        btn_bar.addWidget(close)
-        lay.addLayout(btn_bar)
-
-
-def _mcp_paths() -> tuple[Path, Path]:
-    """(venv python, MCP bridge script) for THIS checkout — real absolute
-    paths, not the <repo> placeholder the docs use (anima_daemon/README.md)."""
-    venv_python = (
-        _REPO_ROOT
-        / ".venv"
-        / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-    )
-    return venv_python, _REPO_ROOT / "anima_daemon" / "mcp.py"
-
-
-def _mcp_add_command() -> str:
-    """The `claude mcp add` one-liner for Claude Code."""
-
-    def q(p: Path) -> str:
-        return f'"{p}"' if " " in str(p) else str(p)
-
-    venv_python, bridge = _mcp_paths()
-    return f"claude mcp add anima-daemon -- {q(venv_python)} {q(bridge)}"
-
-
-def _mcp_json_config() -> str:
-    """The client-agnostic mcpServers JSON block (Claude Desktop, OpenClaw, …).
-    json.dumps so Windows backslashes come out escaped and paste-able."""
-    import json
-
-    venv_python, bridge = _mcp_paths()
-    cfg = {
-        "mcpServers": {
-            "anima-daemon": {"command": str(venv_python), "args": [str(bridge)]}
-        }
-    }
-    return json.dumps(cfg, indent=2)
-
-
-class SettingsDialog(QDialog):
-    """App settings: language + MCP server registration for agent clients."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(t("settings_title"))
-        self.setMinimumWidth(560)
-        # Set when the user opts into an immediate reload; MainWindow checks it after exec().
-        self.reload_requested = False
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(10)
-
-        lang_row = QHBoxLayout()
-        lang_row.addWidget(QLabel(t("language")))
-        self.lang_combo = QComboBox()
-        for code in available_languages():
-            self.lang_combo.addItem(LANG_NAMES.get(code, code), code)
-        self.lang_combo.setCurrentIndex(available_languages().index(current_language()))
-        self.lang_combo.currentIndexChanged.connect(self._change_lang)
-        self.lang_combo.setFixedWidth(120)
-        lang_row.addWidget(self.lang_combo)
-        lang_row.addStretch()
-        lay.addLayout(lang_row)
-
-        prefs_group = QGroupBox(t("settings_prefs_header"))
-        prefs_lay = QVBoxLayout(prefs_group)
-
-        # Autotagger confidence floor (applied on top of the model's per-tag F1
-        # thresholds; see AnimaTagger.predict_caption min_confidence).
-        conf_row = QHBoxLayout()
-        conf_label = QLabel(t("settings_autotag_confidence"))
-        conf_label.setToolTip(t("settings_autotag_confidence_tooltip"))
-        conf_row.addWidget(conf_label)
-        self.conf_spin = QDoubleSpinBox()
-        self.conf_spin.setRange(0.0, 1.0)
-        self.conf_spin.setSingleStep(0.05)
-        self.conf_spin.setDecimals(2)
-        self.conf_spin.setToolTip(t("settings_autotag_confidence_tooltip"))
-        self.conf_spin.setValue(
-            float(get_setting("autotag_confidence", DEFAULT_AUTOTAG_CONFIDENCE))
-        )
-        self.conf_spin.valueChanged.connect(
-            lambda v: set_setting("autotag_confidence", round(float(v), 2))
-        )
-        self.conf_spin.setFixedWidth(125)
-        conf_row.addWidget(self.conf_spin)
-        conf_row.addStretch()
-        prefs_lay.addLayout(conf_row)
-
-        self.caption_insert_no_artist = QCheckBox(
-            t("settings_caption_insert_no_artist")
-        )
-        self.caption_insert_no_artist.setToolTip(
-            t("settings_caption_insert_no_artist_tooltip")
-        )
-        self.caption_insert_no_artist.setChecked(
-            bool(
-                get_setting(
-                    "caption_insert_no_artist", DEFAULT_CAPTION_INSERT_NO_ARTIST
-                )
-            )
-        )
-        self.caption_insert_no_artist.toggled.connect(
-            lambda checked: set_setting("caption_insert_no_artist", bool(checked))
-        )
-        prefs_lay.addWidget(self.caption_insert_no_artist)
-
-        self.caption_validate_artist_tags = QCheckBox(
-            t("settings_caption_validate_artist_tags")
-        )
-        self.caption_validate_artist_tags.setToolTip(
-            t("settings_caption_validate_artist_tags_tooltip")
-        )
-        self.caption_validate_artist_tags.setChecked(
-            bool(
-                get_setting(
-                    "caption_validate_artist_tags",
-                    DEFAULT_CAPTION_VALIDATE_ARTIST_TAGS,
-                )
-            )
-        )
-        self.caption_validate_artist_tags.toggled.connect(
-            lambda checked: set_setting("caption_validate_artist_tags", bool(checked))
-        )
-        prefs_lay.addWidget(self.caption_validate_artist_tags)
-
-        # Dataset-tab grouping (`curate-group`) tightness. Higher = tighter,
-        # cleaner groups. Read at grouping time by ImageViewerTab._rebuild_groups
-        # and passed as --match-frac-min / --cell-match-min.
-        frac_row = QHBoxLayout()
-        frac_label = QLabel(t("settings_group_match_frac"))
-        frac_label.setToolTip(t("settings_group_match_frac_tooltip"))
-        frac_row.addWidget(frac_label)
-        self.group_frac_spin = QDoubleSpinBox()
-        self.group_frac_spin.setRange(0.0, 1.0)
-        self.group_frac_spin.setSingleStep(0.05)
-        self.group_frac_spin.setDecimals(2)
-        self.group_frac_spin.setToolTip(t("settings_group_match_frac_tooltip"))
-        self.group_frac_spin.setValue(
-            float(get_setting("group_match_frac_min", DEFAULT_GROUP_MATCH_FRAC_MIN))
-        )
-        self.group_frac_spin.valueChanged.connect(
-            lambda v: set_setting("group_match_frac_min", round(float(v), 2))
-        )
-        self.group_frac_spin.setFixedWidth(125)
-        frac_row.addWidget(self.group_frac_spin)
-        frac_row.addStretch()
-        prefs_lay.addLayout(frac_row)
-
-        cell_row = QHBoxLayout()
-        cell_label = QLabel(t("settings_group_cell_match"))
-        cell_label.setToolTip(t("settings_group_cell_match_tooltip"))
-        cell_row.addWidget(cell_label)
-        self.group_cell_spin = QDoubleSpinBox()
-        self.group_cell_spin.setRange(0.0, 1.0)
-        self.group_cell_spin.setSingleStep(0.01)
-        self.group_cell_spin.setDecimals(2)
-        self.group_cell_spin.setToolTip(t("settings_group_cell_match_tooltip"))
-        self.group_cell_spin.setValue(
-            float(get_setting("group_cell_match_min", DEFAULT_GROUP_CELL_MATCH_MIN))
-        )
-        self.group_cell_spin.valueChanged.connect(
-            lambda v: set_setting("group_cell_match_min", round(float(v), 2))
-        )
-        self.group_cell_spin.setFixedWidth(125)
-        cell_row.addWidget(self.group_cell_spin)
-        cell_row.addStretch()
-        prefs_lay.addLayout(cell_row)
-
-        # Closing the dialog rebuilds the window so each tab's per-widget tokens (gui.theme.tok) repaint.
-        theme_row = QHBoxLayout()
-        theme_label = QLabel(t("settings_theme"))
-        theme_label.setToolTip(t("settings_theme_tooltip"))
-        theme_row.addWidget(theme_label)
-        self.theme_combo = QComboBox()
-        for code in gui_theme.THEME_ORDER:
-            self.theme_combo.addItem(t(gui_theme.THEME_LABEL_KEYS[code]), code)
-        cur = gui_theme.current_theme_name()
-        self.theme_combo.setCurrentIndex(gui_theme.THEME_ORDER.index(cur))
-        self.theme_combo.setToolTip(t("settings_theme_tooltip"))
-        self.theme_combo.currentIndexChanged.connect(self._change_theme)
-        self.theme_combo.setFixedWidth(140)
-        theme_row.addWidget(self.theme_combo)
-        theme_row.addStretch()
-        prefs_lay.addLayout(theme_row)
-
-        # Closing the dialog rebuilds the window so widgets sized to the old metrics relayout cleanly.
-        font_row = QHBoxLayout()
-        font_label = QLabel(t("settings_font_size"))
-        font_label.setToolTip(t("settings_font_size_tooltip"))
-        font_row.addWidget(font_label)
-        self.font_spin = QSpinBox()
-        self.font_spin.setRange(gui_theme.FONT_SIZE_MIN, gui_theme.FONT_SIZE_MAX)
-        self.font_spin.setSuffix(" pt")
-        self.font_spin.setToolTip(t("settings_font_size_tooltip"))
-        self.font_spin.setValue(gui_theme.current_font_size())
-        self.font_spin.valueChanged.connect(self._change_font_size)
-        self.font_spin.setFixedWidth(125)
-        font_row.addWidget(self.font_spin)
-        font_row.addStretch()
-        prefs_lay.addLayout(font_row)
-
-        # Debug mode: turns on DEBUG-level daemon logging (picked up the next time
-        # the daemon starts) so a bug report can carry the launch/queue decisions.
-        # Pairs with the "Copy debug report" button below.
-        self.debug_check = QCheckBox(t("settings_debug_mode"))
-        self.debug_check.setToolTip(t("settings_debug_mode_tooltip"))
-        self.debug_check.setChecked(bool(get_setting("debug_mode", False)))
-        self.debug_check.toggled.connect(self._toggle_debug)
-        prefs_lay.addWidget(self.debug_check)
-
-        dbg_desc = QLabel(t("settings_debug_report_desc"))
-        dbg_desc.setWordWrap(True)
-        prefs_lay.addWidget(dbg_desc)
-        dbg_row = QHBoxLayout()
-        dbg_row.addStretch()
-        self.debug_report_btn = QPushButton(t("settings_debug_copy_report"))
-        self.debug_report_btn.clicked.connect(self._copy_debug_report)
-        dbg_row.addWidget(self.debug_report_btn)
-        prefs_lay.addLayout(dbg_row)
-
-        lay.addWidget(prefs_group)
-
-        mcp_group = QGroupBox(t("settings_mcp_header"))
-        mcp_lay = QVBoxLayout(mcp_group)
-        self._add_command_block(
-            mcp_lay, t("settings_mcp_desc"), _mcp_add_command(), height=64
-        )
-        self._add_command_block(
-            mcp_lay, t("settings_mcp_desc_json"), _mcp_json_config(), height=140
-        )
-        lay.addWidget(mcp_group)
-
-        btn_bar = QHBoxLayout()
-        btn_bar.addStretch()
-        close = QPushButton(t("settings_close"))
-        close.clicked.connect(self.close)
-        btn_bar.addWidget(close)
-        lay.addLayout(btn_bar)
-
-    def _add_command_block(
-        self, layout: QVBoxLayout, desc: str, text: str, height: int
-    ) -> None:
-        """A word-wrapped description, a read-only monospace box, and a copy
-        button that flashes confirmation."""
-        label = QLabel(desc)
-        label.setWordWrap(True)
-        layout.addWidget(label)
-
-        edit = QPlainTextEdit(text)
-        edit.setReadOnly(True)
-        mono = QFont("Consolas", 9)
-        mono.setStyleHint(QFont.Monospace)
-        edit.setFont(mono)
-        edit.setFixedHeight(height)
-        layout.addWidget(edit)
-
-        copy_row = QHBoxLayout()
-        copy_row.addStretch()
-        btn = QPushButton(t("settings_mcp_copy"))
-        btn.clicked.connect(lambda: self._copy(text, btn))
-        copy_row.addWidget(btn)
-        layout.addLayout(copy_row)
-
-    def _copy(self, text: str, btn: QPushButton) -> None:
-        QApplication.clipboard().setText(text)
-        btn.setText(t("settings_mcp_copied"))
-        QTimer.singleShot(1500, lambda: btn.setText(t("settings_mcp_copy")))
-
-    def _toggle_debug(self, checked: bool) -> None:
-        """Persist the flag and reflect it into the live process env. A daemon
-        already running keeps its old log level until it restarts (the report
-        still works); a newly-spawned one inherits ANIMA_DEBUG from here."""
-        set_setting("debug_mode", bool(checked))
-        if checked:
-            os.environ["ANIMA_DEBUG"] = "1"
-        else:
-            os.environ.pop("ANIMA_DEBUG", None)
-
-    def _copy_debug_report(self) -> None:
-        from gui.debug_report import build_debug_report
-
-        try:
-            report = build_debug_report()
-        except Exception as exc:  # noqa: BLE001 — diagnostics must never crash the dialog
-            report = f"failed to build debug report: {exc}"
-        QApplication.clipboard().setText(report)
-        self.debug_report_btn.setText(t("settings_mcp_copied"))
-        QTimer.singleShot(
-            1500,
-            lambda: self.debug_report_btn.setText(t("settings_debug_copy_report")),
-        )
-
-    def _change_lang(self, idx: int):
-        lang = self.lang_combo.itemData(idx)
-        # save_language also flips the in-process language, so the prompt below already renders in it.
-        save_language(lang)
-        choice = QMessageBox.question(
-            self,
-            t("settings_lang_apply_title"),
-            t("settings_lang_apply_question"),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if choice == QMessageBox.Yes:
-            self.reload_requested = True
-            self.accept()
-
-    def _change_theme(self, idx: int) -> None:
-        """Persist + apply the chosen theme live, then request a window rebuild.
-
-        ``apply_theme`` restyles app-level chrome immediately; the rebuild on
-        close makes per-widget ``tok()`` lookups (log boxes, previews, …) repaint
-        too. Unlike a language change there's no confirm prompt — it's cheap and
-        reversible."""
-        name = self.theme_combo.itemData(idx)
-        gui_theme.set_theme(name)
-        app = QApplication.instance()
-        if app is not None:
-            gui_theme.apply_theme(app, name)
-        self.reload_requested = True
-
-    def _change_font_size(self, size: int) -> None:
-        """Persist + apply the chosen app font size live, then request a rebuild.
-
-        ``apply_theme`` re-reads the size into ``app.setFont``; the rebuild on
-        close lets widgets that cached the old font metrics relayout. Like the
-        theme, it's cheap and reversible, so there's no confirm prompt."""
-        gui_theme.set_font_size(size)
-        app = QApplication.instance()
-        if app is not None:
-            gui_theme.apply_theme(app)
-        self.reload_requested = True
 
 
 class MainWindow(QMainWindow):
@@ -792,50 +374,10 @@ def _ensure_source_image_dir() -> None:
         print(f"warn: could not create {src_path}: {e}", file=sys.stderr)
 
 
-def _prefer_cleartype_font_engine() -> None:
-    """Use Qt's GDI font engine on Windows — but only at integer DPI scaling.
-
-    Qt 6 defaults to the DirectWrite font engine on Windows, which rasterizes
-    small UI text with *grayscale* antialiasing — it reads soft/blurry next to
-    native apps, and the effect is worse on lightly-hinted modern faces like the
-    bundled Pretendard. The GDI engine uses ClearType subpixel rendering (what
-    native Windows controls use), which snaps small text crisp.
-
-    But GDI ClearType is tied to the *physical* pixel grid: at the fractional
-    display scaling most laptops ship (125% / 150%) it renders fringed and can
-    come out undersized, because the GDI engine honors Qt's device-pixel-ratio
-    less cleanly than DirectWrite. So we only force GDI when the display is at an
-    integer scale (100% / 200%, where ClearType lines up) and let DirectWrite
-    handle fractional-scaled screens.
-
-    Reading the real scaling requires the process to be DPI-aware first — an
-    unaware process always reports 96 DPI (100%). We set per-monitor-v2 awareness
-    up front (the same context Qt 6 sets itself, so this only moves the call
-    earlier) and query ``GetDpiForSystem``. The platform option must be set
-    *before* ``QApplication`` is constructed. Skipped if the user already pinned
-    ``QT_QPA_PLATFORM`` (explicit choice, or offscreen in tests), and falls back
-    to DirectWrite on older Windows where the DPI APIs are missing."""
-    if sys.platform != "win32" or "QT_QPA_PLATFORM" in os.environ:
-        return
-    try:
-        import ctypes
-
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4. Harmless if it fails (awareness already set).
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
-        dpi = ctypes.windll.user32.GetDpiForSystem()  # 96 == 100%
-    except (OSError, AttributeError):
-        return  # pre-1607 Windows / no DPI API — leave Qt on DirectWrite
-    if not dpi:
-        return
-    scale = dpi / 96.0
-    if abs(scale - round(scale)) < 0.01:  # integer scaling only
-        os.environ["QT_QPA_PLATFORM"] = "windows:fontengine=gdi"
-
-
 def main():
     load_language()
     _ensure_source_image_dir()
-    _prefer_cleartype_font_engine()
+    gui_theme._prefer_cleartype_font_engine()
     # Pass fractional display scaling (125%/150%) through instead of snapping to 100%/200%
     # (tiny text on HiDPI Windows). Must be set before QApplication is constructed.
     QApplication.setHighDpiScaleFactorRoundingPolicy(

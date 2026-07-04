@@ -134,8 +134,7 @@ class EasyControlTab(ConfigTab):
         self.train_btn.clicked.connect(self._ec_start_train)
 
     def _open_adapter_guide(self) -> None:
-        # Lazy import: gui.app imports this tab, so a top-level import would be circular.
-        from gui.app import GuidebookDialog
+        from gui.dialogs import GuidebookDialog
         from gui.i18n import current_language
 
         # Localized guide: ADAPTER_GUIDE.<lang>.md, English (ADAPTER_GUIDE.md) fallback.

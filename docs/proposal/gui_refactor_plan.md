@@ -1,6 +1,6 @@
 # gui/ refactor — module layout catch-up
 
-Status: **IN PROGRESS — Phase 1 and Phase 2 done (2026-07-04); Phase 3/4 not started.**
+Status: **IN PROGRESS — Phases 1, 2, and 4 done (2026-07-04); Phase 3 not started.**
 
 Scope: file organization only. The architecture (Qt-free `config_io.py`/`_paths.py`,
 the three shared mixins, theme tokens, daemon-observer model) is good and is
@@ -120,12 +120,16 @@ Continue the pattern that already worked: `tabs/_caption_editor.py` and
 
 `ImageViewerTab`'s 104 methods cluster cleanly:
 
-- **`tabs/_autotag.py`** — the tagger worker lifecycle: `_run_autotag`,
-  `_spawn_tagger_worker`, `_send_autotag_request`, `_on_tagger_stdout`,
-  `_apply_autotag_result`, `_finish_autotag_request`, `_kill_tagger_worker`,
-  `_on_tagger_finished`, `_autotag_gpu_watch_tick`, `_set_autotag_status`
-  (~lines 639–1057). This is a subprocess-protocol state machine, not UI —
-  extract as a helper object owned by the tab, signals back for UI updates.
+- **`tabs/_autotag.py`** — DONE. The tagger worker lifecycle extracted as
+  `_AutotagWorker(QObject)`: owns the `QProcess`, the stdio sentinel protocol,
+  and the idle/GPU-watch timers behind four signals (`status`/`busy`/`result`/
+  `error`) — no widget references, so it stays UI-free. `ImageViewerTab` keeps
+  only the thin reactive slots (`_run_autotag`, `_on_autotag_status`,
+  `_on_autotag_result`, `_on_autotag_error`) that translate + apply the
+  signals against its own widgets (`autotag_btn`/`autotag_status`/`cap`).
+  Status phases are plain strings (`STATUS_LOADING`/`STATUS_RUNNING`/
+  `STATUS_READY`/`""`) so `_autotag.py` never imports `gui.i18n` — the tab maps
+  phase → translated text. `image_tab.py` 2312 → 2173 lines.
 - **`tabs/_caption_kb.py`** — caption correction + knowledge base + tag
   completion: `_caption_correction_options`, `_load_caption_kb`,
   `_describe_kb`, `_on_tag_clicked`, `_start_tag_completion_preload`,
@@ -163,18 +167,26 @@ module-level `_load_preprocess_toml`/`_load_sam_yaml`/`_load_rules` +
 them unit-testable like `config_io`), but only bother when next touching the
 tab.
 
-## Phase 4 — slim `app.py` (~1 h)
+## Phase 4 — slim `app.py` (~1 h) — DONE
 
-`app.py` keeps `MainWindow`, `main()`, `_dark()`, `_ensure_source_image_dir`.
-Move out:
+`app.py` now keeps `MainWindow`, `main()`, `_dark()`, `_ensure_source_image_dir`
+(862 → 404 lines). Moved out exactly as planned:
 
-- `SettingsDialog` (187) + `_mcp_paths`/`_mcp_add_command`/`_mcp_json_config`
-  (152–173) → `gui/settings_dialog.py` (it's 300 lines and growing — language
-  picker, theme, MCP registration).
-- `GuidebookDialog` (103) + `_guidebook_path` (84) → `gui/dialogs.py` (which
-  exists for exactly this).
-- `_prefer_cleartype_font_engine` (795) → `theme.py` next to
-  `_load_bundled_fonts` (font-stack concerns live together).
+- `SettingsDialog` + `_mcp_paths`/`_mcp_add_command`/`_mcp_json_config` →
+  `gui/settings_dialog.py` (new module).
+- `GuidebookDialog` + `_guidebook_path` → `gui/dialogs.py` (existing module).
+- `_prefer_cleartype_font_engine` → `theme.py` next to `_load_bundled_fonts`;
+  `app.py::main()` calls it as `gui_theme._prefer_cleartype_font_engine()`
+  (must still run before `QApplication` is constructed, so it stays a
+  standalone function rather than folding into `apply_theme`).
+
+`tabs/easycontrol_tab.py::_open_adapter_guide` imported `GuidebookDialog` from
+`gui.app` (a lazy import to dodge a circular dependency, since `gui.app`
+imports the tab); updated to import from `gui.dialogs` instead — and the
+circularity concern is now moot since `dialogs.py` doesn't import `tabs/`.
+All acceptance checks passed: `import gui.app` still shows no torch,
+`tests/test_gui_*.py`/`test_doc_refs.py` pass (launch-speed budget test still
+flaky under machine load exactly as on unmodified `main` — not a regression).
 
 ## Ordering & verification
 
