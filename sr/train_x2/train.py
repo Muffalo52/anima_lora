@@ -13,12 +13,20 @@ What it does:
     2x gap on our art domain.
   - ArtSRDataset over the HR pool: gt = 256² HR crop, lq = bicubic ÷2 + light JPEG/
     blur, upsampled back to 256² (our LR-to-HR-size convention -> z_y at 64 = z0).
+    Text-fidelity knobs ON by default (both no-op gracefully if the box json is
+    missing): --text_crop_prob 0.25 biases crops onto CTD text boxes
+    (sr/scripts/detect_text_boxes.py) and --scale_jitter_prob 0.25 degrades at a
+    random scale in [2, --scale_jitter_max 4] so tiny glyphs appear with GT
+    supervision instead of being hallucinated at inference.
   - per step: t ~ U[0,T), z_t = q_sample(z0, z_y, t), pred = model(scale_input(z_t),
     t, lq=z_y), loss = MSE(pred, z0). Optional decoded-image LPIPS (--lambda_lpips).
-  - EMA, Swin grad-checkpointing, bf16 AMP, periodic p_sample_loop montage eval.
+  - EMA, bf16 AMP + native-bf16 VQGAN (default ON), optional block-compile /
+    Swin grad-checkpointing, periodic p_sample_loop montage eval.
+    Perf defaults follow the 2026-07-02 distill_rsd pass (same net, same 256² crops):
+    grad-ckpt OFF (recompute costs ~25%), bf16 ON, --compile to trade warmup for VRAM.
 
-Run inside sr/.venv:  python train.py --iters 30000 --bs 8 --amp
-or:                    make sr-train ARGS="--iters 30000 --bs 8 --amp"
+Run inside sr/.venv:  python train.py --iters 30000 [--bs 8 --compile] [--no-amp]
+or:                    make sr-train ARGS="--iters 30000 --bs 8"
 """
 import argparse
 import copy
@@ -125,20 +133,45 @@ def main():
                          "latent MSE (canonical ResShift). Raise (~0.5) to push perceptual "
                          "sharpness; costs a VQGAN decode per step.")
     ap.add_argument("--ema", type=float, default=0.999)
-    ap.add_argument("--amp", action="store_true", help="bf16 autocast")
-    ap.add_argument("--no_grad_ckpt", action="store_true",
-                    help="disable Swin gradient checkpointing (on by default — big "
-                         "activation-memory save, bit-exact)")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                    help="bf16 autocast on the net + NATIVE-bf16 VQGAN (matches distill_rsd; "
+                         "autocast alone would keep the VQGAN GroupNorms fp32 and materialize "
+                         "the full-res norm activations). --no-amp = full fp32.")
+    ap.add_argument("--compile", action="store_true",
+                    help="block-compile the Swin/Res blocks at the CLASS level (glue stays "
+                         "eager — see rsd_models.compile_swin_blocks). Per-step it/s is ~a "
+                         "wash vs eager but saves VRAM; the lever for a bigger --bs without "
+                         "grad-ckpt. Whole-graph compile measured strictly worse — don't revive.")
+    ap.add_argument("--grad_ckpt", action=argparse.BooleanOptionalAction, default=False,
+                    help="Swin gradient checkpointing (bit-exact activation save; default OFF — "
+                         "at 256-px crops the recompute costs ~25%% throughput, and one net + "
+                         "one optimizer fits without it; turn on to fit bigger bs on smaller "
+                         "cards)")
+    ap.add_argument("--no_grad_ckpt", dest="grad_ckpt", action="store_false",
+                    help=argparse.SUPPRESS)  # legacy spelling (pre-2026-07 runs)
     ap.add_argument("--init", default=str(X4_V2),
                     help="warm-start checkpoint (default: released x4 v2 teacher)")
     ap.add_argument("--config", default=str(CONFIG))
     ap.add_argument("--src", default=None,
                     help="HR pool dir (default: sr/data/hr_pool if present, else image_dataset)")
+    ap.add_argument("--text_boxes", default=str(SR / "data" / "text_boxes.json"),
+                    help="CTD text-box json from sr/scripts/detect_text_boxes.py; missing "
+                         "file just disables text oversampling (dataset warns)")
+    ap.add_argument("--text_crop_prob", type=float, default=0.25,
+                    help="fraction of samples biased to crops covering a text box — random "
+                         "crops almost never hit text, so without this the model learns "
+                         "tiny glyphs as texture and hallucinates strokes. 0 = off")
+    ap.add_argument("--scale_jitter_prob", type=float, default=0.25,
+                    help="fraction of samples degraded at a random scale in "
+                         "[sf, scale_jitter_max] instead of exactly sf — puts sub-native "
+                         "text/detail sizes in-distribution WITH GT supervision. 0 = off")
+    ap.add_argument("--scale_jitter_max", type=float, default=4.0,
+                    help="upper degradation scale for --scale_jitter_prob draws")
     ap.add_argument("--num_workers", type=int, default=6)
     ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "x2"))
     ap.add_argument("--log_every", type=int, default=50)
-    ap.add_argument("--save_every", type=int, default=2000)
-    ap.add_argument("--sample_every", type=int, default=1000,
+    ap.add_argument("--save_every", type=int, default=3000)
+    ap.add_argument("--sample_every", type=int, default=3000,
                     help="render a p_sample_loop montage every N steps (0=off)")
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap (0=off)")
     args = ap.parse_args()
@@ -160,11 +193,17 @@ def main():
     print("building model (warm-start from x4 v2)...")
     model = M._build_unet(cfg, UNetModelSwin)
     warm_start(model, args.init)
-    if not args.no_grad_ckpt:
+    if args.grad_ckpt:
         n = M.enable_grad_checkpointing(model)
         print(f"  grad-checkpointing on {n} Swin layers")
     model = model.to(dev).train()
     vqgan = M.build_autoencoder(cfg, dev)
+    if args.amp:
+        # native bf16 (mirrors distill_rsd + infer.py): the frozen VQGAN is the full
+        # pixel-res conv stack; under autocast its GroupNorms stay fp32 and dominate
+        # encode VRAM/time. Also matches what inference feeds the finetuned model.
+        vqgan = vqgan.to(torch.bfloat16)
+    vdt = next(vqgan.parameters()).dtype
     diff = M.build_diffusion(cfg)
     T = diff.num_timesteps
 
@@ -184,9 +223,23 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95))
 
+    if args.compile:
+        # Block-compile (class-level, state_dict-transparent). All shape/grad-mode
+        # variants share each class's ONE code object, so the recompile budget must be
+        # raised — and pinned via its ContextVar .default or it silently reverts to 8 in
+        # the backward-compile context and spills to eager (same trap as distill_rsd).
+        sys.path.insert(0, str(M.REPO))
+        from library.runtime.dynamo import pin_dynamo_limit  # dependency-free helper
+        for knob in ("recompile_limit", "cache_size_limit"):
+            pin_dynamo_limit(knob, 64)
+        M.compile_swin_blocks()
+
     loader = DataLoader(
         ArtSRDataset(src=src, gt_size=256, scale=sf,
-                     length=args.iters * args.bs * args.grad_accum + 1000),
+                     length=args.iters * args.bs * args.grad_accum + 1000,
+                     text_boxes=args.text_boxes, text_crop_prob=args.text_crop_prob,
+                     scale_jitter_prob=args.scale_jitter_prob,
+                     scale_jitter_max=args.scale_jitter_max),
         batch_size=args.bs, num_workers=args.num_workers, drop_last=True,
         pin_memory=True, persistent_workers=args.num_workers > 0)
     it = iter(loader)
@@ -203,8 +256,11 @@ def main():
         return b["gt"].to(dev, non_blocking=True), b["lq"].to(dev, non_blocking=True)
 
     def encode(gt, lq):
+        # one fused 2B encode (native bf16 under --amp); latents come back fp32 so all
+        # downstream diffusion math is unchanged (they're tiny — 3ch at /4 res).
         with torch.no_grad():
-            return vqgan.encode(gt) * sf_scale, vqgan.encode(lq) * sf_scale
+            z = vqgan.encode(torch.cat([gt, lq]).to(vdt)).float() * sf_scale
+        return z.chunk(2)
 
     def set_lr(step):
         if step < args.warmup:
@@ -221,13 +277,18 @@ def main():
 
     log_path = save_dir / "progress.jsonl"
     snap = {"method": "resshift_x2", "config": args.config, "sf": sf, "init": args.init,
-            "iters": args.iters, "bs": args.bs, "lr": args.lr, "lambda_lpips": args.lambda_lpips}
+            "iters": args.iters, "bs": args.bs, "lr": args.lr, "lambda_lpips": args.lambda_lpips,
+            "amp": args.amp, "compile": args.compile, "grad_ckpt": args.grad_ckpt,
+            "text_boxes": args.text_boxes, "text_crop_prob": args.text_crop_prob,
+            "scale_jitter_prob": args.scale_jitter_prob,
+            "scale_jitter_max": args.scale_jitter_max}
     (save_dir / "snapshot.toml").write_text(
         "\n".join(f'{k} = {json.dumps(v)}' for k, v in snap.items()) + "\n")
 
     t0 = time.time()
     print(f"training: iters={args.iters} bs={args.bs}x{args.grad_accum} sf={sf} T={T} "
-          f"amp={args.amp} lpips={args.lambda_lpips} src={src}")
+          f"amp={args.amp} compile={args.compile} grad_ckpt={args.grad_ckpt} "
+          f"lpips={args.lambda_lpips} src={src}")
 
     for step in range(args.iters):
         lr_now = set_lr(step)
@@ -242,12 +303,15 @@ def main():
             with autocast():
                 pred = predict_x0(diff, model, z_t, z_y, t)        # predict_type=xstart -> pred IS z0
                 L_mse = F.mse_loss(pred.float(), z0.float())
-                L = L_mse
-                if lp is not None:
-                    img = vqgan.decode(pred.float(), force_not_quantize=True).clamp(-1, 1)
+            L = L_mse
+            if lp is not None:
+                # decode runs native bf16 outside autocast (grad flows through the frozen
+                # decoder; matches distill_rsd), image back to fp32 for the loss
+                img = vqgan.decode(pred.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
+                with autocast():
                     L_lpips = lp(img, gt).mean()
-                    L = L + args.lambda_lpips * L_lpips
-                    logs["L_lpips"] = L_lpips.detach().item()
+                L = L + args.lambda_lpips * L_lpips
+                logs["L_lpips"] = L_lpips.detach().item()
             (L / args.grad_accum).backward()
             logs["L_mse"] = L_mse.detach().item()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

@@ -97,21 +97,26 @@ def cmd_sr_rsd_infer(extra):
 
 
 def cmd_sr_test(extra):
-    """Tiled SR (released x4) on a folder/image: make sr-test IN=<path> [OUT=… VERSION=v3 CHOP=512].
+    """Tiled SR (released x4 or local x2) on a folder/image: make sr-test IN=<path>
+    [OUT=… VERSION=v3|x2 CHOP=512 CKPT=…].
 
-    Thin pass-through to the vendored, basicsr-free sr/scripts/sr_infer.py.
+    Thin pass-through to the vendored, basicsr-free sr/scripts/sr_infer.py. Output is
+    rsd-infer-style: per-image PNGs + infer_summary.json (MUSIQ) + contact_sheet.png.
+    OUT unset -> script default (output/sr/<version>/infer for x2, sr/data/results for
+    released x4). ARGS="--no_musiq --no_sheet --sheet_max N" to trim the extras.
     """
     in_path = os.environ.get("IN", "")
     if not in_path:
         sys.exit("set IN=<input image or dir>  (e.g. make sr-test IN=foo.png)")
-    out = os.environ.get("OUT", str(SR / "data" / "results"))
     version = os.environ.get("VERSION", "v3")
     chop = os.environ.get("CHOP", "512")
     cmd = [
         _venv_py(), str(SR / "scripts" / "sr_infer.py"),
-        "-i", in_path, "-o", out,
-        "--version", version, "--chop_size", chop,
+        "-i", in_path, "--version", version, "--chop_size", chop,
     ]
+    out = os.environ.get("OUT", "")
+    if out:
+        cmd += ["-o", out]
     ckpt = os.environ.get("CKPT", "")  # x2 only: pick a make-sr-train checkpoint
     if ckpt:
         cmd += ["--ckpt", ckpt]

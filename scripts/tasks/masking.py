@@ -158,6 +158,8 @@ def _run_mit(image_dir: Path, out_dir: Path, extra: list[str]) -> None:
     dilate = os.environ.get("MIT_DILATE")
     if dilate:
         cmd += ["--dilate", dilate]
+    if os.environ.get("MIT_CTD_GATE") is not None:
+        cmd += ["--ctd-gate" if _env_flag("MIT_CTD_GATE") else "--no-ctd-gate"]
     cmd += list(extra)
     run(cmd)
 

@@ -14,9 +14,11 @@ Two accepted layouts:
 
 The adapter (see ``register_apply.py``) is comfy-native — it patches the split
 ``q_proj``/``k_proj``/``v_proj`` of ``MiniTrainDIT`` (no fused ``qkv_proj``) and
-reimplements the forward to inject/strip register tokens. It is (re)built and
-applied at the first sampling step against the resident ``diffusion_model``, so
-it survives ComfyUI's clone/reload/recompile.
+reimplements the forward to inject/strip register tokens. Patching is applied
+around **each** forward call against the resident ``diffusion_model`` and
+restored before returning, so it survives ComfyUI's clone/reload/recompile and
+never leaves the shared model mutated (no cross-workflow contamination, no
+stale-strength reuse, no "memory leak with model" GC warnings).
 
 Constraints:
 * Do NOT stack with the Block Compile node — the register mechanism runs eager.
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import weakref
 from pathlib import Path
 
 from .register_apply import RegisterComfyAdapter
@@ -215,19 +218,28 @@ class AnimaRegisterAdapter:
         reg_adapter, lora_sd = _load_adapter(sel, strength)
         # LoRA-family checkpoint: apply the ΔW half eagerly via ComfyUI's
         # weight patcher (it participates in the normal patch/unpatch cycle);
-        # only the register injection needs the lazy re-apply below.
+        # only the register injection needs the per-call patching below.
         if lora_sd:
             _apply_lora_half(m, lora_sd, strength)
 
+        # Weakref only: a wrapper closing over its own patcher forms a cycle
+        # through model_options, and patcher clones that die only in a full gc
+        # batch strand their LoadedModel entry (ComfyUI's parent-rescue is
+        # weakref-based and CPython clears weakrefs before finalizers run) →
+        # "memory leak with model Anima" warnings on every later prompt.
+        m_ref = weakref.ref(m)
+
         def unet_wrapper(apply_model, args):
-            dm = m.model.diffusion_model
-            adapter = getattr(dm, "_anima_register_adapter", None)
-            # (Re)apply against the *current* resident diffusion_model if the hook
-            # was stranded (clone/reload/recompile swapped the module instance).
-            if adapter is None or adapter.dm is not dm:
-                adapter = reg_adapter.apply(dm)
-                dm._anima_register_adapter = adapter
-            return apply_model(args["input"], args["timestep"], **args["c"])
+            # Patch whatever diffusion_model is resident *right now* and restore
+            # it before returning — the shared module is never left mutated.
+            # Prefer the live BaseModel actually running this forward (survives
+            # downstream rebuilds, e.g. AnimaBlockCompile's fresh clone).
+            owner = getattr(apply_model, "__self__", None)
+            dm = getattr(owner, "diffusion_model", None)
+            if dm is None:
+                dm = m_ref().model.diffusion_model  # m is alive while sampling
+            with reg_adapter.applied(dm):
+                return apply_model(args["input"], args["timestep"], **args["c"])
 
         m.set_model_unet_function_wrapper(unet_wrapper)
         return (m,)

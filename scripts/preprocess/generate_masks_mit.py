@@ -2,6 +2,15 @@
 """Generate text segmentation masks for training images.
 
 Model: https://huggingface.co/a-b-c-x-y-z/Manga-Text-Segmentation-2025
+
+By default each mask is gated by comictextdetector's text-BLOCK head (--ctd-gate):
+only UNet++ mask components overlapping a detected text block survive. The UNet++
+alone has a small but systematic false-positive habit on decorative line art
+(measured 2026-07-04: 0.07-0.63% of pixels on halo/ornament-only images — i.e. it
+excludes exactly the decorative elements a style LoRA should train on), while its
+real-text recall is solid. The blk head supplies the precision; the UNet++ supplies
+the stroke-accurate mask. Trade-off: sfx text the blk head misses is no longer
+masked — use --no-ctd-gate to restore raw UNet++ behavior.
 """
 
 import argparse
@@ -116,6 +125,47 @@ def save_mask(path: Path, alpha_mask: np.ndarray) -> None:
     Image.fromarray(alpha_mask, mode="L").save(path)
 
 
+def _load_ctd(onnx_path: str):
+    net = cv2.dnn.readNetFromONNX(str(onnx_path))
+    return net, net.getUnconnectedOutLayersNames()
+
+
+def _ctd_text_boxes(net, uoln, img: np.ndarray, conf_th=0.4, nms_th=0.35,
+                    seg_th=0.3, seg_cov=0.03) -> list[tuple[int, int, int, int]]:
+    """Text-block boxes (yolo blk head + stroke-coverage cross-check) in img coords.
+
+    Mirrors sr/scripts/detect_text_boxes.py::_detect — see there for why the blk
+    head is required (the seg head alone false-positives on halos/ornaments).
+    """
+    h0, w0 = img.shape[:2]
+    r = min(1024 / h0, 1024 / w0)
+    nw, nh = int(round(w0 * r)), int(round(h0 * r))
+    canvas = np.zeros((1024, 1024, 3), np.uint8)
+    canvas[:nh, :nw] = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    net.setInput(cv2.dnn.blobFromImage(canvas, scalefactor=1 / 255.0, size=(1024, 1024)))
+    outs = net.forward(uoln)
+    blk = next(o for o in outs if o.ndim == 3)[0]                         # (N,7)
+    seg = next(o for o in outs if o.ndim == 4 and o.shape[1] == 1)[0, 0]  # stroke prob
+    conf = blk[:, 4] * blk[:, 5:].max(axis=1)
+    keep = conf > conf_th
+    if not keep.any():
+        return []
+    b, c = blk[keep], conf[keep]
+    xywh = np.concatenate([b[:, :2] - b[:, 2:4] / 2, b[:, 2:4]], axis=1)
+    boxes = []
+    for i in np.array(cv2.dnn.NMSBoxes(xywh.tolist(), c.tolist(), conf_th, nms_th)).flatten():
+        x, y, w, h = xywh[i]
+        cx0, cy0 = max(int(x), 0), max(int(y), 0)
+        cx1, cy1 = min(int(x + w), 1024), min(int(y + h), 1024)
+        if cx1 <= cx0 or cy1 <= cy0:
+            continue
+        if (seg[cy0:cy1, cx0:cx1] > seg_th).mean() < seg_cov:
+            continue
+        boxes.append((max(int(x / r), 0), max(int(y / r), 0),
+                      min(int((x + w) / r), w0), min(int((y + h) / r), h0)))
+    return boxes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image-dir", type=str, required=True, help="Image directory")
@@ -147,6 +197,22 @@ def main() -> None:
         "--workers", type=int, default=4, help="I/O workers (default: 4)"
     )
     parser.add_argument(
+        "--ctd-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "keep only mask components overlapping a comictextdetector text "
+            "block — drops UNet++ false positives on halos/decorative line art "
+            "(--no-ctd-gate = raw UNet++ masks, restores pre-2026-07 behavior)"
+        ),
+    )
+    parser.add_argument(
+        "--ctd-onnx",
+        type=str,
+        default="models/mit/comictextdetector.pt.onnx",
+        help="comictextdetector onnx for --ctd-gate (from make download-models)",
+    )
+    parser.add_argument(
         "--recursive",
         action="store_true",
         help=(
@@ -172,6 +238,14 @@ def main() -> None:
 
     print("Loading text segmentation model...")
     model = _load_model(args.model_path, device=args.device)
+
+    ctd = None
+    if args.ctd_gate:
+        if Path(args.ctd_onnx).exists():
+            ctd = _load_ctd(args.ctd_onnx)
+        else:
+            print(f"WARNING: --ctd-gate on but {args.ctd_onnx} missing — gating "
+                  f"disabled (run `make download-models` or pass --no-ctd-gate)")
 
     image_dir = Path(args.image_dir)
     masks_dir = Path(args.mask_dir)
@@ -226,6 +300,17 @@ def main() -> None:
             continue
 
         combined_mask = (mask > 127).astype(np.uint8)
+
+        if ctd is not None and combined_mask.any():
+            boxmask = np.zeros(combined_mask.shape, bool)
+            for x0, y0, x1, y1 in _ctd_text_boxes(*ctd, img_np):
+                boxmask[y0:y1, x0:x1] = True
+            _, lab = cv2.connectedComponents(combined_mask)
+            keep_ids = np.unique(lab[boxmask])
+            combined_mask = np.isin(lab, keep_ids[keep_ids != 0]).astype(np.uint8)
+            if not combined_mask.any():  # everything was decorative-line FP
+                pbar.set_postfix_str(f"{image_path.name}: skipped (ctd-gated)")
+                continue
 
         if dilate_kernel is not None:
             combined_mask = cv2.dilate(combined_mask, dilate_kernel, iterations=1)

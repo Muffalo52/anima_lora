@@ -27,22 +27,28 @@ What it does, faithfully mirroring the training mechanism:
   the block loop (valid because Anima is image-only, ``T==1``, so adaLN
   modulation broadcasts uniformly).
 
-Robustness: bound via ``set_model_unet_function_wrapper`` and (re)applied against
-whatever ``diffusion_model`` is resident at the first sampling call, so it
-survives ComfyUI's clone/reload/recompile (cf. the AnimaBlockCompile rebuild).
+Robustness: bound via ``set_model_unet_function_wrapper`` and patched onto
+whatever ``diffusion_model`` is resident **around each forward call**, restored
+in a ``finally`` before returning. The shared module is never left mutated, so
+it survives ComfyUI's clone/reload/recompile for free (cf. the AnimaBlockCompile
+rebuild), a strength change on re-queue always takes effect, workflows that skip
+the node see the pristine model, and no stranded references trip ComfyUI's
+"memory leak with model" detector (refcount-based — permanent bound-method
+attributes on the module are self-cycles it can't free without a full gc).
 Do NOT stack with the Block Compile node — the register mechanism runs eager.
 """
 
 from __future__ import annotations
 
 import types
+from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
 
 
 class RegisterComfyAdapter:
-    """Loaded register adapter, ready to apply onto a resident MiniTrainDIT."""
+    """Loaded register adapter, applied transiently per forward via ``applied()``."""
 
     def __init__(self, state_dict: dict, config: dict, strength: float = 1.0):
         self.cfg = config
@@ -53,7 +59,7 @@ class RegisterComfyAdapter:
         self.scale = float(config.get("scale", 1.0))
         self.insert_block = int(config.get("insert_block", 0))
         self.strength = float(strength)
-        self._dm = None  # resident diffusion_model this was applied to (identity check)
+        self._device_cache = {}  # (device, dtype) -> (register, deltas) on-device
 
         # Register embedding (arm B). Arm A / K=0 → no token injection.
         reg = state_dict.get("register")
@@ -76,56 +82,80 @@ class RegisterComfyAdapter:
             self.deltas[bi] = comp
 
     # -- apply --------------------------------------------------------------
-    def apply(self, dm) -> "RegisterComfyAdapter":
-        """Patch the split q/k/v projections + install the register-aware forward."""
+    def _materialize(self, dev, dt):
+        """Strength-scaled register + ΔW tensors on the model's device/dtype."""
+        key = (dev, dt)
+        cached = self._device_cache.get(key)
+        if cached is None:
+            reg = None
+            if self.register is not None:
+                reg = self.register.to(device=dev, dtype=dt) * self.strength
+            deltas = {
+                bi: {
+                    c: t.to(device=dev, dtype=dt) * self.strength
+                    for c, t in comp.items()
+                }
+                for bi, comp in self.deltas.items()
+            }
+            cached = (reg, deltas)
+            self._device_cache[key] = cached
+        return cached
+
+    @contextmanager
+    def applied(self, dm):
+        """Patch ``dm`` for one forward call, restoring it on exit.
+
+        Installs the additive ΔW on each target block's split q/k/v projections
+        and (when the checkpoint carries register tokens) the register-aware
+        ``_forward``, then puts every touched attribute back — the shared
+        ``diffusion_model`` leaves this context bit-identical to how it entered.
+        """
         ref = next(dm.parameters())
-        dev, dt = ref.device, ref.dtype
+        reg, deltas = self._materialize(ref.device, ref.dtype)
 
-        reg = None
-        if self.register is not None:
-            reg = self.register.to(device=dev, dtype=dt) * self.strength
+        # Instance-attr snapshots: (obj, name, was_instance_attr, old_value).
+        saved = []
 
-        deltas = {
-            bi: {c: t.to(device=dev, dtype=dt) * self.strength for c, t in comp.items()}
-            for bi, comp in self.deltas.items()
-        }
+        def patch(obj, name, new):
+            saved.append((obj, name, name in obj.__dict__, obj.__dict__.get(name)))
+            setattr(obj, name, new)
 
-        # 1) Additive ΔW on each target block's split q/k/v projections.
-        orig_proj_fwd: dict = {}
-        for bi in self.target_blocks:
-            attn = dm.blocks[bi].self_attn
-            for c in ("q", "k", "v"):
-                proj = getattr(attn, f"{c}_proj")
-                key = (bi, c)
-                orig_proj_fwd[key] = proj.forward
-                d = deltas[bi][c]
+        def make_fwd(orig, d):
+            def fwd(x):
+                return orig(x) + F.linear(x, d)
 
-                def make_fwd(orig, d):
-                    def fwd(x):
-                        return orig(x) + F.linear(x, d)
+            return fwd
 
-                    return fwd
+        try:
+            # 1) Additive ΔW on each target block's split q/k/v projections.
+            for bi in self.target_blocks:
+                attn = dm.blocks[bi].self_attn
+                for c in ("q", "k", "v"):
+                    proj = getattr(attn, f"{c}_proj")
+                    patch(proj, "forward", make_fwd(proj.forward, deltas[bi][c]))
 
-                proj.forward = make_fwd(proj.forward, d)
-
-        # 2) Register-aware _forward (native-flatten + concat + strip). Bound as a
-        #    MethodType so `self._forward` stays a bound method (the public
-        #    `forward` → WrapperExecutor → `self._forward` seam is preserved).
-        state = {
-            "register": reg,
-            "K": self.K if reg is not None else 0,
-            "insert_block": self.insert_block,
-            "orig_forward": dm._forward,
-            "orig_proj_fwd": orig_proj_fwd,
-        }
-        dm._anima_register_state = state
-        dm._forward = types.MethodType(_register_forward, dm)
-        self._dm = dm
-        return self
-
-    @property
-    def dm(self):
-        return self._dm
+            # 2) Register-aware _forward (native-flatten + concat + strip). Bound
+            #    as a MethodType so `self._forward` stays a bound method (the
+            #    public `forward` → WrapperExecutor → `self._forward` seam is
+            #    preserved). Skipped entirely when there are no register tokens
+            #    (arm A / K=0) — the ΔW patches alone suffice.
+            if reg is not None:
+                patch(
+                    dm,
+                    "_anima_register_state",
+                    {"register": reg, "K": self.K, "insert_block": self.insert_block},
+                )
+                patch(dm, "_forward", types.MethodType(_register_forward, dm))
+            yield
+        finally:
+            for obj, name, had, old in reversed(saved):
+                if had:
+                    setattr(obj, name, old)
+                else:
+                    try:
+                        delattr(obj, name)
+                    except AttributeError:
+                        pass
 
 
 def _identity_rope_rows(rope_blk: torch.Tensor, k: int) -> torch.Tensor:

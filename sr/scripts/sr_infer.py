@@ -9,15 +9,23 @@ x4 versions (v1/v2 = 15-step, v3 = 4-step) AND our locally-trained ``x2`` art mo
 math generalizes. Tiled inference for large images + weight auto-download (torch.hub)
 for the released x4 versions.
 
+Output mirrors distill_rsd/infer.py: per-image SR PNGs + infer_summary.json (per-image
+MUSIQ for SR and the bicubic baseline, means, peak VRAM) + contact_sheet.png of
+[bicubic-up | SR] rows (the train_x2 montage style, minus GT — inference has none).
+Local versions default -o to output/sr/<version>/infer; released x4 keeps sr/data/results.
+
     python sr_infer.py -i <img|dir> -o <out_dir> [--version v3] [--chop_size 512]
     python sr_infer.py -i <img|dir> --version x2 [--ckpt output/sr/x2/resshift_x2_final.pth]
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image, ImageDraw
 
 # vendored ResShift source + rsd_models builders
 HERE = Path(__file__).resolve().parent          # sr/scripts
@@ -56,6 +64,35 @@ def _latest_local_ckpt(ckpt_dir):
     return final[0] if final else cands[-1]
 
 
+def _musiq_score(metric, im_np):
+    """MUSIQ on an HxWx3 uint8 RGB array."""
+    t = torch.from_numpy(im_np.astype(np.float32) / 255).permute(2, 0, 1)[None]
+    return round(float(metric(t).item()), 3)
+
+
+def _contact_sheet(entries, path, cell_h=384, pad=4, strip=18):
+    """[bicubic-up | SR] rows (train_x2 montage style) with a per-row label strip."""
+    bg = (16, 16, 16)
+    rows = []
+    for lr_up, sr_im, label in entries:
+        def _th(im):
+            w = max(1, round(im.width * cell_h / im.height))
+            return im.resize((w, cell_h), Image.LANCZOS)
+        a, b = _th(lr_up), _th(sr_im)
+        row = Image.new("RGB", (a.width + b.width + pad, cell_h + strip), bg)
+        ImageDraw.Draw(row).text((2, 2), label, fill=(220, 220, 220))
+        row.paste(a, (0, strip))
+        row.paste(b, (a.width + pad, strip))
+        rows.append(row)
+    sheet = Image.new("RGB", (max(r.width for r in rows),
+                              sum(r.height for r in rows) + pad * (len(rows) - 1)), bg)
+    y = 0
+    for r in rows:
+        sheet.paste(r, (0, y))
+        y += r.height + pad
+    sheet.save(path)
+
+
 def _ensure_weight(name, url):
     """Return sr/weights/<name>, downloading from the release if absent."""
     dst = M.WEIGHTS / name
@@ -73,6 +110,7 @@ class ResShiftInfer:
                  use_amp=True, seed=12345, device=M.DEVICE, ckpt_path=None):
         self.device = device
         self.use_amp = use_amp
+        self.version = version
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
@@ -91,6 +129,7 @@ class ResShiftInfer:
             ckpt = _ensure_weight(ckpt_name, ckpt_url)
             sd = torch.load(str(ckpt), map_location=device)
             sd = sd["state_dict"] if "state_dict" in sd else sd
+        self.ckpt_name = str(ckpt)
         cfg.autoencoder.ckpt_path = str(_ensure_weight(*_VQGAN))
 
         # scale factor is config-driven (x4 released = 4, our art model = 2), so all the
@@ -115,6 +154,7 @@ class ResShiftInfer:
         latent_align = cfg.model.params.window_size * 2 ** (len(cfg.model.params.channel_mult) - 1)
         self.offset = latent_align * 4 // self.sf
 
+        self.chop_arg = chop_size
         self.chop_size = chop_size * (4 // self.sf)
         if chop_stride < 0:
             self.chop_stride = (chop_size - {512: 64, 256: 32, 64: 16}[chop_size]) * (4 // self.sf)
@@ -165,25 +205,67 @@ class ResShiftInfer:
                 sr = self._sample(im_lq)
         return sr * 0.5 + 0.5
 
-    def run(self, in_path, out_path):
+    def run(self, in_path, out_path, musiq=True, sheet=True, sheet_max=32):
+        """SR every image under in_path into out_path, plus rsd-infer-style extras:
+        per-image MUSIQ (SR + bicubic baseline) into infer_summary.json and a
+        contact_sheet.png of [bicubic-up | SR] rows (train_x2 montage style)."""
         in_path, out_path = Path(in_path), Path(out_path)
         out_path.mkdir(parents=True, exist_ok=True)
         files = sorted(p for p in in_path.rglob("*")
                        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}) \
             if in_path.is_dir() else [in_path]
+        metric = None
+        if musiq:
+            try:
+                import pyiqa
+                metric = pyiqa.create_metric("musiq", device=self.device)
+            except Exception as e:  # noqa: BLE001
+                print(f"[sr_infer] pyiqa/musiq unavailable ({e}) — skipping scores")
+        rows, sheet_entries = [], []
         for f in files:
             im = util_image.imread(f, chn="rgb", dtype="float32")          # h x w x c
             t = util_image.img2tensor(im).to(self.device)                  # 1 x c x h x w, [0,1]
             sr = self._process((t - 0.5) / 0.5)
-            out = util_image.tensor2img(sr, rgb2bgr=True, min_max=(0.0, 1.0))
-            util_image.imwrite(out, out_path / f"{f.stem}.png", chn="bgr", dtype_in="uint8")
-            print(f"[sr_infer] {f.name} -> {out_path / (f.stem + '.png')}")
+            sr_np = util_image.tensor2img(sr, rgb2bgr=False, min_max=(0.0, 1.0))  # RGB uint8
+            Image.fromarray(sr_np).save(out_path / f"{f.stem}.png")
+            row = {"stem": f.stem}
+            need_lr_up = metric is not None or (sheet and len(sheet_entries) < sheet_max)
+            if need_lr_up:
+                lr = Image.open(f).convert("RGB")
+                lr_up = lr.resize((lr.width * self.sf, lr.height * self.sf), Image.BICUBIC)
+            if metric is not None:
+                row["musiq_sr"] = _musiq_score(metric, sr_np)
+                row["musiq_bicubic"] = _musiq_score(metric, np.asarray(lr_up))
+            if sheet and len(sheet_entries) < sheet_max:
+                label = f"{f.stem}   bicubic | SR"
+                if "musiq_sr" in row:
+                    label += f"   musiq {row['musiq_bicubic']} -> {row['musiq_sr']}"
+                sheet_entries.append((lr_up, Image.fromarray(sr_np), label))
+            rows.append(row)
+            print(f"[sr_infer] {f.name} -> {out_path / (f.stem + '.png')}"
+                  + (f"  musiq {row['musiq_sr']}" if "musiq_sr" in row else ""))
+        if sheet_entries:
+            _contact_sheet(sheet_entries, out_path / "contact_sheet.png")
+            print(f"[sr_infer] contact sheet ({len(sheet_entries)} rows) -> "
+                  f"{out_path / 'contact_sheet.png'}")
+        summary = {"n": len(rows), "version": self.version, "ckpt": self.ckpt_name,
+                   "chop": self.chop_arg}
+        if self.device == "cuda":
+            summary["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
+        if metric is not None and rows:
+            for k in ("musiq_sr", "musiq_bicubic"):
+                summary[f"{k}_mean"] = round(float(np.mean([r[k] for r in rows])), 3)
+        (out_path / "infer_summary.json").write_text(
+            json.dumps({"summary": summary, "rows": rows}, indent=2))
+        print(json.dumps(summary, indent=2))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-i", "--in_path", required=True, help="input image or directory")
-    ap.add_argument("-o", "--out_path", default=str(SR / "data" / "results"))
+    ap.add_argument("-o", "--out_path", default=None,
+                    help="output dir (default: output/sr/<version>/infer for local models, "
+                         "sr/data/results for released x4)")
     ap.add_argument("-v", "--version", default="v3", choices=list(_VERSIONS) + list(_LOCAL),
                     help="released x4: v1/v2/v3 — or locally-trained x2 (make sr-train).")
     ap.add_argument("--ckpt", default=None,
@@ -192,12 +274,21 @@ def main():
     ap.add_argument("--chop_stride", type=int, default=-1)
     ap.add_argument("--no_amp", action="store_true", help="disable bf16 autocast")
     ap.add_argument("--seed", type=int, default=12345)
+    ap.add_argument("--no_musiq", action="store_true",
+                    help="skip MUSIQ scoring (still writes infer_summary.json)")
+    ap.add_argument("--no_sheet", action="store_true", help="skip contact_sheet.png")
+    ap.add_argument("--sheet_max", type=int, default=32,
+                    help="cap contact-sheet rows (first N inputs)")
     args = ap.parse_args()
+    out_path = args.out_path or str(
+        SR.parent / "output" / "sr" / args.version / "infer" if args.version in _LOCAL
+        else SR / "data" / "results")
     sampler = ResShiftInfer(version=args.version, chop_size=args.chop_size,
                             chop_stride=args.chop_stride, use_amp=not args.no_amp,
                             seed=args.seed, ckpt_path=args.ckpt)
-    sampler.run(args.in_path, args.out_path)
-    print(f"[sr_infer] done -> {args.out_path}")
+    sampler.run(args.in_path, out_path, musiq=not args.no_musiq,
+                sheet=not args.no_sheet, sheet_max=args.sheet_max)
+    print(f"[sr_infer] done -> {out_path}")
 
 
 if __name__ == "__main__":
