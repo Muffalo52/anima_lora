@@ -691,6 +691,7 @@ STRINGS: dict[str, str] = {
     "merge_analysis_safe": "✓ 병합 안전 — LoRA들이 거의 직교함 · 최강 쌍 |cos| {cos} · 에너지 비율 {ratio} · 공유 모듈 {shared}/{modules}",
     "merge_analysis_reinforce": "⚠ {strength} 보강 간섭 — {a} ↔ {b} cos {cos} · 에너지 비율 {ratio} (normalize=global이 합산 크기를 재조정함) · 공유 모듈 {shared}/{modules}",
     "merge_analysis_cancel": "⚠ {strength} 상쇄 간섭 — {a} ↔ {b} cos {cos} · 이 LoRA들이 서로 부분적으로 지움 · 에너지 비율 {ratio} · 공유 모듈 {shared}/{modules}",
+    "merge_analysis_overlap": "⚠ 부분공간 충돌 — {a} ↔ {b}가 방향은 거의 직교하지만 같은 가중치 부분공간에 기록함 (겹침 {overlap}, 무작위 대비 {x}배) · 추론 시 스타일이 충돌할 수 있음 · 에너지 비율 {ratio} · 공유 모듈 {shared}/{modules}",
     "merge_analysis_moderate": "중간",
     "merge_analysis_strong": "강한",
     "merge_lora_out_placeholder": "(자동: <첫 LoRA>_merged<N>.safetensors)",

@@ -651,6 +651,7 @@ STRINGS: dict[str, str] = {
     "merge_analysis_safe": "✓ マージ安全 — LoRA はほぼ直交 · 最大ペア |cos| {cos} · エネルギー比 {ratio} · 共有モジュール {shared}/{modules}",
     "merge_analysis_reinforce": "⚠ {strength}強め合い — {a} ↔ {b} cos {cos} · エネルギー比 {ratio}（normalize=global が合算量を再スケール）· 共有モジュール {shared}/{modules}",
     "merge_analysis_cancel": "⚠ {strength}打ち消し合い — {a} ↔ {b} cos {cos} · これらの LoRA は互いに部分的に消し合う · エネルギー比 {ratio} · 共有モジュール {shared}/{modules}",
+    "merge_analysis_overlap": "⚠ 部分空間の衝突 — {a} ↔ {b} は方向はほぼ直交だが同じ重み部分空間に書き込む（重なり {overlap}、ランダム比 {x}倍）· 推論時にスタイルが競合する可能性 · エネルギー比 {ratio} · 共有モジュール {shared}/{modules}",
     "merge_analysis_moderate": "中程度の",
     "merge_analysis_strong": "強い",
     "merge_lora_out_placeholder": "（自動: <最初の LoRA>_merged<N>.safetensors）",

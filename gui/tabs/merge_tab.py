@@ -647,6 +647,12 @@ class MergeTab(LazyTabMixin, QWidget):
     # normalize=global tames summed magnitude regardless. These bands are heuristic.
     _SAFE_COS = 0.15
     _STRONG_COS = 0.35
+    # A near-zero cosine can still hide a subspace collision (both LoRAs writing
+    # the same weight subspaces in different directions) — escalate the "safe"
+    # banner when the worst pair's output-overlap ×random factor is colliding.
+    # Mirrors merge_analysis.OVERLAP_COLLIDING_X (not imported: that module pulls
+    # torch, which the GUI must not).
+    _OVERLAP_WARN_X = 8.0
 
     def _apply_analysis_marker(self, payload: str):
         """Render the interference result as a colored safe/caution/warn banner."""
@@ -666,8 +672,30 @@ class MergeTab(LazyTabMixin, QWidget):
             a = b = None
             cos = ratio - 1.0  # fall back to ratio deviation if no pair
         mag = abs(cos)
+        overlap = data.get("overlap")
+        if overlap and len(overlap) == 4:
+            ov_a, ov_b = overlap[0], overlap[1]
+            ov_out, ov_x = float(overlap[2]), float(overlap[3])
+        else:
+            ov_a = ov_b = None
+            ov_out = ov_x = 0.0
 
-        if mag < self._SAFE_COS:
+        if mag < self._SAFE_COS and ov_x >= self._OVERLAP_WARN_X:
+            # Directions near-orthogonal but the pair still writes into the
+            # same weight subspaces — the cosine-based "safe" would be false
+            # comfort, so surface the collision as a caution.
+            text = t(
+                "merge_analysis_overlap",
+                a=ov_a,
+                b=ov_b,
+                overlap=f"{ov_out:.3f}",
+                x=f"{ov_x:.0f}",
+                ratio=f"{ratio:.3f}",
+                shared=shared,
+                modules=modules,
+            )
+            sev, bg = "warn", "#3d2e0a"
+        elif mag < self._SAFE_COS:
             # Near-orthogonal — safe to merge regardless of sign.
             text = t(
                 "merge_analysis_safe",

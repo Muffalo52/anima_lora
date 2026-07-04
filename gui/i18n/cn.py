@@ -629,6 +629,7 @@ STRINGS: dict[str, str] = {
     "merge_analysis_safe": "✓ 可安全合并 — LoRA 近似正交 · 最强配对 |cos| {cos} · 能量比 {ratio} · 共享模块 {shared}/{modules}",
     "merge_analysis_reinforce": "⚠ {strength}相长增强 — {a} ↔ {b} cos {cos} · 能量比 {ratio}（normalize=global 会重新缩放相加后的幅度）· 共享模块 {shared}/{modules}",
     "merge_analysis_cancel": "⚠ {strength}相消抵消 — {a} ↔ {b} cos {cos} · 这些 LoRA 会部分相互抵消 · 能量比 {ratio} · 共享模块 {shared}/{modules}",
+    "merge_analysis_overlap": "⚠ 子空间冲突 — {a} ↔ {b} 方向近似正交，却写入相同的权重子空间（重叠 {overlap}，为随机水平的 {x} 倍）· 推理时风格可能互相冲突 · 能量比 {ratio} · 共享模块 {shared}/{modules}",
     "merge_analysis_moderate": "中等",
     "merge_analysis_strong": "强",
     "merge_lora_out_placeholder": "（自动：<首个 LoRA>_merged<N>.safetensors）",
