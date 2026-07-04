@@ -445,13 +445,6 @@ COMMANDS = {
         "embed (no TE, no captioner); ψ_tar == ψ_src so output should reconstruct the source. "
         "REF_IMAGE=path overrides the random pick. Usage: exp-test-directedit-dry [ref_image] [extra...]",
     ),
-    "exp-invert-directedit": (
-        exp_inference.cmd_invert_directedit,
-        "[experimental] Probe: invert the K-slot orthogonal postfix tail per image, then run "
-        "DirectEdit dry mode twice (baseline T5(tags) vs T5(tags)+tail). Outputs side-by-side under "
-        "output/tests/invert_directedit/<stem>/. Env: N_IMAGES (default 1), REF_IMAGE, K (default 48), "
-        "INVERT_STEPS, LAMBDA_ZERO, SIGMA_MIN, BASIS, SEED.",
-    ),
 }
 
 

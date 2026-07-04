@@ -99,12 +99,9 @@ User-facing guides and references.
 
 ## Proposals
 
-Active design docs for unbuilt work.
-
-| Doc | Description |
-|-----|-------------|
-| [proposal/postfix_residual_for_directedit.md](proposal/postfix_residual_for_directedit.md) | Image-conditional postfix as DirectEdit's ψ_src residual carrier |
-| [proposal/postfix_residual_per_image_inversion.md](proposal/postfix_residual_per_image_inversion.md) | Per-image inversion as a probe of the residual manifold |
+Active design docs for unbuilt work — see [proposal/](proposal/) for the live
+list. Closed proposals move to the gitignored `_archive/proposals/` with a
+closure note explaining the verdict.
 
 ## Architecture notes
 

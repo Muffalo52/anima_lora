@@ -63,6 +63,7 @@ down_init = "weight_svd"
 # min_rank = 1
 # alpha_rank_scale = 1.0
 
+# partitioner_aggressive_recomputation = true
 
 # ---
 # sample_every_n_epochs = 1

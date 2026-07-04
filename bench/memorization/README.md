@@ -72,3 +72,34 @@ paper argues for, and the practical takeaway for users: **stop before it rises.*
 Caches required: `{stem}_anima_te.safetensors` (conditioning) +
 `{stem}_anima_pe_spatial.safetensors` (reference features). Both are written by a
 normal `make preprocess`.
+
+## loss_gap.py — the weight-side companion (no sampling)
+
+`probe.py` is generation-side (does sampling actually reproduce frames — the
+conviction). `loss_gap.py` asks the earlier, cheaper question: **do the
+adapter's weights carry member-specific information**, using the standard
+loss-based membership-inference statistic (re-noise the cached clean latent,
+score the velocity-field's noise-recovery error) with two calibrations that
+cancel the image-easiness confound (see memory
+`project_solace_confidence_is_flatness` — the raw statistic is a flatness
+detector, inherited from the archived `bench/solace` probe):
+
+1. paired `delta = R_lora(x) − R_base(x)` on the same image, and
+2. member vs **held-out same-artist** images (`sample_ratio<1` shard
+   complement or the validation split) — separating instance memorization
+   from legitimate style learning. Whole-shard runs (no same-artist holdout)
+   degrade to a style-fit report and refuse an instance verdict.
+
+Forward passes over already-cached latents + TE only — cheap enough to run on
+every checkpoint of a recipe for the weight-side `tau_mem` curve, with
+`probe.py` confirming any rise visually.
+
+```bash
+python bench/memorization/loss_gap.py \
+    --adapter output/ckpt/my_artist_lora.safetensors \
+    --method lora --preset default --label my_artist
+```
+
+Headline: `auc_member_vs_same` (~0.5 generalizing, >0.65 + small perm-p =
+member-specific overfit) with a per-sigma breakdown; `delta` elevated on
+holdout with AUC≈0.5 is the healthy "fits the artist, not the frames" shape.

@@ -1,8 +1,8 @@
 """Inference entry-points for shipped methods (test / test-* commands).
 
 All variants share ``INFERENCE_BASE`` from ``_common`` and add method-specific
-flags. Experimental inference commands (exp-test-postfix*, exp-test-prefix,
-exp-test-ref) live in ``scripts/experimental_tasks/inference.py``.
+flags. Experimental inference commands (exp-test-soft, exp-test-directedit*)
+live in ``scripts/experimental_tasks/inference.py``.
 """
 
 from __future__ import annotations

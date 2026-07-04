@@ -2,14 +2,19 @@
 
 <!-- check-docs: ignore-flags (archived design record; commands below drive scripts under the gitignored archive/inversion/ tree) -->
 
-> **Archived feature (2026-05-20).** Embedding inversion and reference (K-slot
-> prefix) inversion are no longer wired into the live pipeline — the `invert` /
-> `invert-ref` / `exp-test-ref` make targets, the `--prefix_weight` inference
-> path, and the postfix training network have all been
-> removed. The standalone scripts live under the gitignored `archive/inversion/`
-> tree; the only surviving in-tree piece is the inference-side probe
-> `library/inference/editing/postfix_inversion.py`. This page is kept as a design
-> record — the commands below are historical.
+> **Archived feature (2026-05-20; line fully closed 2026-07-04).** Embedding
+> inversion and reference (K-slot prefix) inversion are no longer wired into the
+> live pipeline — the `invert` / `invert-ref` / `exp-test-ref` make targets, the
+> `--prefix_weight` inference path, and the postfix training network have all
+> been removed. The standalone scripts live under the gitignored
+> `_archive/inversion/` tree. The last surviving in-tree piece — the
+> postfix-tail inversion probe (`postfix_inversion.py`, its CLI, the
+> `exp-invert-directedit` task, and the PE→s bridge bench) — was archived
+> 2026-07-04 to `_archive/postfix/inversion_probe/` and
+> `_archive/bench/postfix_inversion_bridge/` after repeated probe runs produced
+> no meaningful reconstruction lift (see the closure notes on
+> `_archive/proposals/postfix_residual_per_image_inversion.md`). This page is
+> kept as a design record — the commands below are historical.
 
 Finds the optimal text embedding (`crossattn_emb`) for a target image by optimizing in the post-T5, pre-DiT embedding space. The frozen DiT acts as a fixed decoder — only the embedding is updated via gradient descent on the flow-matching loss.
 
@@ -150,7 +155,7 @@ inversions/
 
 A "referencer" variant of embedding inversion: instead of optimizing all 512 token positions of the crossattn embedding, freeze a user-supplied text template and optimize **only K consecutive token vectors** against a single reference image. The resulting K vectors capture the image's subject/style in T5-compatible space; at inference they're spliced into a fresh user prompt, letting the subject travel into new scenes.
 
-This is the original Textual Inversion recipe (Gal et al. 2022) ported to Anima. Because Anima already has a `prefix` tuning network (the now-removed `prefix` tuning network, whose inference-side probe survives as `library/inference/editing/postfix_inversion.py`) with splicing via `inference.py --prefix_weight`, reference inversion reused that entire runtime — **no inference changes required**. It's training-free in the meaningful sense: no dataset, just a single reference image, single-GPU optim, seconds-to-minutes per image.
+This is the original Textual Inversion recipe (Gal et al. 2022) ported to Anima. Because Anima already has a `prefix` tuning network (the now-removed `prefix` tuning network, whose inference-side probe lived on as `postfix_inversion.py` until 2026-07-04, now `_archive/postfix/inversion_probe/`) with splicing via `inference.py --prefix_weight`, reference inversion reused that entire runtime — **no inference changes required**. It's training-free in the meaningful sense: no dataset, just a single reference image, single-GPU optim, seconds-to-minutes per image.
 
 ## Quick start
 
@@ -251,7 +256,7 @@ Single `.safetensors` holding one tensor:
 
 | Key | Shape | Dtype | Notes |
 |---|---|---|---|
-| `prefix_embeds` | `[K, D]` | bf16 | Same key/schema as `library/inference/editing/postfix_inversion.py` prefix-mode checkpoints |
+| `prefix_embeds` | `[K, D]` | bf16 | Same key/schema as the archived `postfix_inversion.py` prefix-mode checkpoints |
 
 Metadata includes `ss_network_module`, `ss_mode=prefix`, `ss_num_postfix_tokens=K`, `ss_embed_dim=D`, plus inversion-specific fields (`ss_reference_image`, `ss_template`, `ss_placeholder_char_offset`, `ss_best_loss`, `ss_steps`, `ss_lr`, `ss_seed`).
 

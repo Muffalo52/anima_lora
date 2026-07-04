@@ -44,6 +44,6 @@ Infrastructure, not a sampler method — how to *run* inference, not what it doe
 
 | Doc | What it is | Gotcha |
 |-----|-----------|--------|
-| [invert.md](invert.md) | Embedding inversion — optimize a text embedding to match a target image through the frozen DiT (full and K-slot reference). | Postfix slot-collapse: `anima_postfix.safetensors` is effectively K=1. |
+| [invert.md](invert.md) | Embedding inversion — optimize a text embedding to match a target image through the frozen DiT (full and K-slot reference). **Line fully archived 2026-07-04** (probe + bench + proposals → `_archive/`). | Postfix slot-collapse: `anima_postfix.safetensors` is effectively K=1; per-image tail inversion never produced meaningful reconstruction lift. |
 
 User-facing flag reference: [`../guidelines/inference.md`](../guidelines/inference.md).
