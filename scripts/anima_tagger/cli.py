@@ -157,7 +157,7 @@ def parse_args() -> argparse.Namespace:
         "Optional — pass empty / unset to build a flat-vocab checkpoint. "
         "Default: $CAPTION_CORPUS_DIR/tag_groups.yaml.",
     )
-    p.add_argument("--min_freq", type=int, default=50)
+    p.add_argument("--min_freq", type=int, default=20)
     p.add_argument("--val_frac", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
 
@@ -195,7 +195,7 @@ def parse_args() -> argparse.Namespace:
         "host-device sync) every N steps. Higher = fewer syncs / faster "
         "training; lower = more responsive progress bar (default: 10).",
     )
-    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument(
         "--warmup_steps",
@@ -207,7 +207,7 @@ def parse_args() -> argparse.Namespace:
         "training on this scale.",
     )
     p.add_argument("--d_hidden", type=int, default=1024)
-    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--dropout", type=float, default=0.05)
     p.add_argument(
         "--label_smooth",
         type=float,

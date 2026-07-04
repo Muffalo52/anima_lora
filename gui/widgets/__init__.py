@@ -28,7 +28,7 @@ from gui.widgets.fields import (
     wrap_tooltip,
 )
 from gui.widgets.image_view import ImageViewerDialog, ScaledImageLabel
-from gui.widgets.mixins import DirtyTrackingMixin, LazyTabMixin
+from gui.widgets.mixins import DirtyTrackingMixin, LazyTabHolder, LazyTabMixin
 from gui.widgets.sample_prompts import (
     SamplePromptsDialog,
     _normalize_prompt_lines,
@@ -45,6 +45,7 @@ from gui.widgets.target_res import (
 
 __all__ = [
     "_ATTN_MODES",
+    "LazyTabHolder",
     "LazyTabMixin",
     "_target_res_tiers",
     "_target_res_buckets",

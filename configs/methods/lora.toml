@@ -35,7 +35,11 @@ cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
 # output_name = "anima_register_quarter"
+
 output_name = "anima_tenth16"
+down_init = "weight_svd"
+
+
 # sigmoid_bias = 0.5
 # path_pattern = "sincos/*"
 # artists_shard="4_4"
@@ -43,11 +47,6 @@ output_name = "anima_tenth16"
 # vr_fei_sigma_low_div = 4.0
 # use_cmmd=true
 # compile_inductor_mode = "max-autotune"
-
-# -------------
-# Ortho-lora
-
-down_init = "weight_svd"
 
 # -------------
 # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
@@ -164,22 +163,12 @@ down_init = "weight_svd"
 # register run is never bit-exact to no-adapter, incl. the vr_loss
 # multiplier=0 control forward.
 
-num_registers = 64           # 0 = off. DSR Tab. 9: K=36 best, K=100 worse
-register_insert_block = 8    # DSR starting block (0 = stack entry)
-register_lr_scale = 100      # registers train at lr × this (sink growth)
-register_init_std = 0.02
+# num_registers = 64           # 0 = off. DSR Tab. 9: K=36 best, K=100 worse
+# register_insert_block = 8    # DSR starting block (0 = stack entry)
+# register_lr_scale = 100      # registers train at lr × this (sink growth)
+# register_init_std = 0.02
 
 # output_name = "anima_lora_reg"
-
-# -------------
-# Variance-reduced FM loss (AsymFlow §5.2, arXiv:2605.12964). One extra
-# no-grad forward per step on the FEI-low-passed latent, with an online
-# control-variate λ. The control-variate forward reuses the trainable DiT
-# with adapter multiplier=0 (equivalent to a frozen base DiT for LoRA-family
-# runs), so there is no extra model copy in VRAM — only ~+40% step compute.
-# See bench/fm_vr_headroom/proposal.md.
-# vr_loss_weight = 1.0
-# vr_fei_sigma_low_div = 4.0
 
 # -------------
 # REPA — encoder-alignment aux loss (docs/methods/repa.md).

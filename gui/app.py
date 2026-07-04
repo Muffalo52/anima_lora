@@ -29,7 +29,7 @@ from gui import daemon as gui_daemon
 from gui import theme as gui_theme
 from gui.dialogs import GuidebookDialog, _guidebook_path
 from gui.gpu_status import GpuStatusBar
-from gui.widgets import action_button, wrap_tooltip
+from gui.widgets import LazyTabHolder, action_button, wrap_tooltip
 from gui.i18n import load_language, t
 from gui.settings_dialog import SettingsDialog
 from gui.tabs.easycontrol_tab import EasyControlTab
@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
         self.models_btn.setToolTip(t("models_btn_tooltip"))
         self.models_btn.clicked.connect(
             lambda: open_models_dialog(
-                self, on_models_changed=self._image_tab.reload_tag_knowledge_base
+                self, on_models_changed=self._reload_image_tab_kb
             )
         )
         lang_bar.addWidget(self.models_btn)
@@ -178,20 +178,27 @@ class MainWindow(QMainWindow):
             t("tab_config"),
         )
         self.tabs.addTab(self._preprocess_tab, t("tab_preprocess"))
-        self._image_tab = ImageViewerTab(preprocess_tab=self._preprocess_tab)
+        # Every tab after the initial (Config) one is a LazyTabHolder: the real
+        # tab — widget tree, KB preload thread, daemon reattach — is built on
+        # first open, keeping the launch path to Config + Preprocess only.
+        self._image_tab = LazyTabHolder(
+            lambda: ImageViewerTab(preprocess_tab=self._preprocess_tab)
+        )
         self.tabs.addTab(self._image_tab, t("tab_images"))
-        self.tabs.addTab(MergeTab(), t("tab_merge"))
+        self.tabs.addTab(LazyTabHolder(MergeTab), t("tab_merge"))
         # MethodsTab folds every trainable experimental method behind one dropdown; EasyControl keeps
         # a dedicated tab because it has its own preprocess/dataset lifecycle.
         self.tabs.addTab(
-            MethodsTab(
-                tb_panel=self._tb_tab.panel,
-                flat_methods=("chimera", "soft_tokens"),
-                distill_methods=("spd",),
+            LazyTabHolder(
+                lambda: MethodsTab(
+                    tb_panel=self._tb_tab.panel,
+                    flat_methods=("chimera", "soft_tokens"),
+                    distill_methods=("spd",),
+                )
             ),
             t("tab_experimental"),
         )
-        self.tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
+        self.tabs.addTab(LazyTabHolder(EasyControlTab), t("tab_easycontrol"))
 
         self._queue_tab = QueueTab()
 
@@ -226,6 +233,13 @@ class MainWindow(QMainWindow):
         self._queue_tab.cleanup_subprocess()
         self._gpu_bar.cleanup()
         super().closeEvent(event)
+
+    def _reload_image_tab_kb(self) -> None:
+        """Refresh the Images tab's tag KB after a Models-dialog download. A
+        not-yet-built (lazy) Images tab needs nothing — it reads the fresh CSV
+        when first opened."""
+        if self._image_tab.inner is not None:
+            self._image_tab.inner.reload_tag_knowledge_base()
 
     def _show_update_available(self, latest_tag: str) -> None:
         self.update_btn.setText(t("update_btn_available"))

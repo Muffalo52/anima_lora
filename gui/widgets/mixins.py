@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -42,6 +43,44 @@ class LazyTabMixin:
 
     def _lazy_init(self) -> None:
         """Run the tab's first directory scan / classification. Override."""
+
+
+class LazyTabHolder(QWidget):
+    """Defer a tab's entire *construction* until it is first opened.
+
+    :class:`LazyTabMixin` only defers a tab's first directory scan — the
+    widget tree itself is still built up front, and with the app-wide QSS
+    every widget creation pays a style-resolution tax. For tabs that are not
+    visible at launch even that is wasted time, so this holder sits in the
+    ``QTabWidget`` as an empty page and builds the real tab (via ``factory``)
+    on the first ``showEvent``. The inner tab's own ``LazyTabMixin`` scan then
+    fires naturally as it becomes visible.
+
+    ``inner`` is ``None`` until built — callers reaching into the tab from
+    outside (e.g. the Models dialog refreshing the Images tab's tag KB) must
+    treat a not-yet-built tab as "nothing to update": it will construct from
+    fresh on-disk state when opened. ``cleanup_subprocess`` forwards to the
+    inner tab so ``MainWindow.closeEvent``'s teardown loop keeps working.
+    """
+
+    def __init__(self, factory):
+        super().__init__()
+        self._factory = factory
+        self.inner: QWidget | None = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+    def showEvent(self, event):  # noqa: N802 — Qt event handler name
+        super().showEvent(event)
+        if self.inner is None:
+            self.inner = self._factory()
+            self.layout().addWidget(self.inner)
+
+    def cleanup_subprocess(self) -> None:
+        if self.inner is not None:
+            cleanup = getattr(self.inner, "cleanup_subprocess", None)
+            if callable(cleanup):
+                cleanup()
 
 
 class DirtyTrackingMixin:

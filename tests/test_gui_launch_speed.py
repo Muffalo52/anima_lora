@@ -11,9 +11,11 @@ by other tests that legitimately import torch):
   moment a heavy import sneaks back into the ``gui.app`` chain, regardless of
   how fast the machine is.
 * ``test_gui_launch_under_budget`` — end-to-end wall clock: import ``gui.app``,
-  build and show ``MainWindow`` offscreen. Budget is generous vs. the ~1.6s
-  measured worst case (daemon down: 3 × 0.25s health-probe timeouts) so a
-  loaded machine doesn't flake it, while a torch-sized regression still trips.
+  build and show ``MainWindow`` offscreen. Budget is generous vs. the ~1.4s
+  measured warm launch (Config/Preprocess eager, everything else behind
+  ``LazyTabHolder``) so a loaded machine doesn't flake it, while a
+  torch-sized regression — or eager-building the lazy tabs again — still
+  trips.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-LAUNCH_BUDGET_S = 2.5
+LAUNCH_BUDGET_S = 2.0
 
 # Heavyweight modules that must never load in the GUI process.
 _FORBIDDEN = ("torch", "cv2")
