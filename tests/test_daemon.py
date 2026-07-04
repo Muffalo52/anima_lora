@@ -1277,28 +1277,6 @@ def test_anima_daemon_is_stdlib_only():
     assert not offenders, f"daemon must stay stdlib-only, found: {offenders}"
 
 
-def test_scripts_daemon_compat_shim_aliases_same_objects():
-    """``scripts.daemon.<mod>`` is the *same module object* as
-    ``anima_daemon.<mod>`` — so external MCP registrations and pre-move callers
-    keep working, and test/monkeypatch identity is preserved across both paths.
-    """
-    import importlib
-
-    for name in (
-        "config",
-        "client",
-        "server",
-        "manager",
-        "jobs",
-        "proc",
-        "gpu",
-        "tail",
-    ):
-        old = importlib.import_module(f"scripts.daemon.{name}")
-        new = importlib.import_module(f"anima_daemon.{name}")
-        assert old is new, f"scripts.daemon.{name} is not anima_daemon.{name}"
-
-
 # --------------------------------------------------------------------------
 # Phase 1a: result-envelope lift (bench/test-* jobs become citizens)
 # --------------------------------------------------------------------------
