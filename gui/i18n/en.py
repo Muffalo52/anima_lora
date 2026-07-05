@@ -345,6 +345,7 @@ STRINGS: dict[str, str] = {
     "queue_detail_config": "config: {path}",
     "queue_detail_stdout": "stdout: {path}",
     "daemon_reattached": "Re-attached to running job {job_id} (started in a previous session).\n",
+    "daemon_next_queued": "Following the next queued job {job_id} on the training daemon.\n",
     "daemon_job_finished": "--- Job {job_id} {state} ---",
     "daemon_job_failed": "--- Job {job_id} {state}: {error} ---",
     "daemon_error_cause": "↳ likely cause: {summary}",

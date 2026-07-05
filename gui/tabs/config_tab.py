@@ -1602,7 +1602,53 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # run still explains where samples would appear).
         if kind == "train" and state == "done":
             self._show_sample_output(announce=True)
+        # Follow the serial queue: if the daemon has another train job we own
+        # running/queued behind the one that just finished, hop the bar onto it
+        # instead of snapping to idle — otherwise a run queued behind this one
+        # goes live on the daemon while the GUI shows no progress bar at all.
+        if self._follow_queue_successor(finished_id=job_id):
+            return
         self._restore_idle_ui()
+
+    def _follow_queue_successor(self, *, finished_id: str) -> bool:
+        """Re-attach the UI to the queue's next train job, if any.
+
+        The daemon's serial worker promotes the next queued job to running the
+        instant this one ends, but the GUI only ever consults ``active_job_id``
+        once (at tab construction) — so without this the bar vanishes even
+        though a run we queued behind this one is now live. Returns True when it
+        hopped onto a successor (caller stays busy), False to go idle.
+
+        Attaching while the successor is still ``queued`` is fine: the poll loop
+        shows "starting" and picks up its progress.jsonl once it starts."""
+        try:
+            jobs = gui_daemon.list_jobs_passive()
+        except Exception:  # noqa: BLE001 — daemon down/unreachable → go idle
+            return False
+        successor: tuple[tuple[int, float], str] | None = None
+        for job in jobs:
+            jid = job.get("id")
+            if not jid or jid == finished_id:
+                continue
+            if job.get("state") not in ("running", "queued"):
+                continue
+            if (job.get("kind") or "train") != "train":
+                continue
+            # Running beats queued; within a tier the earliest submit wins (FIFO).
+            rank = (
+                0 if job.get("state") == "running" else 1,
+                float(job.get("submitted_at") or 0.0),
+            )
+            if successor is None or rank < successor[0]:
+                successor = (rank, jid)
+        if successor is None:
+            return False
+        self.log.clear()
+        self._reset_progress()
+        self._progress_tracker.mark_starting(t("starting"))
+        self._log(t("daemon_next_queued", job_id=successor[1]))
+        self._attach_to_job(successor[1], replay_log=True, kind="train")
+        return True
 
     def _reattach_chained_training(self, job_id: str) -> None:
         """Bind the UI to a training job the daemon auto-chained off a preprocess.
