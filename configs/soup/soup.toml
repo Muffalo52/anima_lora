@@ -1,0 +1,55 @@
+# Soup — the ingredient config for `make soup TARGET=<artist>`.
+#
+# Self-contained per-method file (the EasyControl-pilot layout): `--method soup`
+# auto-discovers it via `_resolve_method_path` (preferred over any flat
+# configs/methods/soup.toml). It exists so the soup pipeline no longer piggybacks
+# on configs/methods/lora.toml — that file is an experiment scratchpad (drifting
+# path_pattern / output_name, comment-toggle-able ortho/T-LoRA/Hydra/REPA), and
+# souping REQUIRES a stable PLAIN-LoRA stack (scripts/soup/build.py refuses
+# Hydra / chimera / stacked-experts / ortho key shapes).
+#
+# Two roles in one file:
+#   * the flat scalars below are the train.py method config for the Phase 1
+#     uncond inter-train + the Phase 2 seeded fine-tunes (both run
+#     `train.py --method soup`);
+#   * the `[soup]` table holds the pipeline defaults (pool / dose / seeds / rank)
+#     read directly by scripts/soup/pipeline.py — it's stripped before the
+#     argparse-flat merge (registered as a metadata section) so train.py never
+#     sees it.
+#
+# The dataset blueprint is inherited from base.toml; the pipeline overrides
+# path_pattern (pool alternation for Phase 1, the target dir for Phase 2) and
+# output_name per run, so neither is pinned here.
+
+# --- plain-LoRA stack (matches the validated recipe, bench/memorization/report.md)
+# 90, 128, 152, 180, 214 each for 16, 32, 48, 64, 96
+network_alpha = 90
+network_dim = 16
+down_init = "weight_svd"
+
+learning_rate = 5e-5
+max_train_epochs = 4
+save_every_n_epochs = 4
+checkpointing_epochs = 4
+
+use_shuffled_caption_variants = true
+cache_llm_adapter_outputs = true
+caption_dropout_rate = 0.1   # Phase 1 overrides to 1.0 (uncond); Phase 2 keeps this
+
+# REPA aux loss (training-time regularizer, plain-LoRA-safe — no checkpoint key
+# change, so the soup guard still passes). PREREQ: `make preprocess-pe-spatial`.
+use_repa     = true
+repa_mode    = "relational"
+repa_weight  = 0.05
+repa_layer   = 8
+repa_encoder = "pe_spatial"
+
+# --- pipeline defaults (read by scripts/soup/pipeline.py; stripped from the
+# train.py merge). CLI flags / env knobs (POOL_SHARD_N / UNCOND_RATIO / … ) still
+# override these per run.
+[soup]
+pool_shard_n = 16       # round-robin shard count; the shard containing TARGET is the pool
+uncond_ratio = 0.5      # Phase 1 --sample_ratio (the Act-3 operating point)
+uncond_epochs = 2       # Phase 1 dose: 2 epochs at a minority share is memorization-neutral
+seeds = [1001, 1002, 1003]   # Phase 2 fine-tune seeds (souping absorbs the seed lottery)
+# rank = 16             # Phase 3 SVD truncation rank; default = network_dim above

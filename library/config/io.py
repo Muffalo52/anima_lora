@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 _DATASET_CONFIG_SECTIONS = {"general", "datasets"}
 # Top-level TOML tables that exist to carry metadata for tooling (variant
 # registry for the GUI; ``[<preset>.gui]`` display metadata inside preset
-# sections), not values for the argparse namespace. They're stripped before
-# flattening so their keys never reach the trainer / schema.
-_METADATA_CONFIG_SECTIONS = {"variant", "gui"}
+# sections; ``[soup]`` pipeline knobs read by scripts/soup/pipeline.py), not
+# values for the argparse namespace. They're stripped before flattening so their
+# keys never reach the trainer / schema.
+_METADATA_CONFIG_SECTIONS = {"variant", "gui", "soup"}
 _NON_FLAT_SECTIONS = _DATASET_CONFIG_SECTIONS | _METADATA_CONFIG_SECTIONS
 _SNAPSHOT_SUFFIX = ".snapshot.toml"
 _DUMP_SKIP_KEYS = {

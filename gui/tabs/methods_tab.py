@@ -13,7 +13,8 @@ selecting a distill method swaps in its editor.
 
 The same wrapper backs two tabs (see ``gui/app.py``): the **main Config tab**
 (``lora`` / ``tlora`` / ``hydralora`` + the promoted ``turbo`` distiller) and the
-**Experimental tab** (``chimera`` / ``soft_tokens`` + the ``spd`` distiller).
+**Experimental tab** (``chimera`` / ``soft_tokens`` + the ``spd`` distiller and
+the ``soup`` pipeline).
 """
 
 from __future__ import annotations
@@ -29,13 +30,16 @@ from PySide6.QtWidgets import (
 
 from gui.tabs.config_tab import ConfigTab
 from gui.tabs.distill_tab import SPDTrainTab, TurboTrainTab
+from gui.tabs.soup_tab import SoupTrainTab
 
 
 class MethodsTab(QWidget):
     """Unified method picker (flat-config + distill editors)."""
 
-    # Distill methods → their bespoke sectioned-config editor class.
-    _DISTILL_EDITORS = {"spd": SPDTrainTab, "turbo": TurboTrainTab}
+    # Distill methods → their bespoke sectioned-config editor class. `soup` is
+    # not a distiller but shares the same shape (a bespoke pipeline submitting a
+    # daemon command job, no train.py path), so it rides the same picker slot.
+    _DISTILL_EDITORS = {"spd": SPDTrainTab, "turbo": TurboTrainTab, "soup": SoupTrainTab}
 
     def __init__(
         self,

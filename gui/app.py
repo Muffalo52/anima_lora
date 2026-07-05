@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
                 lambda: MethodsTab(
                     tb_panel=self._tb_tab.panel,
                     flat_methods=("chimera", "soft_tokens"),
-                    distill_methods=("spd",),
+                    distill_methods=("spd", "soup"),
                 )
             ),
             t("tab_experimental"),

@@ -46,6 +46,19 @@ from scripts.tasks._common import build_launch_cmd, build_method_args, run  # no
 UNCOND_SEED = 1000  # fixed: the uncond init is a shared, reusable artifact
 
 
+def _soup_defaults() -> dict:
+    """The ``[soup]`` table from configs/soup/soup.toml — pipeline knob defaults
+    (pool / dose / seeds / rank). Stripped from the train.py merge (registered as
+    a metadata section), so it lives here purely to seed this argparser. Missing
+    file / table → ``{}`` (argparse hard-coded fallbacks below still apply)."""
+    import toml
+
+    path = ROOT / "configs" / "soup" / "soup.toml"
+    if not path.exists():
+        return {}
+    return toml.load(path).get("soup", {})
+
+
 def resolve_pool(
     target: str,
     pool: list[str] | None,
@@ -100,6 +113,7 @@ def _train(args_list: list[str], dry_run: bool) -> None:
 
 
 def main() -> None:
+    d = _soup_defaults()
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -111,17 +125,19 @@ def main() -> None:
         help="explicit uncond pool artists (target auto-added); default = the "
         "artist shard containing the target",
     )
-    ap.add_argument("--pool_shard_n", type=int, default=16)
-    ap.add_argument("--uncond_ratio", type=float, default=0.5)
-    ap.add_argument("--uncond_epochs", type=int, default=2)
-    ap.add_argument("--seeds", nargs="+", type=int, default=[1001, 1002, 1003])
+    ap.add_argument("--pool_shard_n", type=int, default=d.get("pool_shard_n", 16))
+    ap.add_argument("--uncond_ratio", type=float, default=d.get("uncond_ratio", 0.5))
+    ap.add_argument("--uncond_epochs", type=int, default=d.get("uncond_epochs", 2))
+    ap.add_argument(
+        "--seeds", nargs="+", type=int, default=d.get("seeds", [1001, 1002, 1003])
+    )
     ap.add_argument(
         "--rank",
         type=int,
-        default=None,
+        default=d.get("rank"),
         help="SVD truncation rank (default: the method config's network_dim)",
     )
-    ap.add_argument("--method", default="lora")
+    ap.add_argument("--method", default="soup")
     ap.add_argument("--preset", default="default")
     ap.add_argument("--dry_run", action="store_true")
     args, ft_extra = ap.parse_known_args()
