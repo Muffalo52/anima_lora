@@ -8,7 +8,7 @@ edge (LANCZOS) to bound the per-sample DataLoader decode cost. Masters already <
 are copied verbatim (no recompress, no softening). Masters with min side < 256 (can't
 yield a clean 256² crop) are skipped.
 
-Run inside sr/.venv:  python scripts/prep_rsd_cache.py [--cap 4096 --workers 8]
+Run in the root venv:  python sr/scripts/prep_rsd_cache.py [--cap 4096 --workers 8]
 """
 import argparse
 import shutil

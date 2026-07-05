@@ -6,7 +6,7 @@ then scores it against (a) the HR ground truth [full-reference: PSNR/SSIM/LPIPS]
 and (b) a plain bicubic x4 baseline [no-reference: CLIPIQA/MUSIQ via pyiqa], and
 writes side-by-side montages (bicubic | ResShift | HR) for blind eyeballing.
 
-MUST run inside sr/.venv (modern torch, no xformers). The ResShift inference is
+Runs in the root venv (modern torch, no xformers). The ResShift inference is
 invoked as a subprocess with cwd=ResShift so its cwd-relative config/weight
 download logic just works.
 """

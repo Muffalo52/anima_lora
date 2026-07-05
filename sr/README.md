@@ -14,9 +14,14 @@ ResShift's source is **vendored** under [`sr/resshift/`](resshift/) (committed �
 `sr/weights/` (gitignored, ~1.6 GB; auto-downloaded by `sr_infer.py` from the v2.0
 release if missing).
 
-The sidecar still runs in its **own** venv `sr/.venv` — not for torch reasons (it runs
-the **same torch as root**: Python 3.13, `torch 2.12 + cu132`, Blackwell sm_120, no
-xformers) but to keep the SR deps (`pyiqa`, `lpips`, …) out of the main Anima lockfile.
+The sidecar runs in the **root Anima venv** — there is no separate `sr/.venv` anymore.
+Its deps are an opt-in dependency group in the root `pyproject.toml`, installed with
+`uv sync --group sr` (wrapped by `make sr-setup`). Keeping them in a group rather than
+core `dependencies` keeps the heavy metrics closure (`pyiqa` → `opencv-python-headless`,
+`bitsandbytes`, `facexlib`, `datasets`, plus dev-tools as runtime deps) out of every
+`uv sync`. The old isolated venv was for torch-conflict reasons that no longer exist —
+the SR env long ago converged on root's torch (see below), and ResShift is vendored
+basicsr-free, added to `sys.path` at import time (venv-independent).
 
 - **Same Blackwell torch as root** (`torch 2.12 + cu132`, cu132 index). Python 3.13
   to match root and kill a version-drift axis.
@@ -29,14 +34,14 @@ xformers) but to keep the SR deps (`pyiqa`, `lpips`, …) out of the main Anima 
   it); `sr_infer.py` reimplements released-model inference over the vendored core.
 
 ```bash
-make sr-setup        # one-time: create sr/.venv (py3.13, cu132), install deps
+make sr-setup        # one-time: uv sync --group sr into the root venv + verify
 make sr-prep         # build frozen synthetic-LR eval set from image_dataset/ (--n 30)
 make sr-phase0       # released ResShift x4 (v3) on eval set + metrics + montages
 make sr-test IN=foo.png [OUT=… VERSION=v3 CHOP=512]   # tiled SR on any image/dir
 ```
 
-`make sr-setup` is idempotent. The vendored VQGAN attention patch lives in the source
-(committed), so there's nothing to re-apply.
+`make sr-setup` is idempotent (`uv sync` is). The vendored VQGAN attention patch lives
+in the source (committed), so there's nothing to re-apply.
 
 ## Phase 0 — verdict (2026-06-29): released model transfers well to our art
 

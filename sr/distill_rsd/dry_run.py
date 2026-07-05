@@ -2,7 +2,7 @@
 real fake-update and one generator-update backward (+optimizer step) and report peak
 VRAM. Answers 'does the RSD loop fit on 16 GB' before writing the full training loop.
 
-Uses random tensors (shapes only) — not real data. Run inside sr/.venv.
+Uses random tensors (shapes only) — not real data. Run in the root venv.
 """
 import argparse
 import sys

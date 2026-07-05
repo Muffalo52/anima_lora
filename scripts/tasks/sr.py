@@ -1,11 +1,11 @@
 """``make sr-*`` — ResShift super-resolution sidecar dispatch.
 
-The SR sidecar lives OUTSIDE Anima's uv project: it has its own isolated venv
-(``sr/.venv`` — same Blackwell torch family as root, **no xformers**). The split is
-NOT a torch-incompatibility (that rationale is stale); it's to keep the SR deps out of
-the main Anima lockfile. ResShift's source is vendored under ``sr/resshift/`` (no
-external clone). These targets are thin shells that invoke that venv's python.
-See ``sr/README.md`` for the env split.
+The SR sidecar runs in the **root Anima venv**: its deps are an opt-in dependency
+group (``uv sync --group sr``) rather than a separate ``sr/.venv``. The old isolated
+venv is obsolete — the SR env has converged on root's Blackwell torch 2.12+cu132 build
+(**no xformers**), and ResShift is vendored basicsr-free under ``sr/resshift/`` (added
+to ``sys.path`` at import time, venv-independent). The heavy metrics closure (pyiqa …)
+stays out of the default install via the group. See ``sr/README.md`` for details.
 """
 
 import os
@@ -15,16 +15,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SR = ROOT / "sr"
-VENV_PY = SR / ".venv" / "bin" / "python"
+VENV_PY = ROOT / ".venv" / "bin" / "python"
 
 
 def _venv_py() -> str:
-    if not VENV_PY.exists():
-        sys.exit(
-            f"SR venv missing ({VENV_PY}).\n"
-            "Create it first:  make sr-setup"
-        )
-    return str(VENV_PY)
+    """Root venv python — falls back to the invoking interpreter if absent."""
+    return str(VENV_PY) if VENV_PY.exists() else sys.executable
 
 
 def _run(cmd, cwd=ROOT):
@@ -35,7 +31,13 @@ def _run(cmd, cwd=ROOT):
 
 
 def cmd_sr_setup(extra):
-    """Create sr/.venv, install Blackwell torch + ResShift deps, patch basicsr."""
+    """Install the SR dependency group into the root venv (uv sync --group sr).
+
+    ``--inexact`` so the sync is purely additive — it installs the SR group without
+    pruning packages the user hand-installed outside the lockfile (e.g. sageattention).
+    """
+    _run(["uv", "sync", "--group", "sr", "--inexact", *extra])
+    # Sanity-check the vendored, basicsr-free ResShift import resolves.
     _run([str(SR / "scripts" / "setup_env.sh")], cwd=SR)
 
 

@@ -1,28 +1,19 @@
 #!/usr/bin/env bash
-# Reproducible setup for the ResShift SR sidecar venv.
+# Verify the ResShift SR sidecar can run in the ROOT Anima venv.
 #
-# The venv is isolated from Anima's uv project NOT because of torch (both run the
-# same torch 2.12 + cu132 Blackwell build) but to keep the SR deps out of the main
-# Anima lockfile. ResShift's own source is VENDORED under sr/resshift/ (committed),
-# so there's no external clone to fetch or patch. Python is pinned to 3.13 to match
-# the root .venv; xformers is intentionally absent (the vendored VQGAN already ships
-# the query-chunked SDPA attention -- a Blackwell xformers build is a non-win, see
-# README.md). basicsr is gone too: the vendored tree is basicsr-free.
+# The sidecar no longer has its own venv. Its deps are an opt-in dependency group
+# installed with `uv sync --group sr` (run by `make sr-setup` before this script).
+# torch/torchvision are already core Anima deps (the same torch 2.12 + cu132 Blackwell
+# build), so there is nothing SR-specific to install beyond the group. xformers stays
+# absent (the vendored VQGAN ships query-chunked SDPA — a Blackwell xformers build is a
+# non-win, see README.md); ResShift's source is VENDORED basicsr-free under
+# sr/resshift/, added to sys.path at import time, so there is no external clone to fetch.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # -> sr/
 
-echo "==> creating sr/.venv (python 3.13, matching root .venv)"
-uv venv .venv --clear --python 3.13
-
-echo "==> installing torch/torchvision (cu132 index -> Blackwell sm_120 build, matches root)"
-uv pip install --python .venv/bin/python torch torchvision \
-    --index-url https://download.pytorch.org/whl/cu132
-
-echo "==> installing SR deps (xformers + basicsr intentionally omitted)"
-uv pip install --python .venv/bin/python -r requirements.txt
-
-echo "==> verifying (torch + vendored ResShift import)"
-.venv/bin/python - <<'PY'
+echo "==> verifying (torch + vendored ResShift import in the root venv)"
+# `uv run` from sr/ discovers the root pyproject upward and uses the synced venv.
+uv run python - <<'PY'
 import sys, torch
 from pathlib import Path
 sys.path.insert(0, str(Path("resshift").resolve()))
@@ -32,4 +23,4 @@ print("torch", torch.__version__, "cuda", torch.cuda.is_available(),
       "cap", torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)
 print("vendored ResShift import OK")
 PY
-echo "==> SR venv ready."
+echo "==> SR sidecar ready (running in the root Anima venv)."

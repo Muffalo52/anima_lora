@@ -3,7 +3,7 @@
 Two-timescale: K fake-critic updates per generator update. Frozen v2 teacher, 1-step
 stochastic student, fake ResShift critic + GAN head, image-space LPIPS. See DESIGN.md.
 
-Run inside sr/.venv:  python train.py --iters 3000 [--bs 6 --compile] [--no-amp]
+Run in the root venv:  make sr-rsd-train ARGS="--iters 3000 [--bs 6 --compile] [--no-amp]"
 (perf defaults benched 2026-07-02 — see DESIGN.md "Throughput".)
 """
 import argparse
@@ -48,7 +48,7 @@ def dc_loss(a, b, k=32):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=2000, help="generator updates")
+    ap.add_argument("--iters", type=int, default=12000, help="generator updates")
     ap.add_argument("--K", type=int, default=5, help="fake updates per generator update")
     ap.add_argument("--bs", type=int, default=4,
                     help="batch size (default 4: benched 2026-07-02 on the 16GB 5070 Ti — "

@@ -25,7 +25,7 @@ What it does:
     Perf defaults follow the 2026-07-02 distill_rsd pass (same net, same 256² crops):
     grad-ckpt OFF (recompute costs ~25%), bf16 ON, --compile to trade warmup for VRAM.
 
-Run inside sr/.venv:  python train.py --iters 30000 [--bs 8 --compile] [--no-amp]
+Run in the root venv:  make sr-train ARGS="--iters 30000 [--bs 8 --compile] [--no-amp]"
 or:                    make sr-train ARGS="--iters 30000 --bs 8"
 """
 import argparse

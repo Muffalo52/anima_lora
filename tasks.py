@@ -117,10 +117,10 @@ COMMANDS = {
         "Full EasyControl preprocess: latents + text emb. "
         "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
     ),
-    # ── ResShift SR sidecar (isolated sr/.venv — NOT Anima's torch) ───
+    # ── ResShift SR sidecar (runs in the root venv; deps in the `sr` group) ───
     "sr-setup": (
         sr.cmd_sr_setup,
-        "Create sr/.venv (Blackwell torch, no xformers) + patch basicsr. One-time.",
+        "Install the SR dep group into the root venv (uv sync --group sr) + verify. One-time.",
     ),
     "sr-prep": (
         sr.cmd_sr_prep,
@@ -132,7 +132,7 @@ COMMANDS = {
     ),
     "sr-test": (
         sr.cmd_sr_test,
-        "Tiled SR on IN=<img|dir> [OUT= SCALE=4 VERSION=v3 CHOP=512] via the SR venv.",
+        "Tiled SR on IN=<img|dir> [OUT= SCALE=4 VERSION=v3 CHOP=512].",
     ),
     "sr-build-hr-pool": (
         sr.cmd_sr_build_hr_pool,

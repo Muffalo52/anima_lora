@@ -119,3 +119,29 @@ build-backend = "setuptools.build_meta"
 dev = [
     "markdownify",
 ]
+# ResShift super-resolution sidecar (sr/). Kept as an OPT-IN group rather than core
+# `dependencies` so the heavy metrics closure (pyiqa → opencv-python-headless,
+# bitsandbytes, facexlib, datasets, plus dev-tools as runtime deps) doesn't land in
+# every `uv sync`. torch/torchvision are already core deps (same cu132 Blackwell
+# build), and the SR env has converged on them — the old isolated `sr/.venv` split
+# (torch 2.1.1 + xformers) is obsolete now that ResShift is vendored basicsr-free
+# under sr/resshift/. Install with:  uv sync --group sr   (see sr/README.md).
+sr = [
+    "scipy",
+    "timm",
+    "pandas",
+    "scikit-image",
+    "lpips",
+    "loguru",
+    "omegaconf",
+    "six",
+    "imageio",
+    "loralib",
+    "pyiqa",
+    "albumentations",
+    "einops",
+    "matplotlib",
+    "opencv-python",
+    "scikit-learn",
+    "tqdm",
+]

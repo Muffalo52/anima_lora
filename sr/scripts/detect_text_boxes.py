@@ -22,7 +22,7 @@ Output JSON (consumed by sr/distill_rsd/data.py::ArtSRDataset):
 Every processed file gets a key; an empty list means "processed, no text" (so
 --resume can skip it and the dataset can build its text-file list cheaply).
 
-    sr/.venv/bin/python sr/scripts/detect_text_boxes.py            # hr_pool, GPU
+    python sr/scripts/detect_text_boxes.py                        # hr_pool, GPU (root venv)
     ... --src <dir> --out <json> --workers N --limit 100 --resume --no-gpu
 """
 import argparse
