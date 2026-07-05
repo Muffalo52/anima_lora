@@ -241,7 +241,17 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
             seen: set[str] = set()
             for rx in (_MULTI_RE, _SINGLE_RE):
                 for m in rx.finditer(line):
-                    bad = _check_path(m.group(0), top)
+                    tok = m.group(0)
+                    # A glob prefix (`results/20260607-*`) isn't a literal path
+                    # claim — the regex truncates at the '*'. Anchor on the parent
+                    # directory instead so the family ref still verifies its root
+                    # but the partial stem doesn't read as a broken path.
+                    if line[m.end() : m.end() + 1] == "*":
+                        head, sep, _ = tok.rpartition("/")
+                        if not sep:
+                            continue  # bare glob (`foo*`) — nothing to anchor
+                        tok = head + "/"
+                    bad = _check_path(tok, top)
                     if bad and bad not in seen:
                         seen.add(bad)
                         issues.append(

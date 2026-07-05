@@ -29,6 +29,11 @@ from anima_daemon.mcp import MCPServer
 from anima_daemon.server import serve
 from scripts.tasks._common import build_method_args
 
+# This suite drives the real daemon job queue over live subprocesses and timers:
+# ~55s serial, but ~4x faster under xdist since the waits overlap. `make test-unit`
+# runs it in the parallel phase (`-m slow -n auto`). See pyproject `[tool.pytest]`.
+pytestmark = pytest.mark.slow
+
 
 # --------------------------------------------------------------------------
 # pure helpers

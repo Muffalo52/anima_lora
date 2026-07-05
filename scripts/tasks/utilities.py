@@ -103,7 +103,23 @@ def cmd_distill_mod(extra):
 
 
 def cmd_test_unit(extra):
-    run([PY, "-m", "pytest", "-q", "tests/", *extra])
+    """Run smoke/unit tests, split for speed.
+
+    The ``slow`` suites (daemon job queue) are sleep/subprocess-bound: ~55s
+    serial but ~4x faster under xdist since their waits overlap. The fast unit
+    tests are the reverse — xdist's per-worker startup exceeds their ~20s
+    runtime — so we run the fast set serially and the slow set with ``-n auto``.
+    Net: ~73s → ~33s, no coverage change. Falls back to a single serial run
+    when xdist is missing (``pip install pytest-xdist`` / the ``dev`` extra) or
+    the caller passes their own args (``ARGS=…``), which take full control.
+    """
+    import importlib.util
+
+    if extra or importlib.util.find_spec("xdist") is None:
+        run([PY, "-m", "pytest", "-q", "tests/", *extra])
+        return
+    run([PY, "-m", "pytest", "-q", "-m", "not slow", "tests/"])
+    run([PY, "-m", "pytest", "-q", "-m", "slow", "-n", "auto", "tests/"])
 
 
 def cmd_update(extra):

@@ -14,7 +14,7 @@ ResShift's source is **vendored** under [`sr/resshift/`](resshift/) (committed �
 `sr/weights/` (gitignored, ~1.6 GB; auto-downloaded by `sr_infer.py` from the v2.0
 release if missing).
 
-The sidecar runs in the **root Anima venv** — there is no separate `sr/.venv` anymore.
+The sidecar runs in the **root Anima venv** — there is no separate per-sidecar virtualenv anymore.
 Its deps are an opt-in dependency group in the root `pyproject.toml`, installed with
 `uv sync --group sr` (wrapped by `make sr-setup`). Keeping them in a group rather than
 core `dependencies` keeps the heavy metrics closure (`pyiqa` → `opencv-python-headless`,
