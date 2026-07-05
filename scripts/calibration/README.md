@@ -56,20 +56,7 @@ Consumer: `networks/lora_anima/factory.py` (`_CHANNEL_STATS_PATH`) and
 `project_per_channel_scaling_audit`. User doc:
 `docs/optimizations/channel_scaling.md`.
 
-## PiD — pixel-decoder color calibration
-
-Fits a static PiD→native-VAE color transform on Anima's own latents (the cheap
-decode-time equivalent of NVIDIA's retrained `_2606` checkpoint).
-
-```bash
-uv run python scripts/calibration/fit_color_calib.py --num_images 24 --steps 4
-```
-
-- `fit_color_calib.py` — writes `pid_color_calib.safetensors` to `--out_dir`
-  (default `output/calibration/pid_color_calib/`); fit summary prints to stdout.
-  Fit at the **exact** decode step count. The reference RGB is produced by the
-  production decoder (`load_vae` + `decode_to_pixels`, `--vae` defaults to the
-  configured Qwen-Image VAE).
-
-The PiD node ships from the standalone `ComfyUI-Anima-PiD` repo. Findings:
-memory `project_pid_color_drift_calib`.
+> **PiD color calibration — retired 2026-07-05.** `fit_color_calib.py` (PiD→native-VAE
+> color-drift transform) moved to `_archive/scripts/calibration/`. The whole PiD
+> decode path is superseded by the ResShift SR sidecar (x4/x2 students), which was
+> verified to replace it. Findings history: memory `project_pid_color_drift_calib`.
