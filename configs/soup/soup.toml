@@ -17,17 +17,18 @@
 #     argparse-flat merge (registered as a metadata section) so train.py never
 #     sees it.
 #
-# The dataset blueprint is inherited from base.toml; the pipeline overrides
-# path_pattern (the pool glob for Phase 1, the fine-tune glob for Phase 2) and
-# output_name per run, so neither is pinned here.
+# The dataset blueprint is inherited from base.toml. `path_pattern` below is the
+# Phase-2 fine-tune glob and doubles as the DEFAULT selection for `make soup`
+# when neither PATH_PATTERN= nor TARGET= is passed (both still override it, as
+# does the pipeline's Phase-1 uncond pool glob). output_name is set per run.
 
 # --- plain-LoRA stack (matches the validated recipe, bench/memorization/report.md)
 # 90, 128, 152, 180, 214 each for 16, 32, 48, 64, 96
-network_alpha = 90
-network_dim = 16
+network_alpha = 128
+network_dim = 32
 down_init = "weight_svd"
 
-learning_rate = 5e-5
+learning_rate = 2e-5
 max_train_epochs = 4
 save_every_n_epochs = 4
 checkpointing_epochs = 4
@@ -35,6 +36,7 @@ checkpointing_epochs = 4
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1   # Phase 1 overrides to 1.0 (uncond); Phase 2 keeps this
+path_pattern = "*"    # Phase-2 fine-tune glob + default `make soup` selection (PATH_PATTERN=/TARGET= override)
 
 # REPA aux loss (training-time regularizer, plain-LoRA-safe — no checkpoint key
 # change, so the soup guard still passes). PREREQ: `make preprocess-pe-spatial`.
@@ -49,7 +51,8 @@ repa_encoder = "pe_spatial"
 # override these per run.
 [soup]
 pool_path_pattern = "*"  # Phase 1 uncond pool glob; "*" = whole dataset (diluted by uncond_ratio). The fine-tune path_pattern is always unioned in.
-uncond_ratio = 0.5      # Phase 1 --sample_ratio (the Act-3 operating point)
-uncond_epochs = 2       # Phase 1 dose: 2 epochs at a minority share is memorization-neutral
+uncond_ratio = 1.0      # Phase 1 --sample_ratio (the Act-3 operating point)
+uncond_epochs = 4       # Phase 1 dose: 2 epochs at a minority share is memorization-neutral
 num_soup = 3            # number of seeded fine-tunes to soup (seeds 1001..1000+N; souping absorbs the seed lottery). >= 2
 # rank = 16             # Phase 3 SVD truncation rank; default = network_dim above
+# uncond_init = ""      # pin a pre-trained uncond adapter → Phase 1 skipped (pool/uncond_ratio/uncond_epochs ignored). Bare name resolves under output/ckpt/.

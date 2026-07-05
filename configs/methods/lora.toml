@@ -1,188 +1,34 @@
 # LoRA family — method selection via toggle blocks.
 #
-# Default (uncommented) = LoRA + OrthoLoRA + T-LoRA + Hydra (σ-routed).
-# Routing config is on the three-axis surface (plan2.md §three-axis-config):
-#
-#     use_moe_style    = False | "shared_A" | "independent_A"
-#     route_per_layer  = true | false
-#     router_source    = "none" | "input" | "sigma" | "fei" | "crossattn_emb"
-#
-# To switch routing modes:
-#   - Plain LoRA stack (no MoE): set `use_moe_style = false` and drop every
-#     `*router*` / `num_experts` / `balance_*` / `sigma_*` / `fei_*` key.
-#   - FEI-on-Hydra (Phase 1, FeRA-style content-aware on the shared-A stack):
-#     comment out the σ-router block and uncomment the FEI block near the
-#     bottom of this file.
-#   - Author-faithful FeRA (independent-A + global FEI router): set
-#     `use_moe_style = "independent_A"` + `route_per_layer = false` +
-#     `router_source = "fei"` here. (The standalone `gui-methods/fera.toml`
-#     variant and its `make exp-fera` shortcut were removed.)
-#
+# Default (uncommented) = LoRA + OrthoLoRA + T-LoRA
+
+# Routing config is on the three-axis surface
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 # 90, 128, 152, 180, 214 each for 16, 32, 48, 64, 96
-network_alpha = 90
-network_dim = 16
 
-learning_rate = 5e-5
-max_train_epochs = 4
-save_every_n_epochs = 4
-checkpointing_epochs = 4
+network_alpha = 128
+network_dim = 32
+
+learning_rate = 2e-5
+max_train_epochs = 8
+save_every_n_epochs = 8
+checkpointing_epochs = 8
 
 use_shuffled_caption_variants = true
 # use_randomized_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
-# output_name = "anima_register_quarter"
-
-output_name = "anima_sincos_t1"
+output_name = "anima_lora"
 down_init = "weight_svd"
+path_pattern = "*"
+
+use_timestep_mask = true
+min_rank = 1
+alpha_rank_scale = 1.0
 
 
-# sigmoid_bias = 0.5
-path_pattern = "sincos/*"
-# timestep_sampling = "uniform"
-# artists_shard="4_4"
-# vr_loss_weight = 1.0
-# vr_fei_sigma_low_div = 4.0
-# use_cmmd=true
-# compile_inductor_mode = "max-autotune"
-
-# -------------
-# OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
-# Full LoRA expressivity with a W0-aligned warm start — drop-in replacement for
-# `use_ortho` when ortho/T-LoRA-ortho feels too weak. Mutually exclusive with
-# use_ortho; non-MoE / non-chimera only. To use: comment out `use_ortho` above.
-# use_ortho_init = true
-
-# -------------
-# Timestep mask
-
-# use_timestep_mask = true
-# min_rank = 1
-# alpha_rank_scale = 1.0
-
-# partitioner_aggressive_recomputation = true
-
-# ---
-# sample_every_n_epochs = 1
-# sample_prompts= "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top and denim shorts is standing outdoors. She's holding a rectangular sign out in front of her that reads \"ANIMA\". She 's looking at the viewer with a smile. The background features some trees and blue sky with clouds."
-# -------------
-# "shared_A" and route_per_layer=false -> hydralora
-
-# use_moe_style = "shared_A"
-# route_per_layer = true
-# router_source = "input"
-# network_router_lr_scale = 10
-# router_source = "crossattn_emb"
-
-# fei_feature_dim = 2          # raw simplex (e_low, e_high)
-# fei_sigma_low_div = 4.0      # σ_low = min(H_lat, W_lat) / 4 — 2026-05-13 dataset sweep
-# fera_num_bands = 2
-# fera_fecl_weight = 0.0
-
-# sigma_feature_dim = 16
-# per_bucket_balance_weight = 0.3   # × balance_loss_weight, per-bucket term
-# num_sigma_buckets = 3
-# specialize_experts_by_sigma_buckets = true
-# sigma_bucket_boundaries = [0.0, 0.5, 0.8, 1.0]
-# router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
-
-# num_experts = 4
-# balance_loss_weight = 1e-7 # seems lr * 1/100 is proper
-# balance_loss_warmup_ratio = 0.4
-
-# OrthoHydra centered-gate init (function-preserving step-0 router gradient).
-# Recenters the gate to (g_e - 1/E), zero-inits the router (exactly uniform at
-# step 0), and starts λ at ortho_lambda_init. ΔW=0 at init yet router logits
-# get gradient from step 0 (disjoint P_e survive the mean subtraction).
-# Watch ortho/router_grad_norm (>0 from step 0), ortho/grad_coupling (cross-
-# expert loss-geometry coupling), ortho/subspace_overlap (structural guardrail).
-# NOTE: distilled _moe checkpoints drop the -(1/E)Σ_e P_e bias → train/research
-# only until the router-live node subtracts the mean expert (see ortho.py).
-# ortho_centered_gate = true
-# ortho_lambda_init = 1e-2     # auto-bumped from 0 when centered_gate is on
-
-
-# -------------
-# "independent_A" and route_per_layer=true -> fera
-
-# use_moe_style = "independent_A"
-# route_per_layer = false 
-# router_source = "fei"
-# ortho_init_std = 0.05
-
-# fei_feature_dim = 2          # raw simplex (e_low, e_high)
-# fei_sigma_low_div = 4.0      # σ_low = min(H_lat, W_lat) / 4 — 2026-05-13 dataset sweep
-# fera_num_bands = 2
-# fera_fecl_weight = 0.0
-
-# output_name = "anima_fera"
-
-# num_experts = 6
-# balance_loss_weight = 2e-7 # seems lr * 1/100 is proper
-
-# balance_loss_warmup_ratio = 0.4
-# router_targets = ".*\\.(qkv_proj|q_proj|kv_proj|output_proj|layer[12])$"
-
-# -------------
-# Text-routed pool (route_per_layer=false + router_source="crossattn_emb")
-#
-# One network-level GlobalRouter routes the whole pool by PROMPT CONTENT —
-# it reads the pooled post-LLM-adapter cross-attn text vector (the DiT's
-# K/V), not σ / noise-frequency. Works with shared_A (Hydra) or
-# independent_A (FeRA-style) layouts. The router pools (B,L,D)→(B,D) over the
-# sequence axis and LayerNorms before the MLP; gates fire per cond/uncond
-# branch at inference. Caveat: experts specialize by caption regime, a
-# different inductive bias from FEI/σ routing — bench before adopting.
-
-# use_moe_style = "shared_A"
-# route_per_layer = false
-# router_source = "crossattn_emb"
-# num_experts = 6
-# balance_loss_weight = 2e-7
-# balance_loss_warmup_ratio = 0.4
-# router_targets = ".*\\.(qkv_proj|q_proj|kv_proj|output_proj|layer[12])$"
-# output_name = "anima_crossattn_routed"
-
-# -------------
-# Register tokens — DSR-style learnable registers trained JOINTLY with the
-# LoRA (the full-LoRA analogue of `--method register`, which trains only a
-# narrow QKV surface; shared machinery in networks/register_injection.py).
-# K non-decoded tokens enter the self-attn sequence at register_insert_block
-# (DSR's "starting block" — Tab. 9: 0 → 5.54, 8 → 5.33 best, 16 → 5.49,
-# 24 → 5.68 on a 28-block DiT-XL at K=36), ride to the end of the stack, and
-# are stripped before unpatchify. Composes with every block above (ortho,
-# T-LoRA, Hydra, REPA — the REPA capture auto-trims the K tokens).
-# Registers ride the sequence, not the weights, so the checkpoint becomes
-# KEPT-LIVE at inference: `make merge` refuses it and in-repo inference
-# auto-detects the `register_tokens` key and attaches dynamic hooks.
-# Gotcha: unaudited with blocks_to_swap > 0 (train.py warns). Gotcha 2:
-# multiplier scales the register CONTENT, but multiplier=0 still leaves K
-# zero-tokens in the sequence (an attention-sink lesion, DSR's arm A) — a
-# register run is never bit-exact to no-adapter, incl. the vr_loss
-# multiplier=0 control forward.
-
-# num_registers = 64           # 0 = off. DSR Tab. 9: K=36 best, K=100 worse
-# register_insert_block = 8    # DSR starting block (0 = stack entry)
-# register_lr_scale = 100      # registers train at lr × this (sink growth)
-# register_init_std = 0.02
-
-# output_name = "anima_lora_reg"
-
-# -------------
-# REPA — encoder-alignment aux loss (docs/methods/repa.md).
-#
-# Aligns a mid-block DiT feature to cached PE-Spatial patch tokens — a training-
-# time regularizer, orthogonal to the routing axes above (composes with the
-# default stack). PREREQ: `make preprocess-pe-spatial` to cache
-# {stem}_anima_pe_spatial.safetensors sidecars first.
-#
-# Shipped stack: relational (Gram) form + REPA-DoG target band-pass, block 8,
-# PE-Spatial, weight 0.05. DoG is on by default in the factory (opt out with
-# repa_target_dog = false). The `absolute` MLP-head arm lost the Phase-0 A/B and
-# stays reference-only — see docs/methods/repa.md before touching it.
 use_repa       = true
 repa_mode      = "relational"
 repa_weight    = 0.05          # settles at ~4% of total loss at plateau

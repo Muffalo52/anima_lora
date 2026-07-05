@@ -118,6 +118,7 @@ def cmd_soup(extra):
     method's ``network_dim``. Output:
     ``output/ckpt/anima_soup_<slug>.safetensors`` (+ ``.snapshot.toml``)::
 
+        make soup                                     # uses soup.toml path_pattern
         make soup PATH_PATTERN="sincos/*"             # attach-by-default
         make soup TARGET=sincos                       # shorthand for "sincos/*"
         make soup PATH_PATTERN="a/*|b/*" NAME=ab --queue
@@ -125,7 +126,9 @@ def cmd_soup(extra):
 
     Selection is a fnmatch **path_pattern** (``|`` = alternatives, matched
     against each image's path relative to its subset image_dir) rather than a
-    single artist dir. ``TARGET`` is a convenience shorthand: ``TARGET=x`` ⇒
+    single artist dir. With neither ``PATH_PATTERN`` nor ``TARGET`` set it falls
+    back to the top-level ``path_pattern`` in ``configs/soup/soup.toml``.
+    ``TARGET`` is a convenience shorthand: ``TARGET=x`` ⇒
     ``PATH_PATTERN="x/*" NAME=x``. ``ARGS`` reaches the fine-tune runs. Env knobs
     (all optional): ``NAME`` (output slug; default derived from the pattern),
     ``POOL_PATH_PATTERN`` (Phase-1 uncond pool glob, default "*" = whole dataset,
@@ -139,23 +142,41 @@ def cmd_soup(extra):
     pattern = os.environ.get("PATH_PATTERN")
     name = os.environ.get("NAME")
     target = os.environ.get("TARGET")
-    if not pattern:
-        if not target:
-            raise SystemExit(
-                'make soup needs PATH_PATTERN=<glob> (e.g. PATH_PATTERN="sincos/*") '
-                'or the TARGET=<dir> shorthand (⇒ PATH_PATTERN="<dir>/*"). '
-                "Example: make soup TARGET=sincos"
-            )
+    if not pattern and target:
         pattern = f"{target}/*"
         name = name or target
     argv = [
         "-m",
         "scripts.soup.pipeline",
-        "--path_pattern",
-        pattern,
         "--preset",
         _preset(),
     ]
+    # CUSTOM=<file> runs an ad-hoc soup config from configs/gui-methods/custom/
+    # (the shared scratch dir, alongside `make lora-gui CUSTOM=`; kept out of the
+    # tracked configs/soup/soup.toml). The file seeds BOTH the [soup] pipeline
+    # knobs and the fine-tune method config.
+    custom = os.environ.get("CUSTOM")
+    if custom:
+        stem = Path(custom).stem
+        expected = ROOT / "configs" / "gui-methods" / "custom" / f"{stem}.toml"
+        if not expected.exists():
+            available = (
+                sorted(p.stem for p in expected.parent.glob("*.toml"))
+                if expected.parent.is_dir()
+                else []
+            )
+            print(
+                f"Unknown custom soup config: {custom!r} (looked for {expected})\n"
+                f"Available in configs/gui-methods/custom/: "
+                f"{', '.join(available) or '(none)'}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        argv += ["--config", str(expected)]
+    # No PATH_PATTERN/TARGET → the pipeline falls back to the top-level
+    # path_pattern in configs/soup/soup.toml (its argparse default).
+    if pattern:
+        argv += ["--path_pattern", pattern]
     if name:
         argv += ["--name", name]
     if os.environ.get("POOL_PATH_PATTERN"):
@@ -163,6 +184,7 @@ def cmd_soup(extra):
     for env, flag in (
         ("UNCOND_RATIO", "--uncond_ratio"),
         ("UNCOND_EPOCHS", "--uncond_epochs"),
+        ("UNCOND_INIT", "--uncond_init"),
         ("NUM_SOUP", "--num_soup"),
         ("RANK", "--rank"),
     ):
@@ -179,7 +201,36 @@ def cmd_lora_gui(extra):
     Variant is taken from GUI_PRESETS env var, falling back to the first
     positional extra arg (``python tasks.py lora-gui tlora ...``), then to
     ``lora`` (plain). Extra args after the variant are forwarded as usual.
+
+    ``CUSTOM=<file>`` runs an ad-hoc config from ``configs/gui-methods/custom/``
+    instead — a scratch tree kept out of the tracked per-variant files, for
+    hand-edited one-offs::
+
+        make lora-gui CUSTOM=lora.toml     # → configs/gui-methods/custom/lora.toml
+
+    The file stem is the method name and the subdir is ``gui-methods/custom``
+    (so ``--method`` auto-discovers it). ``.toml`` is optional. CUSTOM wins over
+    GUI_PRESETS when both are set.
     """
+    custom = os.environ.get("CUSTOM")
+    if custom:
+        stem = Path(custom).stem
+        subdir = ROOT / "configs" / "gui-methods" / "custom"
+        expected = subdir / f"{stem}.toml"
+        if not expected.exists():
+            available = (
+                sorted(p.stem for p in subdir.glob("*.toml")) if subdir.is_dir() else []
+            )
+            print(
+                f"Unknown custom config: {custom!r} (looked for {expected})\n"
+                f"Available in configs/gui-methods/custom/: "
+                f"{', '.join(available) or '(none)'}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        train(stem, extra, methods_subdir="gui-methods/custom")
+        return
+
     variant = os.environ.get("GUI_PRESETS")
     if not variant and extra and not extra[0].startswith("-"):
         variant = extra[0]
