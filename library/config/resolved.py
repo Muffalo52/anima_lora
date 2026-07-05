@@ -1,7 +1,7 @@
 """CLI/TOML/default resolution helpers shared by the bespoke distill schemas.
 
-The bespoke distillation loops (``scripts/distill_turbo`` / ``scripts/distill_spd``
-/ ``scripts/distill_mod``) read sectioned TOML files raw (not through
+The bespoke distillation loops (``scripts/distill_turbo`` / ``scripts/distill_mod``)
+read sectioned TOML files raw (not through
 ``load_method_preset``) and resolve every knob with a hand-rolled CLI-vs-TOML-vs-
 default precedence rule, then freeze the result into a dataclass. Turbo grew the
 cleanest version of that pattern; this module is its promotion so the other loops

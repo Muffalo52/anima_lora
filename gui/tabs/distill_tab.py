@@ -1,11 +1,15 @@
-"""SPD / Turbo distillation config tabs.
+"""Turbo distillation config tab.
 
-SPD and Turbo train through bespoke distill loops (``make exp-spd`` /
-``make turbo`` → ``scripts/distill_{spd,turbo}.py``), NOT ``train.py``, and
-read a *sectioned* TOML (``configs/methods/{spd,turbo}.toml``) — nested
-``[network]`` / ``[schedule]`` / ``[optim]`` / … tables — instead of the flat
-method+preset config the ConfigTab edits. They also have no dataset of their
-own: both reuse the ordinary LoRA cache under ``post_image_dataset/lora``.
+Turbo trains through a bespoke distill loop (``make turbo`` →
+``scripts/distill_turbo/``), NOT ``train.py``, and reads a *sectioned* TOML
+(``configs/methods/turbo.toml``) — nested ``[network]`` / ``[schedule]`` /
+``[optim]`` / … tables — instead of the flat method+preset config the ConfigTab
+edits. It also has no dataset of its own: it reuses the ordinary LoRA cache
+under ``post_image_dataset/lora``.
+
+(The SPD trajectory-adapter distiller shared this tab until 2026-07-05, when the
+SPD LoRA path was archived to ``_archive/spd/``; SPD now ships only as the
+training-free ``--spd`` inference stack — see ``docs/inference/spd.md``.)
 
 So rather than the IP-Adapter / EasyControl dataset-browser launcher (which
 exists to manage a *separate* image set), these get a structured config-editor
@@ -65,8 +69,8 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
     target to the local daemon and observe it via the per-job ``stdout.log``.
     """
 
-    CONFIG_PATH: str = ""  # repo-relative, e.g. "configs/methods/spd.toml"
-    TRAIN_TASK: str = ""  # tasks.py target, e.g. "exp-spd"
+    CONFIG_PATH: str = ""  # repo-relative, e.g. "configs/methods/turbo.toml"
+    TRAIN_TASK: str = ""  # tasks.py target, e.g. "turbo"
     METHOD_LABEL: str = ""
 
     def __init__(self):
@@ -424,13 +428,6 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self.log.moveCursor(QTextCursor.End)
         self.log.insertPlainText(text)
         self.log.moveCursor(QTextCursor.End)
-
-
-class SPDTrainTab(_DistillConfigTab):
-    # SPD trajectory LoRA via the bespoke loop `make exp-spd` (NOT train.py). See docs/inference/spd.md.
-    CONFIG_PATH = "configs/methods/spd.toml"
-    TRAIN_TASK = "exp-spd"
-    METHOD_LABEL = "SPD"
 
 
 class TurboTrainTab(_DistillConfigTab):

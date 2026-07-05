@@ -7,7 +7,6 @@ STRINGS: dict[str, str] = {
     "window_title": "Anima LoRA",
     "tab_config": "Training Config",
     "tab_easycontrol": "EasyControl",
-    "tab_spd": "SPD",
     "tab_turbo": "Turbo",
     "tab_experimental": "Experimental",
     "tab_images": "Dataset Viewer",
@@ -395,7 +394,7 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "Variant '{name}' already exists.",
     "basic_section": "Basic",
     "advanced_section": "Advanced (click to expand)",
-    # SPD / Turbo distillation config tabs (gui/tabs/distill_tab.py)
+    # Turbo distillation config tab (gui/tabs/distill_tab.py)
     "distill_general_section": "general",
     "distill_job_running": "A job is already running on this tab.",
     "distill_config_missing": "Could not read the config file: {err}",

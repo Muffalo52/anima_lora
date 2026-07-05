@@ -156,7 +156,7 @@ def main():
         # Block-compile (class-level, state_dict-transparent). All shape/grad-mode
         # variants share each class's ONE code object, so the recompile budget must be
         # raised — and pinned via its ContextVar .default or it silently reverts to 8 in
-        # the backward-compile context and spills to eager (same trap as distill_mod/spd).
+        # the backward-compile context and spills to eager (same trap as distill_mod).
         sys.path.insert(0, str(M.REPO))
         from library.runtime.dynamo import pin_dynamo_limit  # dependency-free helper
         for knob in ("recompile_limit", "cache_size_limit"):

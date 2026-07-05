@@ -9,7 +9,7 @@ top of the form carrying the per-run ``--path_pattern`` / ``--name`` / fine-tune
 args — these are *not* persisted to the TOML (like ``output_name``, they vary
 per run), so they live outside ``_fields`` and Save ignores them.
 
-Unlike SPD / Turbo, submission does **not** route through ``tasks.py`` — it
+Unlike Turbo, submission does **not** route through ``tasks.py`` — it
 submits ``python -m scripts.soup.pipeline`` directly as one daemon command job.
 Routing through ``tasks.py`` would re-enter ``run_command`` *inside* the daemon
 and nest-submit a second command job, deadlocking the serial queue; the pipeline

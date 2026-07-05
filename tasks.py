@@ -14,7 +14,7 @@ Examples:
     python tasks.py download-models
     python tasks.py turbo                    # DP-DMD 4-step distillation
     python tasks.py exp-chimera              # experimental method
-    python tasks.py exp-test-spd             # experimental inference
+    python tasks.py test                     # add SPD=1 for progressive-resolution inference
 
 Command implementations live under ``scripts/tasks/`` (shipped methods) and
 ``scripts/experimental_tasks/`` (unstable methods exposed under ``exp-*``).
@@ -370,13 +370,6 @@ COMMANDS = {
     # ── Experimental ──────────────────────────────────────────────────
     # Unstable methods kept under exp-* so they don't pollute the main command
     # surface. May produce broken output, change without notice, or be removed.
-    "exp-spd": (
-        exp_training.cmd_spd,
-        "[experimental] SPD fine-tuning LoRA — §4.3 trajectory adapter that teaches a "
-        "plain LoRA to follow the SPD multi-resolution trajectory (configs/methods/spd.toml). "
-        "Single-GPU bespoke loop (bypasses train.py/accelerate, like distill-mod). "
-        "Output is a normal LoRA — infer with the SPD sampler at the trained schedule.",
-    ),
     "exp-soft-tokens": (
         exp_training.cmd_soft_tokens,
         "[experimental] SoftREPA-style per-layer × per-t soft tokens (training-only v1)",
@@ -402,11 +395,6 @@ COMMANDS = {
         "[experimental] Inference with latest soft_tokens weight "
         "(SoftREPA-style per-layer × per-t bank, spliced into cross-attn via "
         "monkey-patched Block.forward). Composes freely with --spectrum.",
-    ),
-    "exp-test-spd": (
-        exp_inference.cmd_test_spd,
-        "[experimental] Inference with latest SPD fine-tune LoRA on the SPD sampler "
-        "at its trained schedule (read from safetensors metadata). cfg=4.0, Euler.",
     ),
     "exp-test-byg": (
         exp_inference.cmd_test_byg,

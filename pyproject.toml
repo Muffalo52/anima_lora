@@ -102,7 +102,7 @@ override-dependencies = ["numpy>=2.0.0"]
 # (`bench` / `scripts` / `preprocess`) are also installed so cross-tree imports
 # (`from bench._common import …`, `from scripts.distill_mod.prep import …`) resolve via
 # the editable finder instead of per-file `sys.path.insert` shims — and any tool
-# runs as `python -m bench.spd.foo`. `gui` stays CLI-only (not importable).
+# runs as `python -m bench.dave.foo`. `gui` stays CLI-only (not importable).
 [tool.pytest.ini_options]
 # `slow` tags the sleep/subprocess-bound suites (daemon job queue): ~55s serial
 # but ~4x faster under xdist because they overlap on real timers, not CPU. The

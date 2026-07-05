@@ -46,8 +46,8 @@ def make_warmup_cosine_scheduler(
     ``warmup_steps <= 0`` skips warmup and returns a bare ``CosineAnnealingLR``
     over all ``total_steps``.
 
-    Open-coded identically in ``scripts/distill_mod``, ``scripts/distill_turbo``
-    and ``scripts/distill_spd`` before being promoted here.
+    Open-coded identically in ``scripts/distill_mod`` and
+    ``scripts/distill_turbo`` before being promoted here.
     """
     from torch.optim.lr_scheduler import (
         CosineAnnealingLR,

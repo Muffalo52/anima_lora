@@ -722,7 +722,7 @@ def queue_command(label: str, argv: list[str]) -> None:
 
     The training daemon is generic over "run this argv" via its ``kind="command"``
     job path (the same one preprocess/mask use). The bespoke loops
-    (``scripts/distill_turbo`` / ``scripts/distill_spd``) bypass ``train.py``, so
+    (``scripts/distill_turbo`` / ``scripts/distill_mod``) bypass ``train.py``, so
     they can't ride the train ``--queue`` path — they submit a plain command job
     instead (detach semantics). ``argv`` is run by the daemon as
     ``[venv_python, *argv]`` from the repo root, so pass the module form

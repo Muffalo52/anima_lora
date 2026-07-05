@@ -20,7 +20,7 @@ baked into the student during distillation).
 > is archived at `_archive/proposals/dpdmd.md`.
 
 - **Training:** `scripts/distill_turbo/distill.py` — bespoke single-GPU loop
-  (bypasses `train.py`/accelerate, like `distill-mod` / `distill-spd`).
+  (bypasses `train.py`/accelerate, like `distill-mod`).
 - **Harness:** `networks/methods/turbo_dmd.py::TurboDMDNetwork` — two `LoRANetwork`
   stacks (student + fake) view-toggled on one frozen DiT.
 - **Config:** `configs/methods/turbo.toml` — **bespoke sectioned schema** read only

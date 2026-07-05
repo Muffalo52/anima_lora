@@ -18,7 +18,7 @@ boilerplate the trainers used to copy verbatim:
   - enable_training_grad_ckpt(model, enabled=...)
         unsloth CPU-offload gradient checkpointing (model must stay in train()).
 
-This is exactly the sequence scripts/distill_{mod,spd,turbo}.py run; this script
+This is exactly the sequence scripts/distill_{mod,turbo}.py run; this script
 distills it to the smallest demonstrable build (no dataset, no optimizer step —
 it stops once the model is ready to train and prints the trainable-param split).
 
@@ -109,7 +109,9 @@ def main() -> None:
         f"{len(network.unet_loras)} modules "
         f"({trainable / total * 100:.3f}% of the {total / 1e9:.2f}B-param DiT)"
     )
-    print("plug in your dataset + optimizer from here (see scripts/distill_spd.py).")
+    print(
+        "plug in your dataset + optimizer from here (see scripts/distill_mod/distill.py)."
+    )
 
 
 if __name__ == "__main__":

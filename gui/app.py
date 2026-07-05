@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         # The Config tab is a MethodsTab picker over the shipped LoRA family plus
         # the (now promoted) Turbo distiller; the Experimental tab is the same
-        # wrapper over the research methods + the SPD distiller.
+        # wrapper over the research methods + the soup pipeline.
         self.tabs.addTab(
             MethodsTab(
                 tb_panel=self._tb_tab.panel,
@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
                 lambda: MethodsTab(
                     tb_panel=self._tb_tab.panel,
                     flat_methods=("chimera", "soft_tokens"),
-                    distill_methods=("spd", "soup"),
+                    distill_methods=("soup",),
                 )
             ),
             t("tab_experimental"),

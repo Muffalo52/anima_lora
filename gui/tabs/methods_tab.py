@@ -2,8 +2,8 @@
 
 Trainable methods come in two editor flavours: the LoRA family edits a *flat*
 ``gui-methods/<variant>.toml`` and submits a ``train.py --method`` training job,
-while the distill methods (SPD / Turbo) edit a *sectioned*
-``configs/methods/{spd,turbo}.toml`` and submit a bespoke ``tasks.py`` distill
+while the distill methods (Turbo) edit a *sectioned*
+``configs/methods/turbo.toml`` and submit a bespoke ``tasks.py`` distill
 command job (no ``train.py`` path).
 
 This wrapper hides that split behind a single Method picker. A ``QStackedWidget``
@@ -13,8 +13,7 @@ selecting a distill method swaps in its editor.
 
 The same wrapper backs two tabs (see ``gui/app.py``): the **main Config tab**
 (``lora`` / ``tlora`` / ``hydralora`` + the promoted ``turbo`` distiller) and the
-**Experimental tab** (``chimera`` / ``soft_tokens`` + the ``spd`` distiller and
-the ``soup`` pipeline).
+**Experimental tab** (``chimera`` / ``soft_tokens`` + the ``soup`` pipeline).
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.tabs.config_tab import ConfigTab
-from gui.tabs.distill_tab import SPDTrainTab, TurboTrainTab
+from gui.tabs.distill_tab import TurboTrainTab
 from gui.tabs.soup_tab import SoupTrainTab
 
 
@@ -39,14 +38,14 @@ class MethodsTab(QWidget):
     # Distill methods → their bespoke sectioned-config editor class. `soup` is
     # not a distiller but shares the same shape (a bespoke pipeline submitting a
     # daemon command job, no train.py path), so it rides the same picker slot.
-    _DISTILL_EDITORS = {"spd": SPDTrainTab, "turbo": TurboTrainTab, "soup": SoupTrainTab}
+    _DISTILL_EDITORS = {"turbo": TurboTrainTab, "soup": SoupTrainTab}
 
     def __init__(
         self,
         tb_panel=None,
         *,
         flat_methods=("chimera", "soft_tokens"),
-        distill_methods=("spd",),
+        distill_methods=(),
         preprocess_tab=None,
     ):
         super().__init__()

@@ -1,8 +1,8 @@
 """Shared run-shell for the bespoke distillation loops.
 
-``scripts/distill_turbo`` / ``scripts/distill_mod`` / ``scripts/distill_spd`` keep
-their method math (DMD student/fake/critic, GAD pooled-text objective, SPD stage
-construction) local and legitimately divergent — but they repeat the same
+``scripts/distill_turbo`` / ``scripts/distill_mod`` keep their method math (DMD
+student/fake/critic, GAD pooled-text objective) local and legitimately
+divergent — but they repeat the same
 orchestration *shell*: pick device/dtype, slice to a single overfit prompt, stand
 up the TensorBoard writer, write the config snapshot, and apply the free-fit
 dynamic-seq compile guard. Those are correctness policies, not method math, so a

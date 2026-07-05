@@ -11,7 +11,6 @@ STRINGS: dict[str, str] = {
     "window_title": "Anima LoRA",
     "tab_config": "训练配置",
     "tab_easycontrol": "EasyControl",
-    "tab_spd": "SPD",
     "tab_turbo": "Turbo",
     "tab_experimental": "实验功能",
     "tab_images": "数据集Viewer",
@@ -327,7 +326,7 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "变体 '{name}' 已存在。",
     "basic_section": "基本",
     "advanced_section": "高级 (点击展开)",
-    # SPD / Turbo 蒸馏配置标签页 (gui/tabs/distill_tab.py)
+    # Turbo 蒸馏配置标签页 (gui/tabs/distill_tab.py)
     "distill_general_section": "通用",
     "distill_job_running": "此标签页已有任务正在运行。",
     "distill_config_missing": "无法读取配置文件: {err}",

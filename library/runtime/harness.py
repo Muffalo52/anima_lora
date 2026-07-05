@@ -713,7 +713,7 @@ def compile_dit_blocks_for_pool(
     """Partitioner budget → per-signature cache isolation → block compile, for a
     self-describing distillation pool.
 
-    The verbatim compile-setup sequence ``distill_spd`` / ``distill_mod`` shared —
+    The verbatim compile-setup sequence ``distill_turbo`` / ``distill_mod`` shared —
     and the home where the cross-cutting compile fixes belong (dynamo cache
     sizing, the AOTAutogradCache guard-poisoning isolation, the ``_functorch``
     partitioner budget). The caller derives ``token_counts`` — the distinct

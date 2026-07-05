@@ -7,7 +7,6 @@ STRINGS: dict[str, str] = {
     "window_title": "Anima LoRA",
     "tab_config": "학습 설정",
     "tab_easycontrol": "EasyControl",
-    "tab_spd": "SPD",
     "tab_turbo": "Turbo",
     "tab_experimental": "실험기능",
     "tab_images": "데이터셋 뷰어",
@@ -381,7 +380,7 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "Variant '{name}'이(가) 이미 존재합니다.",
     "basic_section": "기본 설정",
     "advanced_section": "고급 설정 (클릭하여 펼치기)",
-    # SPD / Turbo 증류 설정 탭 (gui/tabs/distill_tab.py)
+    # Turbo 증류 설정 탭 (gui/tabs/distill_tab.py)
     "distill_general_section": "일반",
     "distill_job_running": "이 탭에서 이미 작업이 실행 중입니다.",
     "distill_config_missing": "설정 파일을 읽을 수 없습니다: {err}",

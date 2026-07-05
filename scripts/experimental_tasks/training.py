@@ -1,4 +1,4 @@
-"""Experimental training entry-points: spd, chimera, byg.
+"""Experimental training entry-points: chimera, byg.
 
 These are wired up under ``make exp-*`` / ``python tasks.py exp-*`` to keep
 the unstable methods visually separate from the shipped ones (lora family,
@@ -7,43 +7,18 @@ translates env vars + extra argv into the right ``train.py`` (via
 ``accelerate launch``) or ``scripts/preprocess/*.py`` call.
 
 (EasyControl and Turbo graduated to the shipped ``make easycontrol*`` /
-``make turbo`` targets — see ``scripts/tasks/training.py``.)
+``make turbo`` targets — see ``scripts/tasks/training.py``. The SPD distillation
+LoRA — "Case B" — was archived 2026-07-05 to ``_archive/spd/``; SPD now ships
+only as the training-free ``--spd`` / ``SPD=1`` inference stack.)
 """
 
 from __future__ import annotations
 
 from scripts.tasks._common import (
     PY,
-    _preset,
-    bespoke_preset_flags,
     run,
     train,
 )
-
-
-def cmd_spd(extra):
-    """SPD fine-tuning LoRA — §4.3 trajectory adapter (proposal: docs/proposal/spd_finetune_lora.md).
-
-    "Case B" of the SPD investigation. Bypasses train.py / accelerate (single-GPU
-    bespoke loop, like distill-mod / turbo). Reads ``configs/methods/spd.toml``;
-    trailing args are forwarded so user CLI flags override TOML values, e.g.::
-
-        make exp-spd                                   # defaults: rank=32, single-late schedule
-        make exp-spd ARGS="--iterations 2000 --single_prompt_idx 0"   # Phase 0 overfit
-        make exp-spd ARGS="--stages 0.5 0.75 1.0 --transition_sigmas 0.6 0.4"
-        make exp-spd ARGS="--torch_compile"            # per-stage static-shape compile
-
-    ``--torch_compile`` pads each stage to its own constant token count so
-    torch.compile traces only len(stages) fwd+bwd graphs (not one per
-    aspect-bucket); forces attn_mode=flex. Keeps low-res stages cheap.
-
-    Trains a plain LoRA to follow the SPD multi-resolution trajectory; output is
-    a normal LoRA — infer with the SPD sampler (``make exp-test-spd``) at the
-    *same* schedule (snapshotted into the safetensors metadata). Honors
-    ``PRESET`` like ``turbo`` (block swap / grad ckpt / sample_ratio).
-    """
-    preset_flags = bespoke_preset_flags(_preset())
-    run([PY, "scripts/distill_spd.py", *preset_flags, *extra])
 
 
 def cmd_soft_tokens(extra):

@@ -7,7 +7,6 @@ STRINGS: dict[str, str] = {
     "window_title": "Anima LoRA",
     "tab_config": "学習設定",
     "tab_easycontrol": "EasyControl",
-    "tab_spd": "SPD",
     "tab_turbo": "Turbo",
     "tab_experimental": "実験機能",
     "tab_images": "データセットViewer",
@@ -342,7 +341,7 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "バリアント '{name}' は既に存在します。",
     "basic_section": "基本",
     "advanced_section": "詳細 (クリックして展開)",
-    # SPD / Turbo 蒸留設定タブ (gui/tabs/distill_tab.py)
+    # Turbo 蒸留設定タブ (gui/tabs/distill_tab.py)
     "distill_general_section": "全般",
     "distill_job_running": "このタブでは既にジョブが実行中です。",
     "distill_config_missing": "設定ファイルを読み込めませんでした: {err}",

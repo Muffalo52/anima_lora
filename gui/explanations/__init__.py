@@ -109,7 +109,6 @@ _KNOWN_METHODS = frozenset(
         "fera",
         "chimera",
         "soft_tokens",
-        "spd",
         "turbo",
         "soup",
         "easycontrol",
@@ -133,8 +132,8 @@ def method_overview(method: str) -> str | None:
     """Translated method guide body *without* the Apply / not-mergeable chrome.
 
     For surfaces that have no Apply button (the distill/methods tab for
-    ``spd`` / ``turbo``) and just want the localized overview. Returns None
-    if no guide is registered, so callers can fall back to their own text.
+    ``turbo``) and just want the localized overview. Returns None if no guide
+    is registered, so callers can fall back to their own text.
     """
     if method not in _KNOWN_METHODS:
         return None
