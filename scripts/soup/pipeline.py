@@ -5,22 +5,29 @@ Ships the recipe validated in ``bench/memorization/report.md`` (the uncond-init
 ladder, 2026-07-04/05) as one pipeline:
 
 1. **Uncond inter-train** (Self-Soupervision, arXiv:2602.02890): a short
-   ``caption_dropout_rate 1.0`` run on a *diluted* artist pool. Dose rule from
-   the report: uncond member exposure = epochs × target share — 2 epochs at a
-   ~minority share is neutral on memorization while buying the quality win;
-   same-frame full-dose uncond is destructive. Default pool = the round-robin
-   artist shard containing the target (``--pool_shard_n``), at
-   ``--sample_ratio 0.5`` (the Act-3 operating point). The checkpoint name is
-   deterministic in (pool, ratio, epochs), so it is trained **once** and
-   reused across targets in the same shard.
-2. **Seeded fine-tunes**: N normal captioned runs on the target's images,
-   ``--network_weights``-initialized from the uncond checkpoint. Souping
+   ``caption_dropout_rate 1.0`` run on a *diluted* pool. The pool is selected by
+   ``--pool_path_pattern`` (default ``*`` = the whole dataset) and diluted by
+   ``--uncond_ratio`` (train.py's ``--sample_ratio``); the fine-tune selection
+   (``--path_pattern``) is always unioned into it. Dose rule from the report:
+   uncond member exposure = epochs × target share — 2 epochs at a minority share
+   is memorization-neutral while buying the quality win; same-frame full-dose
+   uncond is destructive, which is why the pool must be *broader* than the
+   fine-tune set. The checkpoint name is deterministic in (pool, ratio, epochs),
+   so it is trained **once** and reused across any soup drawing the same pool.
+2. **Seeded fine-tunes**: N normal captioned runs on the ``--path_pattern``
+   images, ``--network_weights``-initialized from the uncond checkpoint. Souping
    absorbs the training-seed lottery (a catastrophic draw is invisible to
    loss/AUC — report Act 5).
 3. **ΔW soup, SVD-truncated to the ingredient rank** (``scripts/soup/build.py``)
    so the artifact stays single-adapter-sized (~99.9% retained energy on
    shared-init ingredients). The first ingredient's ``.snapshot.toml`` is
    copied next to the soup — the memorization probes replay membership from it.
+
+Selection is by fnmatch **path_pattern** (``|``-separated alternatives, matched
+against each image's path relative to its subset ``image_dir``) rather than a
+single artist directory — so a soup can span any glob-expressible slice of the
+dataset, not just one artist. The output slug derives from ``--path_pattern``
+(or an explicit ``--name``).
 
 Runs ``train.py`` as direct subprocesses (single daemon command job — never
 submit nested daemon jobs from here; that deadlocks the serial queue).
@@ -31,8 +38,8 @@ Unknown CLI args are forwarded to the fine-tune runs (that's how
 from __future__ import annotations
 
 import argparse
-import glob as _glob
 import hashlib
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -59,47 +66,41 @@ def _soup_defaults() -> dict:
     return toml.load(path).get("soup", {})
 
 
-def resolve_pool(
-    target: str,
-    pool: list[str] | None,
-    shard_n: int,
-    resized_dir: str | None = None,
-) -> list[str]:
-    """The uncond pool artist list: explicit ``pool`` (target auto-added), else
-    the round-robin shard (of ``shard_n``) that contains ``target``."""
-    from library.datasets.artist_shard import list_artists, shard_of
-
-    if pool:
-        return sorted(set(pool) | {target})
-
-    if resized_dir is None:
-        from library.config.io import load_path_overrides
-        from library.env import resolve_under_home
-
-        resized_dir = load_path_overrides().get(
-            "resized_image_dir", "post_image_dataset/resized"
-        )
-        resized_dir = str(resolve_under_home(resized_dir))
-    resized = resized_dir
-    artists = list_artists(resized)
-    if target not in artists:
-        raise SystemExit(
-            f"--target {target!r} is not an artist directory under {resized} "
-            f"({len(artists)} artists found)."
-        )
-    n = min(shard_n, len(artists))
-    k = artists.index(target) % n + 1  # the 1-indexed shard target falls in
-    return shard_of(artists, k, n)
+def pool_glob(pool_pattern: str, ft_pattern: str) -> str:
+    """The Phase-1 uncond pool glob: ``pool_pattern`` with the fine-tune
+    selection unioned in (duplicate ``|`` alternatives dropped so an image
+    matched by both patterns is still kept once). ``*`` (match everything)
+    already covers the fine-tune set, so it is returned as-is."""
+    pool_pattern = (pool_pattern or "*").strip()
+    if pool_pattern in ("", "*"):
+        return "*"
+    alts = [a for a in pool_pattern.split("|") if a]
+    for a in ft_pattern.split("|"):
+        if a and a not in alts:
+            alts.append(a)
+    return "|".join(alts)
 
 
-def pool_pattern(pool: list[str]) -> str:
-    """``|``-joined ``<artist>/*`` globs (the path_pattern alternation syntax)."""
-    return "|".join(f"{_glob.escape(a)}/*" for a in pool)
+def slug_for_pattern(pattern: str) -> str:
+    """A filename-safe slug for a path_pattern. A plain ``<dir>/*`` (single
+    alternative, no other glob metachars) → the dir's basename, so the common
+    per-artist case stays ``anima_soup_<artist>``; anything richer → a sanitized
+    prefix plus a short hash of the full pattern for uniqueness."""
+    pattern = pattern.strip()
+    m = re.fullmatch(r"([^|*?\[\]]+)/\*", pattern)
+    if m:
+        base = m.group(1).rstrip("/").split("/")[-1]
+        slug = re.sub(r"[^0-9A-Za-z._-]+", "_", base).strip("_")
+        if slug:
+            return slug
+    slug = re.sub(r"[^0-9A-Za-z]+", "_", pattern).strip("_")[:32]
+    digest = hashlib.sha1(pattern.encode()).hexdigest()[:6]
+    return f"{slug}_{digest}" if slug else f"pat_{digest}"
 
 
-def uncond_name(pool: list[str], ratio: float, epochs: int) -> str:
+def uncond_name(pool: str, ratio: float, epochs: int) -> str:
     """Deterministic uncond checkpoint name — same pool+dose → same artifact."""
-    digest = hashlib.sha1("|".join(sorted(pool)).encode()).hexdigest()[:8]
+    digest = hashlib.sha1(pool.encode()).hexdigest()[:8]
     ratio_tag = f"{ratio:g}".replace(".", "p")
     return f"anima_uncond_{digest}_r{ratio_tag}_e{epochs}"
 
@@ -117,19 +118,33 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--target", required=True, help="artist dir under resized/")
     ap.add_argument(
-        "--pool",
-        nargs="+",
-        default=None,
-        help="explicit uncond pool artists (target auto-added); default = the "
-        "artist shard containing the target",
+        "--path_pattern",
+        required=True,
+        help="fnmatch glob (| = alternatives) selecting the fine-tune images, "
+        "matched against each image's path relative to its subset image_dir. "
+        "Replaces the old --target artist dir.",
     )
-    ap.add_argument("--pool_shard_n", type=int, default=d.get("pool_shard_n", 16))
+    ap.add_argument(
+        "--pool_path_pattern",
+        default=d.get("pool_path_pattern", "*"),
+        help="Phase-1 uncond pool selection glob; default '*' (whole dataset), "
+        "diluted by --uncond_ratio. The fine-tune set is always unioned in.",
+    )
+    ap.add_argument(
+        "--name",
+        default=None,
+        help="output slug → output/ckpt/anima_soup_<name>.safetensors "
+        "(default: derived from --path_pattern).",
+    )
     ap.add_argument("--uncond_ratio", type=float, default=d.get("uncond_ratio", 0.5))
     ap.add_argument("--uncond_epochs", type=int, default=d.get("uncond_epochs", 2))
     ap.add_argument(
-        "--seeds", nargs="+", type=int, default=d.get("seeds", [1001, 1002, 1003])
+        "--num_soup",
+        type=int,
+        default=d.get("num_soup", 3),
+        help="number of seeded fine-tunes to soup (seeds are UNCOND_SEED+1..+N, "
+        "i.e. 1001..1000+N). Must be >= 2.",
     )
     ap.add_argument(
         "--rank",
@@ -142,9 +157,20 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     args, ft_extra = ap.parse_known_args()
 
+    if args.num_soup < 2:
+        raise SystemExit(
+            f"--num_soup must be >= 2 (a soup needs at least 2 ingredients); "
+            f"got {args.num_soup}."
+        )
+    # Seeds are derived from the count: UNCOND_SEED+1 .. UNCOND_SEED+num_soup
+    # (1001..1000+N), deterministic so re-runs reproduce the same ingredients.
+    seeds = [UNCOND_SEED + i for i in range(1, args.num_soup + 1)]
+
     ckpt_dir = ROOT / "output" / "ckpt"
-    pool = resolve_pool(args.target, args.pool, args.pool_shard_n)
-    print(f"[soup] pool ({len(pool)} artists): {', '.join(pool)}")
+    name = args.name or slug_for_pattern(args.path_pattern)
+    pool = pool_glob(args.pool_path_pattern, args.path_pattern)
+    print(f"[soup] fine-tune pattern {args.path_pattern!r} -> slug {name!r}")
+    print(f"[soup] uncond pool pattern {pool!r}")
 
     # Phase 1 — uncond inter-train (skipped when the init already exists).
     uncond = uncond_name(pool, args.uncond_ratio, args.uncond_epochs)
@@ -159,7 +185,7 @@ def main() -> None:
                 preset=args.preset,
                 extra=[
                     "--path_pattern",
-                    pool_pattern(pool),
+                    pool,
                     "--caption_dropout_rate",
                     "1.0",
                     "--sample_ratio",
@@ -181,23 +207,23 @@ def main() -> None:
 
     # Phase 2 — captioned fine-tunes from the shared init, one per seed.
     ingredients: list[Path] = []
-    for seed in args.seeds:
-        name = f"anima_soup_{args.target}_s{seed}"
-        ingredients.append(ckpt_dir / f"{name}.safetensors")
-        print(f"[soup] phase 2: fine-tune seed {seed} -> {name}")
+    for seed in seeds:
+        iname = f"anima_soup_{name}_s{seed}"
+        ingredients.append(ckpt_dir / f"{iname}.safetensors")
+        print(f"[soup] phase 2: fine-tune seed {seed} -> {iname}")
         _train(
             build_method_args(
                 args.method,
                 preset=args.preset,
                 extra=[
                     "--path_pattern",
-                    f"{_glob.escape(args.target)}/*",
+                    args.path_pattern,
                     "--network_weights",
                     str(uncond_path),
                     "--seed",
                     str(seed),
                     "--output_name",
-                    name,
+                    iname,
                     *ft_extra,
                 ],
             ),
@@ -211,7 +237,7 @@ def main() -> None:
         from library.config.io import load_method_preset
 
         rank = int(load_method_preset(args.method, args.preset).get("network_dim", 16))
-    soup_path = ckpt_dir / f"anima_soup_{args.target}.safetensors"
+    soup_path = ckpt_dir / f"anima_soup_{name}.safetensors"
     print(f"[soup] phase 3: rank-{rank} SVD soup of {len(ingredients)} -> {soup_path}")
     if args.dry_run:
         print(

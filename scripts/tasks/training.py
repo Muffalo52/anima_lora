@@ -112,50 +112,62 @@ def cmd_turbo(extra):
 def cmd_soup(extra):
     """Uncond-init soup training (docs: bench/memorization/report.md).
 
-    One pipeline (``scripts/soup/pipeline.py``): a short uncond inter-train on
-    the artist shard containing the target (reused if the checkpoint already
-    exists) → 3 seeded captioned fine-tunes from that init → an exact ΔW soup
-    SVD-truncated back to the method's ``network_dim``. Output:
-    ``output/ckpt/anima_soup_<target>.safetensors`` (+ ``.snapshot.toml``)::
+    One pipeline (``scripts/soup/pipeline.py``): a short uncond inter-train on a
+    diluted pool (reused if the checkpoint already exists) → 3 seeded captioned
+    fine-tunes from that init → an exact ΔW soup SVD-truncated back to the
+    method's ``network_dim``. Output:
+    ``output/ckpt/anima_soup_<slug>.safetensors`` (+ ``.snapshot.toml``)::
 
-        make soup TARGET=sincos                       # attach-by-default
-        make soup TARGET=sincos --queue               # detach (overnight)
+        make soup PATH_PATTERN="sincos/*"             # attach-by-default
+        make soup TARGET=sincos                       # shorthand for "sincos/*"
+        make soup PATH_PATTERN="a/*|b/*" NAME=ab --queue
         make soup TARGET=sincos ARGS="--network_dim 32 --max_train_epochs 8"
 
-    ``ARGS`` reaches the fine-tune runs. Env knobs (all optional): ``POOL``
-    (explicit space-separated pool artists — target auto-added),
-    ``POOL_SHARD_N`` (default 16), ``UNCOND_RATIO`` (0.5), ``UNCOND_EPOCHS``
-    (2), ``SEEDS`` ("1001 1002 1003"), ``RANK`` (default network_dim),
-    ``PRESET``. Submitted as ONE daemon command job — the pipeline runs
-    train.py subprocesses directly (nested daemon submission would deadlock
-    the serial queue).
+    Selection is a fnmatch **path_pattern** (``|`` = alternatives, matched
+    against each image's path relative to its subset image_dir) rather than a
+    single artist dir. ``TARGET`` is a convenience shorthand: ``TARGET=x`` ⇒
+    ``PATH_PATTERN="x/*" NAME=x``. ``ARGS`` reaches the fine-tune runs. Env knobs
+    (all optional): ``NAME`` (output slug; default derived from the pattern),
+    ``POOL_PATH_PATTERN`` (Phase-1 uncond pool glob, default "*" = whole dataset,
+    the fine-tune set always unioned in), ``UNCOND_RATIO`` (0.5),
+    ``UNCOND_EPOCHS`` (2), ``NUM_SOUP`` (3 — number of seeded fine-tunes to
+    soup, seeds 1001..1000+N), ``RANK`` (default network_dim), ``PRESET``.
+    Submitted as ONE daemon command job — the pipeline runs train.py
+    subprocesses directly (nested daemon submission would deadlock the serial
+    queue).
     """
+    pattern = os.environ.get("PATH_PATTERN")
+    name = os.environ.get("NAME")
     target = os.environ.get("TARGET")
-    if not target:
-        raise SystemExit(
-            "make soup needs TARGET=<artist> (an artist dir under "
-            "post_image_dataset/resized/). Example: make soup TARGET=sincos"
-        )
+    if not pattern:
+        if not target:
+            raise SystemExit(
+                'make soup needs PATH_PATTERN=<glob> (e.g. PATH_PATTERN="sincos/*") '
+                'or the TARGET=<dir> shorthand (⇒ PATH_PATTERN="<dir>/*"). '
+                "Example: make soup TARGET=sincos"
+            )
+        pattern = f"{target}/*"
+        name = name or target
     argv = [
         "-m",
         "scripts.soup.pipeline",
-        "--target",
-        target,
+        "--path_pattern",
+        pattern,
         "--preset",
         _preset(),
     ]
-    if os.environ.get("POOL"):
-        argv += ["--pool", *os.environ["POOL"].split()]
+    if name:
+        argv += ["--name", name]
+    if os.environ.get("POOL_PATH_PATTERN"):
+        argv += ["--pool_path_pattern", os.environ["POOL_PATH_PATTERN"]]
     for env, flag in (
-        ("POOL_SHARD_N", "--pool_shard_n"),
         ("UNCOND_RATIO", "--uncond_ratio"),
         ("UNCOND_EPOCHS", "--uncond_epochs"),
+        ("NUM_SOUP", "--num_soup"),
         ("RANK", "--rank"),
     ):
         if os.environ.get(env):
             argv += [flag, os.environ[env]]
-    if os.environ.get("SEEDS"):
-        argv += ["--seeds", *os.environ["SEEDS"].split()]
 
     mode, extra = _resolve_run_mode(list(extra or []))
     run_command("soup", [*argv, *extra], mode=mode)

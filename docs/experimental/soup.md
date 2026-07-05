@@ -1,51 +1,62 @@
 # Soup — uncond-init ΔW LoRA soup
 
-A quality-and-robustness recipe for a single-artist LoRA, packaged as one
-command. It is **not** a new adapter family: the output is an ordinary,
-bakeable plain LoRA (`output/ckpt/anima_soup_<target>.safetensors`) that infers
-and merges like any other. Soup buys two things over a single fine-tune — a
-generalization (holdout-quality) win, and immunity to the training-seed lottery
-— at the cost of a few extra cheap runs.
+A quality-and-robustness recipe for a LoRA over any glob-selectable slice of the
+dataset, packaged as one command. It is **not** a new adapter family: the output
+is an ordinary, bakeable plain LoRA (`output/ckpt/anima_soup_<slug>.safetensors`)
+that infers and merges like any other. Soup buys two things over a single
+fine-tune — a generalization (holdout-quality) win, and immunity to the
+training-seed lottery — at the cost of a few extra cheap runs.
 
-Shipped as `make soup TARGET=<artist>` (promoted from the `bench/uncond_soup`
+Shipped as `make soup PATH_PATTERN="<glob>"` (promoted from the `bench/uncond_soup`
 line). Recipe validated in `bench/memorization/report.md` (the uncond-init
 ladder, 2026-07-04/05). GUI: **Experimental tab → Method → soup**.
 
 ## Quick start
 
 ```bash
-make soup TARGET=sincos                          # attach-by-default (foreground)
-make soup TARGET=sincos --queue                  # detach — overnight / behind a train run
+make soup PATH_PATTERN="sincos/*"                # attach-by-default (foreground)
+make soup TARGET=sincos                          # shorthand ⇒ PATH_PATTERN="sincos/*" NAME=sincos
+make soup PATH_PATTERN="art_a/*|art_b/*" NAME=ab --queue   # multi-slice, detached
 make soup TARGET=sincos ARGS="--network_dim 32 --max_train_epochs 8"
 ```
 
-`TARGET` is an artist directory under `post_image_dataset/resized/` (required).
-`ARGS` is forwarded verbatim to the **Phase 2 fine-tunes**. It runs as one
-daemon command job; the pipeline drives its own `train.py` phases as direct
-subprocesses (never nested daemon jobs — that would deadlock the serial queue).
+`PATH_PATTERN` is a fnmatch glob (`|` separates alternatives) matched against
+each image's path relative to its subset `image_dir` — it selects the **Phase 2
+fine-tune** images. It is *not* an artist directory; it can span any slice the
+glob expresses. `TARGET=<dir>` is a convenience shorthand for the common
+per-directory case: `TARGET=x` ⇒ `PATH_PATTERN="x/*" NAME=x`. The output slug
+derives from the pattern (a plain `<dir>/*` → `<dir>`; anything richer → a
+sanitized prefix + short hash) unless you pass `NAME`.
 
-Env knobs (all optional): `POOL` (explicit space-separated pool artists — target
-auto-added), `POOL_SHARD_N` (default 16), `UNCOND_RATIO` (0.5), `UNCOND_EPOCHS`
-(2), `SEEDS` (`"1001 1002 1003"`), `RANK` (default = method `network_dim`),
-`PRESET`.
+`ARGS` is forwarded verbatim to the Phase 2 fine-tunes. It runs as one daemon
+command job; the pipeline drives its own `train.py` phases as direct subprocesses
+(never nested daemon jobs — that would deadlock the serial queue).
+
+Env knobs (all optional): `NAME` (output slug), `POOL_PATH_PATTERN` (Phase-1
+uncond pool glob, default `*` = whole dataset — the fine-tune set is always
+unioned in), `UNCOND_RATIO` (0.5), `UNCOND_EPOCHS` (2), `NUM_SOUP` (3 — number
+of seeded fine-tunes to soup; seeds are `1001..1000+N`), `RANK` (default =
+method `network_dim`), `PRESET`.
 
 ## What it is — three phases
 
 `scripts/soup/pipeline.py` orchestrates:
 
 1. **Uncond inter-train** (Self-Soupervision, arXiv:2602.02890). A short
-   `caption_dropout_rate 1.0` run on a *diluted* artist pool at
-   `sample_ratio 0.5`. The pool defaults to the round-robin artist shard
-   (`--pool_shard_n`) that contains the target. The checkpoint name is
-   **deterministic in (pool, ratio, epochs)** (`uncond_name()`), so it is
-   trained **once** and reused across every target in the same shard —
-   `anima_uncond_<hash>_r<ratio>_e<epochs>.safetensors`.
-2. **Seeded fine-tunes.** N normal captioned runs on the target's images
-   (`--path_pattern '<target>/*'`), each `--network_weights`-initialized from
-   the uncond checkpoint, one per `--seeds` entry →
-   `anima_soup_<target>_s<seed>.safetensors`.
+   `caption_dropout_rate 1.0` run on a *diluted* pool selected by
+   `--pool_path_pattern` (default `*` = the whole dataset) at
+   `sample_ratio 0.5`. The fine-tune selection is always unioned into the pool
+   glob so the target is present but a minority share. The checkpoint name is
+   **deterministic in (pool, ratio, epochs)** (`uncond_name()` hashes the pool
+   glob), so it is trained **once** and reused across every soup drawing the
+   same pool — with the default `*` pool, one shared uncond init serves them all
+   — `anima_uncond_<hash>_r<ratio>_e<epochs>.safetensors`.
+2. **Seeded fine-tunes.** `--num_soup` (default 3) normal captioned runs on the
+   `--path_pattern` images, each `--network_weights`-initialized from the uncond
+   checkpoint, one per derived seed (`1001..1000+N`) →
+   `anima_soup_<slug>_s<seed>.safetensors`.
 3. **ΔW soup, SVD-truncated to the ingredient rank** (`scripts/soup/build.py`)
-   → `anima_soup_<target>.safetensors`. The first ingredient's
+   → `anima_soup_<slug>.safetensors`. The first ingredient's
    `.snapshot.toml` is copied next to the soup so the memorization probes can
    replay membership from it.
 
@@ -87,11 +98,14 @@ rank 16 to begin with.
   ortho / Hydra blocks and drifting `path_pattern` / `output_name` would break
   the soup: Hydra / Chimera / stacked-experts / ortho key shapes are **refused
   loudly** by `build.py`. Override per run via `ARGS="--network_dim 32 …"`.
-- **Pool disjointness is mandatory.** The uncond data must not repeat the
-  target's fine-tune frames. The default shard pool contains adjacent artists;
-  if you pass `POOL`, keep the target's own fine-tune images out of the other
-  members. Act 2 of the report shows same-frame uncond is destructive; Act 3
-  shows the diluted pool is both necessary and sufficient to avoid it.
+- **The pool must dilute the target, not repeat it at full dose.** The uncond
+  phase exposes the target's own frames (the fine-tune set is unioned into the
+  pool), so the pool must be **broad enough that the target is a minority
+  share** — the default `*` (whole dataset) at `sample_ratio 0.5` makes it
+  tiny. If you narrow `POOL_PATH_PATTERN`, keep it a strict superset of the
+  fine-tune set spanning many other images. Act 2 of the report shows same-frame
+  *full-dose* uncond is destructive; Act 3 shows the diluted pool is both
+  necessary and sufficient to avoid it.
 - **Keep the uncond dose low.** Exposure budget = `uncond_epochs × member-share`.
   2 epochs at ~51% share was neutral on memorization; 4 epochs at 100% share
   was destructive (just more epochs of the same frames).
@@ -128,7 +142,7 @@ One artist (`sincos`, 334 images), paired designs throughout (see
 
 | Path | Role |
 |---|---|
-| `configs/soup/soup.toml` | ingredient method config (plain-LoRA stack) + `[soup]` pipeline defaults (pool / dose / seeds / rank) |
+| `configs/soup/soup.toml` | ingredient method config (plain-LoRA stack) + `[soup]` pipeline defaults (pool / dose / num_soup / rank) |
 | `scripts/soup/pipeline.py` | 3-phase orchestrator (`make soup` entry) |
 | `scripts/soup/build.py` | ΔW rank-concat soup + rank-r SVD truncation (`python -m scripts.soup.build`) |
 | `scripts/tasks/training.py::cmd_soup` | `make soup` / env-knob → pipeline argv |

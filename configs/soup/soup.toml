@@ -18,7 +18,7 @@
 #     sees it.
 #
 # The dataset blueprint is inherited from base.toml; the pipeline overrides
-# path_pattern (pool alternation for Phase 1, the target dir for Phase 2) and
+# path_pattern (the pool glob for Phase 1, the fine-tune glob for Phase 2) and
 # output_name per run, so neither is pinned here.
 
 # --- plain-LoRA stack (matches the validated recipe, bench/memorization/report.md)
@@ -48,8 +48,8 @@ repa_encoder = "pe_spatial"
 # train.py merge). CLI flags / env knobs (POOL_SHARD_N / UNCOND_RATIO / … ) still
 # override these per run.
 [soup]
-pool_shard_n = 16       # round-robin shard count; the shard containing TARGET is the pool
+pool_path_pattern = "*"  # Phase 1 uncond pool glob; "*" = whole dataset (diluted by uncond_ratio). The fine-tune path_pattern is always unioned in.
 uncond_ratio = 0.5      # Phase 1 --sample_ratio (the Act-3 operating point)
 uncond_epochs = 2       # Phase 1 dose: 2 epochs at a minority share is memorization-neutral
-seeds = [1001, 1002, 1003]   # Phase 2 fine-tune seeds (souping absorbs the seed lottery)
+num_soup = 3            # number of seeded fine-tunes to soup (seeds 1001..1000+N; souping absorbs the seed lottery). >= 2
 # rank = 16             # Phase 3 SVD truncation rank; default = network_dim above

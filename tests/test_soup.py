@@ -1,10 +1,11 @@
-"""Unit tests for the ΔW LoRA soup builders + `make soup` pool resolution.
+"""Unit tests for the ΔW LoRA soup builders + `make soup` pattern helpers.
 
 CPU-only, synthetic state dicts. Invariants pinned:
 - the soup is exact at the ΔW level (alpha scaling + inv_scale folding included)
 - SVD truncation is lossless when ingredients share a rank-r subspace
 - non-plain checkpoints (hydra/registers/mismatched recipes) are refused loudly
-- the default uncond pool is the round-robin artist shard containing the target
+- the uncond pool glob unions the fine-tune selection in (dedup) and the output
+  slug derives from the fine-tune path_pattern
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import pytest
 import torch
 
 from scripts.soup.build import soup_state_dicts, truncated_soup
-from scripts.soup.pipeline import pool_pattern, resolve_pool, uncond_name
+from scripts.soup.pipeline import pool_glob, slug_for_pattern, uncond_name
 
 OUT, IN, RANK = 12, 10, 4
 
@@ -130,37 +131,37 @@ class TestTruncatedSoup:
         assert float(resid) == pytest.approx(float((s[RANK:] ** 2).sum()), rel=1e-4)
 
 
-class TestPoolResolution:
-    def _resized(self, tmp_path, artists):
-        for a in artists:
-            (tmp_path / a).mkdir()
-        return str(tmp_path)
+class TestPoolGlob:
+    def test_star_pool_covers_everything(self):
+        # "*" already matches the fine-tune set, so it stands alone.
+        assert pool_glob("*", "sincos/*") == "*"
+        assert pool_glob("", "sincos/*") == "*"
 
-    def test_shard_contains_target(self, tmp_path):
-        artists = [f"artist_{i:02d}" for i in range(10)]
-        resized = self._resized(tmp_path, artists)
-        pool = resolve_pool("artist_05", None, 4, resized_dir=resized)
-        assert "artist_05" in pool
-        # round-robin shard k=2 (index 5 % 4 + 1) of 4 over the sorted list
-        assert pool == artists[1::4]
+    def test_finetune_union_and_dedup(self):
+        # The fine-tune selection is always folded in; overlapping alternatives
+        # are not duplicated (boolean glob matching keeps an image once anyway).
+        assert pool_glob("shard/*", "sincos/*") == "shard/*|sincos/*"
+        assert pool_glob("a/*", "a/*|b/*") == "a/*|b/*"
+        assert pool_glob("a/*|b/*", "b/*|c/*") == "a/*|b/*|c/*"
 
-    def test_explicit_pool_adds_target(self, tmp_path):
-        pool = resolve_pool("t", ["b", "a"], 4, resized_dir=str(tmp_path))
-        assert pool == ["a", "b", "t"]
 
-    def test_unknown_target_raises(self, tmp_path):
-        resized = self._resized(tmp_path, ["a"])
-        with pytest.raises(SystemExit, match="not an artist directory"):
-            resolve_pool("missing", None, 4, resized_dir=resized)
+class TestSlugForPattern:
+    def test_plain_dir_glob_is_basename(self):
+        assert slug_for_pattern("sincos/*") == "sincos"
+        assert slug_for_pattern("nested/artist/*") == "artist"
 
-    def test_shard_n_clamped_to_artist_count(self, tmp_path):
-        resized = self._resized(tmp_path, ["a", "b"])
-        assert resolve_pool("b", None, 16, resized_dir=resized) == ["b"]
+    def test_rich_pattern_is_sanitized_and_hashed(self):
+        slug = slug_for_pattern("a/*|b/*")
+        assert slug.startswith("a_b_")  # sanitized prefix + short hash
+        # Deterministic and distinct from a different pattern.
+        assert slug == slug_for_pattern("a/*|b/*")
+        assert slug != slug_for_pattern("a/*|c/*")
 
-    def test_pattern_and_name_determinism(self):
-        assert pool_pattern(["a", "b"]) == "a/*|b/*"
-        assert pool_pattern(["x[1]"]) == "x[[]1]/*"  # glob-escaped
-        n1 = uncond_name(["b", "a"], 0.5, 2)
-        assert n1 == uncond_name(["a", "b"], 0.5, 2)  # order-invariant
+
+class TestUncondName:
+    def test_determinism(self):
+        n1 = uncond_name("a/*|b/*", 0.5, 2)
+        assert n1 == uncond_name("a/*|b/*", 0.5, 2)  # same pool glob → same name
         assert n1.endswith("_r0p5_e2")
-        assert n1 != uncond_name(["a", "c"], 0.5, 2)
+        assert n1 != uncond_name("a/*|c/*", 0.5, 2)
+        assert uncond_name("*", 0.5, 2) != uncond_name("*", 0.5, 4)  # dose in name
