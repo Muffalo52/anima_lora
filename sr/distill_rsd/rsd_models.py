@@ -27,7 +27,28 @@ from models.unet import UNetModelSwin  # noqa: E402  (vendored ResShift)
 
 CONFIG = RESSHIFT / "configs" / "realsr_swinunet_realesrgan256.yaml"
 TEACHER_CKPT = WEIGHTS / "resshift_realsrx4_s15_v2.pth"
+
+# x2 distill: teacher is our own x2 finetune (make sr-train) rather than the released
+# x4 v2. The config differs from x4 only in `sf` (diffusion schedule, not a weight shape),
+# so the same StochasticUNet arch + warm-start machinery applies unchanged.
+X2_CONFIG = SR / "configs" / "realsr_x2_art.yaml"
+X2_TEACHER_CKPT = WEIGHTS / "resshift_x2_final.pth"
+
 DEVICE = "cuda"
+
+
+def resolve_version(version="x4", config=None, teacher=None):
+    """Map a version tag to (config_path, teacher_ckpt); explicit args override.
+
+    'x4' (default) = released 15-step v2 teacher; 'x2' = our sr-train finetune.
+    """
+    if version == "x2":
+        cfg_path, tch = X2_CONFIG, X2_TEACHER_CKPT
+    elif version == "x4":
+        cfg_path, tch = CONFIG, TEACHER_CKPT
+    else:
+        raise ValueError(f"unknown version {version!r} (expected 'x4' or 'x2')")
+    return Path(config) if config else cfg_path, Path(teacher) if teacher else tch
 
 
 def predict_x0(diff, model, z_t, z_y, t, eps=None):
@@ -50,6 +71,22 @@ def load_configs(config_path=CONFIG):
 
 def _strip_module(sd):
     return {k[len("module."):] if k.startswith("module.") else k: v for k, v in sd.items()}
+
+
+def _extract_unet_sd(raw, prefer="ema"):
+    """Pull the bare UNet state_dict out of any of our checkpoint envelopes.
+
+    Handles the released ResShift ckpts ({"state_dict": ...} or a bare state_dict) AND
+    our own snapshots: sr-train writes {"ema","model","step"} and the distill loop writes
+    {"ema","student","step",...}. Prefer the EMA weights (sample quality) when present.
+    """
+    if isinstance(raw, dict):
+        for key in (prefer, "state_dict", "model", "student"):
+            v = raw.get(key)
+            if isinstance(v, dict) and v and all(isinstance(k, str) for k in v):
+                raw = v
+                break
+    return _strip_module(raw)
 
 
 def enable_grad_checkpointing(model):
@@ -221,9 +258,8 @@ def _build_unet(cfg, cls):
 
 def build_teacher(cfg, ckpt_path, device, dtype=torch.float32):
     model = _build_unet(cfg, UNetModelSwin)
-    sd = torch.load(ckpt_path, map_location="cpu")
-    sd = sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
-    model.load_state_dict(_strip_module(sd), strict=True)
+    sd = _extract_unet_sd(torch.load(ckpt_path, map_location="cpu"))
+    model.load_state_dict(sd, strict=True)
     model = model.to(device, dtype).eval()
     for p in model.parameters():
         p.requires_grad_(False)
@@ -243,8 +279,7 @@ def build_generator(cfg, teacher_ckpt, device, dtype=torch.float32, grad_ckpt=Fa
     params = OmegaConf.to_container(cfg.model.params, resolve=True)
     model = StochasticUNet(noise_mode=noise_mode, noise_channels=noise_channels, **params)
     if pretrained:
-        sd = _strip_module(torch.load(teacher_ckpt, map_location="cpu"))
-        sd = sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
+        sd = _extract_unet_sd(torch.load(teacher_ckpt, map_location="cpu"))
         if model.noise_mode == "concat":
             # teacher's first conv is narrower than our widened one; graft the teacher planes
             # into the leading slice (noise slice stays zero-init) so load stays strict.

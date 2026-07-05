@@ -103,13 +103,19 @@ def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=Non
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--version", choices=["x4", "x2"], default="x4",
+                    help="scale family: x4 = released teacher schedule; x2 = our sr-train finetune. "
+                         "Selects the config (hence sf) and the default ckpt_dir/out_dir.")
+    ap.add_argument("--config", default=None, help="override the version's ResShift config yaml")
     ap.add_argument("--ckpt", default=None,
                     help="rsd_student_*.pth (uses EMA weights); default = most recent in --ckpt_dir")
-    ap.add_argument("--ckpt_dir", default=str(CKPT_DIR),
-                    help="dir to pick the most recent ckpt from when --ckpt is unset")
+    ap.add_argument("--ckpt_dir", default=None,
+                    help="dir to pick the most recent ckpt from when --ckpt is unset "
+                         "(default: output/sr/rsd for x4, output/sr/rsd_x2 for x2)")
     ap.add_argument("--eval", action="store_true", help="score vs teacher+bicubic on Phase-0 set")
     ap.add_argument("--in_dir", default=str(REPO / "sr" / "data" / "lr_eval"))
-    ap.add_argument("--out_dir", default=str(REPO / "output" / "sr" / "rsd" / "infer"))
+    ap.add_argument("--out_dir", default=None,
+                    help="default: <ckpt_dir>/infer")
     ap.add_argument("--chop", type=int, default=256, help="tile size (px) for large images; must be a multiple of the align stride. 2048 single-tiles the 512->2048 eval (no overlap-redundancy ~2.2x compute saving); lower it (e.g. 1024) if VRAM-bound")
     ap.add_argument("--overlap", type=int, default=64,
                     help="tile seam overlap in px (default = the Swin align stride, currently 256). "
@@ -133,10 +139,15 @@ def main():
                          "per image). Swin window_partition may force graph breaks; first tile pays "
                          "warmup. Worth it for many tiles, a loss for a handful.")
     args = ap.parse_args()
-    ckpt = Path(args.ckpt) if args.ckpt else latest_ckpt(Path(args.ckpt_dir))
-    print(f"ckpt: {ckpt}")
+    config_path, _ = M.resolve_version(args.version, args.config)
+    default_sub = "rsd" if args.version == "x4" else f"rsd_{args.version}"
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else REPO / "output" / "sr" / default_sub
+    out_dir = Path(args.out_dir) if args.out_dir else ckpt_dir / "infer"
+    args.out_dir = str(out_dir)
+    ckpt = Path(args.ckpt) if args.ckpt else latest_ckpt(ckpt_dir)
+    print(f"version={args.version} config={config_path.name} ckpt={ckpt}")
     dev = M.DEVICE
-    cfg = M.load_configs()
+    cfg = M.load_configs(config_path)
     diff = M.build_diffusion(cfg)
     vqgan = M.build_autoencoder(cfg, dev)
     if not args.no_bf16:

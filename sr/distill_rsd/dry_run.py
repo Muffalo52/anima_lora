@@ -14,22 +14,25 @@ import torch.nn.functional as F
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
-from rsd_models import TEACHER_CKPT, make_eps, predict_x0  # noqa: E402
+from rsd_models import make_eps, predict_x0  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bs", type=int, default=1)
     ap.add_argument("--amp", action="store_true")
+    ap.add_argument("--version", choices=["x4", "x2"], default="x4")
     args = ap.parse_args()
     dev = M.DEVICE
     torch.cuda.reset_peak_memory_stats()
 
-    cfg = M.load_configs()
+    config_path, teacher_ckpt = M.resolve_version(args.version)
+    cfg = M.load_configs(config_path)
+    tck = str(teacher_ckpt)
     print("building nets...")
-    teacher = M.build_teacher(cfg, str(TEACHER_CKPT), dev)
-    student = M.build_generator(cfg, str(TEACHER_CKPT), dev)
-    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev)
+    teacher = M.build_teacher(cfg, tck, dev)
+    student = M.build_generator(cfg, tck, dev)
+    fake = M.build_generator(cfg, tck, dev)
     disc = M.DiscHead().to(dev)
     vqgan = M.build_autoencoder(cfg, dev)
     diff = M.build_diffusion(cfg)

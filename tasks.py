@@ -144,7 +144,8 @@ COMMANDS = {
     ),
     "sr-rsd-train": (
         sr.cmd_sr_rsd_train,
-        "RSD distillation: v2 15-step teacher -> 1-step student on our art (paper 22490).",
+        "RSD distillation: 15-step teacher -> 1-step student on our art (paper 22490). "
+        "VERSION=x2 distills the sr-train x2 finetune (default x4).",
     ),
     "sr-rsd-dryrun": (
         sr.cmd_sr_rsd_dryrun,

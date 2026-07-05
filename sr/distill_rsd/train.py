@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
 from data import ArtSRDataset  # noqa: E402
-from rsd_models import TEACHER_CKPT, make_eps, predict_x0  # noqa: E402
+from rsd_models import make_eps, predict_x0  # noqa: E402
 
 
 @torch.no_grad()
@@ -48,7 +48,7 @@ def dc_loss(a, b, k=32):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=12000, help="generator updates")
+    ap.add_argument("--iters", type=int, default=2000, help="generator updates")
     ap.add_argument("--K", type=int, default=5, help="fake updates per generator update")
     ap.add_argument("--bs", type=int, default=4,
                     help="batch size (default 4: benched 2026-07-02 on the 16GB 5070 Ti — "
@@ -100,23 +100,33 @@ def main():
                     help="HR source dir (default image_dataset; pass the prep_rsd_cache "
                          "4096-capped cache for faster decode at the right 1024->4096 scale)")
     ap.add_argument("--num_workers", type=int, default=6, help="DataLoader workers")
-    ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "rsd"))
+    ap.add_argument("--version", choices=["x4", "x2"], default="x4",
+                    help="teacher family: x4 = released 15-step v2; x2 = our sr-train finetune")
+    ap.add_argument("--config", default=None, help="override the version's ResShift config yaml")
+    ap.add_argument("--teacher", default=None, help="override the version's teacher checkpoint")
+    ap.add_argument("--save_dir", default=None,
+                    help="default: output/sr/rsd (x4) or output/sr/rsd_x2 (x2)")
     ap.add_argument("--log_every", type=int, default=40)
     ap.add_argument("--save_every", type=int, default=2000)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
     args = ap.parse_args()
 
     dev = M.DEVICE
-    save_dir = Path(args.save_dir)
+    config_path, teacher_ckpt = M.resolve_version(args.version, args.config, args.teacher)
+    default_sub = "rsd" if args.version == "x4" else f"rsd_{args.version}"
+    save_dir = Path(args.save_dir) if args.save_dir else M.REPO / "output" / "sr" / default_sub
     save_dir.mkdir(parents=True, exist_ok=True)
-    cfg = M.load_configs()
+    cfg = M.load_configs(config_path)
     sf_scale = cfg.diffusion.params.scale_factor
+    print(f"version={args.version} sf={cfg.diffusion.params.sf} teacher={teacher_ckpt.name} "
+          f"config={config_path.name}")
 
     print("building nets...")
     gen_kw = dict(noise_mode=args.noise_mode, noise_channels=args.noise_channels)
-    teacher = M.build_teacher(cfg, str(TEACHER_CKPT), dev)
-    student = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=args.grad_ckpt, **gen_kw)
-    fake = M.build_generator(cfg, str(TEACHER_CKPT), dev, grad_ckpt=args.grad_ckpt, **gen_kw)
+    tck = str(teacher_ckpt)
+    teacher = M.build_teacher(cfg, tck, dev)
+    student = M.build_generator(cfg, tck, dev, grad_ckpt=args.grad_ckpt, **gen_kw)
+    fake = M.build_generator(cfg, tck, dev, grad_ckpt=args.grad_ckpt, **gen_kw)
     disc = M.DiscHead().to(dev)
     vqgan = M.build_autoencoder(cfg, dev)
     if args.amp:

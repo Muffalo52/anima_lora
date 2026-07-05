@@ -72,8 +72,14 @@ def cmd_sr_rsd_train(extra):
     and the caller didn't pass their own --src — that cache carries native ~4096-scale
     detail at bounded decode cost (NOT the downsized rsd_hr_1024). Falls back to
     train.py's own image_dataset default if the cache is absent.
+
+    VERSION=x2 distills our sr-train x2 finetune (sr/weights/resshift_x2_final.pth) instead
+    of the released x4 teacher; output lands in output/sr/rsd_x2. VERSION=x4 is the default.
     """
     argv = list(extra)
+    version = os.environ.get("VERSION", "")
+    if version and not any(a == "--version" or a.startswith("--version=") for a in argv):
+        argv = ["--version", version, *argv]
     if not any(a == "--src" or a.startswith("--src=") for a in argv):
         cache = SR / "data" / "rsd_hr_cap4096"
         if cache.is_dir():
@@ -90,9 +96,14 @@ def cmd_sr_rsd_dryrun(extra):
 
 
 def cmd_sr_rsd_infer(extra):
-    """Single-step RSD student inference + MUSIQ. CKPT=… picks a ckpt; unset = most recent."""
+    """Single-step RSD student inference + MUSIQ. CKPT=… picks a ckpt; unset = most recent.
+
+    VERSION=x2 loads the x2 config (sf=2) and defaults ckpt_dir/out_dir to output/sr/rsd_x2.
+    """
     ckpt = os.environ.get("CKPT", "")
-    argv = (["--ckpt", ckpt] if ckpt else []) + list(extra)
+    version = os.environ.get("VERSION", "")
+    argv = (["--version", version] if version else []) \
+        + (["--ckpt", ckpt] if ckpt else []) + list(extra)
     _run([_venv_py(), str(SR / "distill_rsd" / "infer.py"), *argv])
 
 
