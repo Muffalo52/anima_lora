@@ -52,9 +52,6 @@ Correction / conditioning test targets (each composes with `SPECTRUM`/`MOD`):
 
 | Target | Adds |
 |---|---|
-| `make test-dcw` | DCW scalar SNR-t bias correction |
-| `make test-dcw-v4` | DCW v4 learnable calibrator (auto-resolves the head) |
-| `make test-spectrum-dcw` / `make test-dcw-v4-spectrum` | Spectrum + DCW (scalar / v4) |
 | `make test-smc-cfg` | SMC-CFG velocity-space correction |
 | `make test-easycontrol REF_IMAGE=…` | EasyControl image conditioning |
 | `make exp-test-directedit PROMPT='…'` | DirectEdit on a random source image |
@@ -135,7 +132,6 @@ python inference.py … --lora_weight turbo.safetensors --infer_steps 4 --guidan
 ### Improve quality (training-free corrections)
 | Goal | Flag | Notes |
 |---|---|---|
-| SNR-t bias correction | `--dcw` (scalar) / `--dcw_calibrator` (v4) | Composes with everything. ⚠️ **bias sign is (CFG × aspect)-dependent** — see §4. [`../inference/dcw.md`](../inference/dcw.md) |
 | Sliding-mode CFG | `--smc_cfg` | α-adaptive velocity-space correction (λ=5, α=0.2). [`../inference/smc_cfg.md`](../inference/smc_cfg.md) |
 | SDE noise recoloring | `--cns` | **`--sampler er_sde` only** (no-op on euler/lcm). [`../inference/cns.md`](../inference/cns.md) |
 | Text-conditioned AdaLN steer | `--pooled_text_proj` + `--mod_w` | Modulation guidance (global tone, not content). [`../inference/mod-guidance.md`](../inference/mod-guidance.md) |
@@ -158,23 +154,7 @@ python inference.py … --lora_weight turbo.safetensors --infer_steps 4 --guidan
 
 ---
 
-## 4. The DCW sign gotcha
-
-The shipped scalar default (`--dcw_lambda -0.015`, via `make test-dcw`) is tuned
-for **CFG=1**. At production **CFG=4** the bias direction is
-**(CFG × aspect)-dependent** — non-square aspects want a small **positive** λ, so
-the CFG=1 scalar is wrong-sign there. The Spectrum ComfyUI node ships `+0.01`.
-**Prefer `--dcw_calibrator` (v4) for production runs**, which learns the per-step
-α̂ instead of guessing a global scalar.
-
-```bash
---dcw_band_mask LL          # where to apply: LL (default) / HF / all
---dcw_calibrator head.safetensors  --dcw_calibrator_gain 1.0
-```
-
----
-
-## 5. Flag reference
+## 4. Flag reference
 
 ### Core
 | Flag | Default | Description |
@@ -198,8 +178,7 @@ the CFG=1 scalar is wrong-sign there. The Spectrum ComfyUI node ships `+0.01`.
 | `--no_metadata` | off | Don't embed training metadata in the PNG |
 | `--save_path` | — | Output directory (**required**) |
 
-> `--fp8` and `--prefix_weight` were removed. `--dcw_v4 <head>` still parses but
-> aliases to `--dcw_calibrator`.
+> `--fp8` and `--prefix_weight` were removed.
 
 ### Modulation guidance
 | Flag | Description |
@@ -220,15 +199,9 @@ the CFG=1 scalar is wrong-sign there. The Spectrum ComfyUI node ships `+0.01`.
 | `--spectrum_stop_caching_step` | Last cached step |
 | `--spectrum_calibration` | Bias adjustment |
 
-### DCW / SMC-CFG / CNS
+### SMC-CFG / CNS
 | Flag | Description |
 |---|---|
-| `--dcw` | Scalar mode (one global λ) |
-| `--dcw_lambda` | λ value (`make test-dcw`: -0.015) |
-| `--dcw_band_mask` | `LL` (default) / `HF` / `all` |
-| `--dcw_schedule` | Per-step shaping |
-| `--dcw_calibrator` | v4 fusion-head safetensors (replaces scalar) |
-| `--dcw_calibrator_gain` | Multiplicative scale on α̂ |
 | `--smc_cfg` | Enable SMC-CFG |
 | `--smc_cfg_lambda` / `--smc_cfg_alpha` | λ / α (defaults 5 / 0.2) |
 | `--cns` | Enable CNS (**`er_sde` only**) |
@@ -236,7 +209,7 @@ the CFG=1 scalar is wrong-sign there. The Spectrum ComfyUI node ships `+0.01`.
 
 ---
 
-## 6. LoRA in ComfyUI
+## 5. LoRA in ComfyUI
 
 Plain Anima LoRA `.safetensors` use kohya-ss `lora_unet_` key naming and load
 directly into ComfyUI's stock `LoraLoader` — no conversion. For HydraLoRA /

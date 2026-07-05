@@ -93,11 +93,10 @@ SMC-CFG operates strictly on the velocity-space cond/uncond combine, so it compo
 |---|---|---|
 | **CFG** | velocity-space `w·(v_cond − v_uncond)` | — (this *is* CFG) |
 | **SMC-CFG** | velocity-space residual `e` → `e + Δe` | yes (replaces CFG combine) |
-| **DCW** | post-step x-space mix `prev ← prev + λ·diff_LL` | yes |
 | **Mod-guidance** | AdaLN coefficients (inside each block) | yes |
 | **Spectrum** | feature forecasting (skips DiT forwards on cached steps) | yes (sampler still runs the combine) |
 
-All five can run together: `python inference.py --smc_cfg --dcw --spectrum --mod_guidance ...`. Each one's effect on outputs is mechanistically distinct.
+All four can run together: `python inference.py --smc_cfg --spectrum --mod_guidance ...`. Each one's effect on outputs is mechanistically distinct.
 
 ## CLI
 

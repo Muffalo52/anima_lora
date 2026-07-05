@@ -130,7 +130,7 @@ metric**, replacing the content-blind growing window. It is validated against th
 true counterfactual, beats raw distance (which is actively misleading), and beats
 the lagging residual Spectrum currently has. Keep Spectrum's Chebyshev forecasting
 for the *reuse* — only the *when-to-skip* changes, which is orthogonal to the
-plugin boundary, so SMC-CFG / mod-guidance / DCW composition is unaffected.
+plugin boundary, so SMC-CFG / mod-guidance composition is unaffected.
 
 **Shipped.** The SEA-distance trigger is wired into `spectrum_denoise`
 (`networks/spectrum.py` + the `networks/spectrum_sea.py` helpers) as the opt-in

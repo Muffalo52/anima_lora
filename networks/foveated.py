@@ -49,7 +49,7 @@ v1 scope:
   * **Euler only.** The bench calibrated the Euler CFG loop; er_sde noise
     injection into group-shared periphery states is unvalidated. A stochastic
     sampler request falls back to Euler with a one-time warning.
-  * **No DCW / SMC-CFG / FSG / CFG++ composition** — unvalidated against
+  * **No SMC-CFG / FSG / CFG++ composition** — unvalidated against
     group-shared periphery velocities; warn-and-ignore (SPD posture).
     Spectrum composition is measured safe but buys ~5 % at visible periphery
     cost (P3) — mutually exclusive at dispatch, do not re-propose the compose.
@@ -304,15 +304,9 @@ def foveated_denoise(
             "ignored (noise injection into group-shared periphery states is "
             "unvalidated)."
         )
-    if (
-        ctx.dcw
-        or ctx.dcw_calibrator is not None
-        or ctx.smc_cfg is not None
-        or ctx.fsg is not None
-        or ctx.cfgpp_lambda is not None
-    ):
+    if ctx.smc_cfg is not None or ctx.fsg is not None or ctx.cfgpp_lambda is not None:
         log.warning(
-            "--fovea_sigma_c does not compose with DCW / SMC-CFG / FSG / CFG++ "
+            "--fovea_sigma_c does not compose with SMC-CFG / FSG / CFG++ "
             "(sampler-boundary plug-ins are unvalidated against group-shared "
             "periphery velocities); ignoring them. See docs/inference/foveated.md."
         )

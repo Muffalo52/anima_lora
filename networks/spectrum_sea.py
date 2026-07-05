@@ -4,8 +4,8 @@ Library home for the SEA filter that `networks/spectrum.py` uses as an
 alternative *when-to-skip* trigger (``schedule="sea"``), replacing Spectrum's
 content-blind growing window. The Chebyshev feature **forecasting** (the reuse
 path) is unchanged — only the decision metric is swapped, which keeps the
-per-step ``noise_pred`` reconstruction (and therefore SMC-CFG / mod-guidance /
-DCW composition) intact. See ``docs/inference/spectrum.md`` §"SEA schedule" and
+per-step ``noise_pred`` reconstruction (and therefore SMC-CFG / mod-guidance
+composition) intact. See ``docs/inference/spectrum.md`` §"SEA schedule" and
 the validation in ``docs/findings/seacache_sea_decision_metric.md``.
 
 Reconstructs the timestep-dependent filter from SeaCache (Chung et al.,

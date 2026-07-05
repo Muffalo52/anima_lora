@@ -289,8 +289,6 @@ forwards). **Decision gate 1:** A/B `weight_gen` 0 vs 0.03 at fixed seed/data/st
   gives nothing after the bake.
 - **Spectrum:** incompatible by construction — Spectrum's Chebyshev cache assumes
   ≥16 steps. Don't stack.
-- **DCW:** the v4 fusion head was calibrated on 28-step trajectories; a turbo
-  student needs its own few-step recalibration (out of scope).
 - **Mod guidance:** tunable — the distilled `pooled_text_proj` may still help, but a
   turbo student may have re-learned the modulation pathway implicitly. Test, don't
   assume.

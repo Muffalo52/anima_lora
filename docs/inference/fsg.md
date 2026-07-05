@@ -85,8 +85,8 @@ plain longer baseline at the same N?) — still owed, see proposal §7–§9.
 ## Composition
 
 CFG-only. Composes with **mod-guidance** (FSG's forwards inherit AdaLN steering),
-**DCW** (serial: calibrate → denoise → DCW correct), **DAVE** (forwards see the
-attenuated features), **CNS** (orthogonal — FSG is deterministic). With
+**DAVE** (forwards see the attenuated features), **CNS** (orthogonal — FSG is
+deterministic). With
 **SMC-CFG** the rule is: FSG calibration uses plain γ-combine; the outer step
 keeps the configured CFG variant.
 

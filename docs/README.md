@@ -31,7 +31,6 @@ Training-free runtime stacks — acceleration and sampler-boundary corrections. 
 |-----|-------------|
 | [inference/spectrum.md](inference/spectrum.md) | Spectrum — training-free inference acceleration via Chebyshev feature forecasting |
 | [inference/spd.md](inference/spd.md) | SPD — training-free multi-resolution inference (low-res early, spectral noise-expansion handoff); Case B fine-tune wired |
-| [inference/dcw.md](inference/dcw.md) | DCW — training-free post-step SNR-t bias correction at the sampler boundary (scalar or v4 learnable) |
 | [inference/smc_cfg.md](inference/smc_cfg.md) | SMC-CFG — training-free α-adaptive sliding-mode CFG correction in velocity space |
 | [inference/cns.md](inference/cns.md) | CNS — training-free SDE noise recolorer (`er_sde` only); shapes injected noise toward unresolved frequency bands |
 | [inference/mod-guidance.md](inference/mod-guidance.md) | Modulation guidance — text-conditioned AdaLN steering via distilled `pooled_text_proj` MLP |

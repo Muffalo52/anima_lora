@@ -636,7 +636,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + text encoder + VAE",
     "model_sam3": "SAM3 — text-bubble masking",
     "model_mit": "MIT — manga text masking",
-    "model_pe": "PE-Core-L14-336 — vision encoder (CMMD validation / DCW)",
+    "model_pe": "PE-Core-L14-336 — vision encoder (CMMD validation)",
     "model_danbooru_tags": "Danbooru tag DB — caption order correction",
     # HuggingFace authentication (Models dialog)
     "models_hf_token_placeholder": "Paste your HuggingFace token (hf_…)",

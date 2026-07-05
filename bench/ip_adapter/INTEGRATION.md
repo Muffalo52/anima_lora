@@ -17,7 +17,7 @@ re-integration doesn't require commit archaeology.
 - **PE feature cache.** `scripts/preprocess/cache_pe_encoder.py`, `make preprocess-pe`,
   `library/preprocess/pe.py`, and the `{stem}_anima_pe.safetensors` /
   `anima_pe_centroid_{encoder}.safetensors` sidecars. Shared with **CMMD validation**
-  (`library/training/cmmd.py`) and **DCW v4** — not IP-Adapter-private.
+  (`library/training/cmmd.py`) — not IP-Adapter-private.
 - **`networks/methods/ip_adapter_pe_lora.py`** (`inject_pe_lora` / `PELoRALayer`).
   Vendored into the live **Anima-Tagger** ComfyUI node (`scripts/release/sync_vendor.py`
   `TAGGER_VERBATIM`, `custom_nodes/comfyui-anima-tagger/nodes.py` `pe_lora` UI). The

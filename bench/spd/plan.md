@@ -168,7 +168,7 @@ promoted verbatim, wrapped as a sampler-level runner that self-registers with
 `0.5→1.0 @ σ0.7`). `SPD=1` composes into every `test-*` target like `SPECTRUM=1`.
 v0 limitations: **Euler-only** (ER-SDE/LCM precompute coefficients incompatible
 with mid-loop σ re-spacing), **mutually exclusive with `--spectrum`**, and **does
-not compose with DCW / SMC-CFG** (warn + ignore). Still TODO below: the
+not compose with SMC-CFG** (warn + ignore). Still TODO below: the
 speed/quality bench and the SPD∘Spectrum composition study.
 
 Tier-2 method (see `CONTRIBUTING.md`). Engineering notes:

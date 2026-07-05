@@ -100,7 +100,7 @@ override-dependencies = ["numpy>=2.0.0"]
 # `import anima_lora` (the programmatic front door) + `import library` /
 # `networks` resolve without the repo root on sys.path. The tooling trees
 # (`bench` / `scripts` / `preprocess`) are also installed so cross-tree imports
-# (`from bench._common import …`, `from scripts.dcw.haar import …`) resolve via
+# (`from bench._common import …`, `from scripts.distill_mod.prep import …`) resolve via
 # the editable finder instead of per-file `sys.path.insert` shims — and any tool
 # runs as `python -m bench.spd.foo`. `gui` stays CLI-only (not importable).
 [tool.setuptools.packages.find]

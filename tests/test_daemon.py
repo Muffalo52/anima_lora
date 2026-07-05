@@ -1300,7 +1300,7 @@ def test_lift_result_reads_pointer_and_digest(tmp_path, monkeypatch):
     """_lift_result follows <job_dir>/result_path.json to the envelope and lifts
     its abs path + {label, metrics} digest onto the record."""
     monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
-    job = jobs.Job(id="bench1", method="bench:dcw", preset="", kind="command")
+    job = jobs.Job(id="bench1", method="bench:spectrum", preset="", kind="command")
     job.dir.mkdir(parents=True, exist_ok=True)
     envelope = tmp_path / "results" / "20260703-1200" / "result.json"
     envelope.parent.mkdir(parents=True, exist_ok=True)

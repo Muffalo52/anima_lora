@@ -59,7 +59,6 @@ class _LazyModule:
 
 curate = _LazyModule("scripts.tasks.curate")
 daemon = _LazyModule("scripts.tasks.daemon")
-dcw = _LazyModule("scripts.tasks.dcw")
 downloads = _LazyModule("scripts.tasks.downloads")
 gui = _LazyModule("scripts.tasks.gui")
 inference = _LazyModule("scripts.tasks.inference")
@@ -213,37 +212,10 @@ COMMANDS = {
         inference.cmd_test_merge,
         "Inference with latest *_merged.safetensors (MODEL_DIR=..., default 'output_temp')",
     ),
-    "test-dcw": (
-        inference.cmd_test_dcw,
-        "Inference with latest LoRA + DCW post-step bias correction. "
-        "Honors SPECTRUM=1 / MOD=1 / NOLORA=1.",
-    ),
     "test-smc-cfg": (
         inference.cmd_test_smc_cfg,
         "Inference with latest LoRA + SMC-CFG (sliding-mode control CFG, arXiv:2603.03281). "
         "Honors SPECTRUM=1 / MOD=1 / NOLORA=1.",
-    ),
-    "test-dcw-v4": (
-        inference.cmd_test_dcw_v4,
-        "Inference with DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors). "
-        "No LoRA by default; SPECTRUM=1 / MOD=1 / NOLORA=0 (attach latest LoRA) all compose.",
-    ),
-    "dcw": (
-        dcw.cmd_dcw,
-        "Calibrate DCW v4: sample 5 aspect buckets (default 130×1 seeds, "
-        "shuffle_seed=0) + train fusion head",
-    ),
-    "dcw-train": (
-        dcw.cmd_dcw_train,
-        "Train-only on existing bench/dcw/results/ pool (~30s, no sampling)",
-    ),
-    "test-spectrum-dcw": (
-        inference.cmd_test_spectrum_dcw,
-        "Spectrum-accelerated inference + DCW post-step bias correction",
-    ),
-    "test-dcw-v4-spectrum": (
-        inference.cmd_test_dcw_v4_spectrum,
-        "Spectrum-accelerated inference + DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors)",
     ),
     "test-easycontrol": (
         inference.cmd_test_easycontrol,
@@ -283,7 +255,7 @@ COMMANDS = {
     "preprocess-pe": (
         preprocess.cmd_preprocess_pe,
         "Cache PE-Core vision-encoder features into the LoRA cache dir. "
-        "Consumed by CMMD validation and the DCW v4 fusion head.",
+        "Consumed by CMMD validation.",
     ),
     "preprocess-pe-spatial": (
         preprocess.cmd_preprocess_pe_spatial,

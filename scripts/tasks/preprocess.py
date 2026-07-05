@@ -731,8 +731,7 @@ def cmd_preprocess_pe(extra):
     ``{stem}_anima_pe.safetensors`` sidecars into the LoRA cache dir so the
     dataset's existing ``cache_dir`` lookup finds them.
 
-    Consumed by IP-Adapter when reading PE features off disk and by the
-    DCW v4 fusion head's pooled-image-feature input channel.
+    Consumed by IP-Adapter when reading PE features off disk.
 
     Also emits the dataset-mean PE centroid sidecar
     (``post_image_dataset/ip_adapter/anima_pe_centroid_pe.safetensors``) via
@@ -811,7 +810,7 @@ _CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 
 def cmd_preprocess(extra):
     caption_config, extra = _caption_correction_config(extra)
-    # PE features are NOT cached here by default (CMMD/DCW v4 chain `preprocess-pe`
+    # PE features are NOT cached here by default (CMMD chains `preprocess-pe`
     # explicitly) — keeps the default LoRA preprocess fast. Exception: a
     # `use_repa=true` variant aligns against PE every step, so they're chained at
     # the end (see the `_repa_pe_encoder()` block below).

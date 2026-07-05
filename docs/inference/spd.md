@@ -59,7 +59,7 @@ Spelled out in the `networks/spd.py` module docstring; the load-bearing ones:
 
 - **Euler only.** Spectral expansion re-spaces the remaining σ schedule mid-loop; `ERSDESampler`/`LCMSampler` precompute their coefficients from the *full* schedule at construction and cannot follow the reshape. A requested stochastic sampler falls back to Euler with a one-time warning.
 - **Mutually exclusive with `--spectrum`** — both replace the denoise loop.
-- **Does not compose with DCW / SMC-CFG.** Those act at the sampler boundary on the (re-spaced) σ and are unvalidated against the mid-loop reshape; passing them with `--spd` warns and ignores. A DCW calibration for the SPD trajectory would be its own run.
+- **Does not compose with SMC-CFG.** It acts at the sampler boundary on the (re-spaced) σ and is unvalidated against the mid-loop reshape; passing it with `--spd` warns and ignores.
 - **Composes with LoRA / Hydra / soft-tokens / P-GRAFT** — the per-step adapter setters (`set_hydra_*`, `compute_and_set_hydra_fei`, soft-token splice, P-GRAFT cutoff) are mirrored from the standard loop.
 - **`torch.compile` cost:** each resolution stage is a distinct token count = a distinct compiled graph (S stages → S graphs), breaking the single-static-shape guarantee. Per-block compile mode amortizes this.
 

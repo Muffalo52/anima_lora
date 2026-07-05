@@ -28,7 +28,7 @@ Two questions, one harness:
 
 Capture seam: monkeypatch ``library.inference.sampling.step`` (the euler ODE
 step), recomputing the *guided* x̂₀ = x_t − σ_i·v exactly as generation.py:799.
-Forces the default euler sampler (no er_sde / DCW / spectrum) so the seam fires.
+Forces the default euler sampler (no er_sde / spectrum) so the seam fires.
 
 Usage::
 

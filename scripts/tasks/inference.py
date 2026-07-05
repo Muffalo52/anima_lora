@@ -38,12 +38,11 @@ def _mod_flags() -> list[str]:
 def _base_test_args(*, lora_default: bool = True) -> list[str]:
     """Build the shared ``inference.py`` argv prefix used by every ``test*`` command.
 
-    Honors three env levers so they compose uniformly across ``test``,
-    ``test-smc-cfg``, ``test-dcw``, ``test-dcw-v4``:
+    Honors three env levers so they compose uniformly across ``test`` and
+    ``test-smc-cfg``:
 
     - ``NOLORA=1`` skips ``--lora_weight`` (bare DiT). When unset, ``lora_default``
-      decides whether the caller wants a LoRA by default — ``test-dcw-v4`` opts
-      out (DCW v4 is meant to ride on the bare DiT unless the user adds one).
+      decides whether the caller wants a LoRA by default.
     - ``SPECTRUM=1`` appends Spectrum flags. ``SEA=1`` (with SPECTRUM=1) swaps the
       growing-window skip rule for the SeaCache SEA-distance trigger; tune via
       ``SPECTRUM_DELTA=`` (default ``auto``) and ``SPECTRUM_REFRESH_RATIO=``.
@@ -225,101 +224,14 @@ def cmd_test_merge(extra):
     run([*INFERENCE_BASE, "--dit", str(chosen), *extra])
 
 
-def cmd_test_dcw(extra):
-    """Inference with latest LoRA + DCW post-step correction.
-
-    Defaults bake in λ=0.01 + one_minus_sigma schedule (see
-    bench/dcw/findings.md). Override via --dcw_lambda / --dcw_schedule in extra.
-    Honors SPECTRUM / MOD / NOLORA env levers (see ``_base_test_args``).
-    """
-    run([*_base_test_args(), "--dcw", "--dcw_lambda", "0.01", *extra])
-
-
 def cmd_test_smc_cfg(extra):
     """Inference with latest LoRA + SMC-CFG (arXiv:2603.03281).
 
     Production defaults (λ=5, α=0.2). Override via --smc_cfg_lambda /
     --smc_cfg_alpha in extra. Honors SPECTRUM / MOD / NOLORA env levers
-    (see ``_base_test_args``); composes with --dcw via extra.
+    (see ``_base_test_args``).
     """
     run([*_base_test_args(), "--smc_cfg", *extra])
-
-
-def _latest_fusion_head() -> str:
-    """Resolve the most recent fusion_head.safetensors under any DCW root.
-
-    Scans output/dcw/ (new `make dcw` output), post_image_dataset/dcw/
-    (legacy), and bench/dcw/results/ (legacy). Newest mtime wins.
-    """
-    from pathlib import Path
-
-    roots = [
-        Path("output/dcw"),
-        Path("post_image_dataset/dcw"),
-        Path("bench/dcw/results"),
-    ]
-    candidates: list[Path] = []
-    for root in roots:
-        if root.exists():
-            candidates.extend(root.glob("*/fusion_head.safetensors"))
-    if not candidates:
-        raise SystemExit(
-            "no fusion_head.safetensors found under output/dcw/, "
-            "post_image_dataset/dcw/, or bench/dcw/results/ — "
-            "run `make dcw-train` first"
-        )
-    return str(max(candidates, key=lambda p: p.stat().st_mtime))
-
-
-def cmd_test_dcw_v4(extra):
-    """Inference with DCW learnable calibrator (no LoRA by default).
-
-    Auto-resolves the most recent fusion_head.safetensors. Pass
-    --dcw_calibrator <path> (or legacy --dcw_v4 <path>) in extra to override.
-    Honors SPECTRUM / MOD / NOLORA env levers (see ``_base_test_args``).
-    Defaults to NOLORA semantics; set ``NOLORA=0`` to attach the latest LoRA,
-    or pass ``--lora_weight <path>`` in extra to attach a specific one.
-    """
-    extra_has_calib = any(a == "--dcw_calibrator" or a == "--dcw_v4" for a in extra)
-    calib_args = [] if extra_has_calib else ["--dcw_calibrator", _latest_fusion_head()]
-    run([*_base_test_args(lora_default=False), *calib_args, *extra])
-
-
-def cmd_test_spectrum_dcw(extra):
-    """Spectrum + DCW composed. Equivalent to ``make test SPECTRUM=1 --dcw``."""
-    run(
-        [
-            *INFERENCE_BASE,
-            "--lora_weight",
-            str(latest_lora()),
-            *_spectrum_flags(stop_caching_step=27),
-            "--dcw",
-            *extra,
-        ]
-    )
-
-
-def cmd_test_dcw_v4_spectrum(extra):
-    """Spectrum + DCW learnable calibrator composed.
-
-    Spectrum knobs match ``cmd_test`` with stop_caching_step=27 to match
-    DCW's 28-step contract, plus DCW calibrator (auto-resolves the most recent
-    fusion_head.safetensors). Pass --dcw_calibrator <path> in extra to override.
-    """
-    extra_has_calib = any(a == "--dcw_calibrator" or a == "--dcw_v4" for a in extra)
-    calib_args = [] if extra_has_calib else ["--dcw_calibrator", _latest_fusion_head()]
-    run(
-        [
-            *INFERENCE_BASE,
-            "--lora_weight",
-            str(latest_lora()),
-            *_spectrum_flags(stop_caching_step=27),
-            *calib_args,
-            "--infer_steps",
-            "28",
-            *extra,
-        ]
-    )
 
 
 def cmd_test_easycontrol(extra):

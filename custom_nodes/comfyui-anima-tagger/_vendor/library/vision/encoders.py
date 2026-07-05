@@ -3,9 +3,8 @@ and the Anima Tagger).
 
 Two Meta Perception Encoder variants are registered:
 
-* ``pe`` — PE-Core-L14-336. Global / CLIP-aligned features. Used by IP-Adapter,
-  the DCW v4 fusion head's PE feature cache, and the Anima Tagger's primary
-  encoder.
+* ``pe`` — PE-Core-L14-336. Global / CLIP-aligned features. Used by IP-Adapter
+  and the Anima Tagger's primary encoder.
 * ``pe_spatial`` — PE-Spatial-B16-512. Spatial-fine-tuned variant from the same
   paper. Patch=16, native 32×32 grid. No CLIP projection / no LN-post / no
   pool head — only the patch token sequence is meaningful. Used by the Anima

@@ -66,7 +66,7 @@ def _grids(edge):
 
 
 def test_band_derivation():
-    # 1024 is frozen at its natural 2-family band (DCW keys off the 1024 table).
+    # 1024 is frozen at its natural 2-family band (the top-5 aspect set keys off it).
     assert freefit_band_for_edge(1024) == (4032, 4200)
     # Every other tier is widened symmetrically by ±2.5% around its nominal so
     # free-fit has aspect freedom even on the single-family tiers — without it,

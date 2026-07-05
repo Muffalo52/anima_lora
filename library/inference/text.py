@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 # Anima's DiT expects a fixed-length cross-attention context. The pretrained
 # model treats zero-padded positions as attention sinks in the cross-attention
 # softmax — trimming to actual text length produces black images. All sites
-# that prepare crossattn embeds (training, inference, CFG-uncond, DCW
-# trajectory replay, DirectEdit, distillation) must pad to this exact length.
+# that prepare crossattn embeds (training, inference, CFG-uncond,
+# DirectEdit, distillation) must pad to this exact length.
 MAX_CROSSATTN_TOKENS = 512
 
 

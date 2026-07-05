@@ -10,7 +10,7 @@ the image when omitted). Skips already-cached entries (idempotent).
 
 Wrapped by ``make preprocess-pe`` (reads ``post_image_dataset/resized/``,
 writes ``post_image_dataset/lora/``). The same sidecars are consumed by
-IP-Adapter and the DCW v4 fusion head -- they share the cache directory.
+IP-Adapter -- it shares the cache directory.
 
 The cache key matches what the encoder produces at training time:
 ``encode_pe_from_imageminus1to1(bundle, x, same_bucket=True)`` -> ``[T_pe, d_enc]``.
@@ -26,9 +26,8 @@ Pass ``--centroid`` to also emit ``anima_pe_centroid_{encoder}.safetensors``
 (dataset-mean of mean-over-patch-tokens pooled features, ``[D]`` fp32) after
 the cache pass. Pass ``--centroid_only`` to skip encoding entirely and just
 pool existing caches under ``--cache_dir``. Consumed by IP-Adapter
-(``ip_centroid_path``) and DCW v4 (``cos(c_pool, μ_centroid)`` channel) --
-targets the participation-ratio-6 manifold collapse on this dataset (see
-``bench/ip_adapter/analysis.md``).
+(``ip_centroid_path``) -- targets the participation-ratio-6 manifold collapse
+on this dataset (see ``bench/ip_adapter/analysis.md``).
 """
 
 import argparse
@@ -110,7 +109,7 @@ def main() -> None:
         help=(
             "After the cache pass, stream-pool all '_anima_{encoder}.safetensors' "
             "files under --cache_dir and emit a dataset-mean centroid sidecar "
-            "consumed by IP-Adapter and DCW v4. Requires --cache_dir."
+            "consumed by IP-Adapter. Requires --cache_dir."
         ),
     )
     parser.add_argument(

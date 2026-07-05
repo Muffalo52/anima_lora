@@ -58,7 +58,7 @@ python scripts/inference_server.py stop     # graceful shutdown
 
 Only `prompt` is required; everything else defaults (`get_generation_settings`
 fills every knob via `GenerationRequest.to_args()`). Long-tail method flags
-(DCW / Spectrum / etc.) ride `extra_argv`, exactly as in
+(Spectrum / etc.) ride `extra_argv`, exactly as in
 `examples/03_generate_with_correction.py`. The decoded PNG is written to disk
 (`output/inference/samples/<ts>_<seed>.png` by default, or your `save_path`) and
 the path is returned.

@@ -24,7 +24,7 @@ the only one::
 hand-building a namespace, so the **parser stays the single source of truth
 for every default** the generation code reads via ``getattr`` — this dataclass
 only carries the knobs an embedder commonly sets, and the long tail
-(spectrum / dcw / ip-adapter / … sub-knobs) rides through ``extra_argv``.
+(spectrum / ip-adapter / … sub-knobs) rides through ``extra_argv``.
 
 The request is frozen and ``generate()`` does not write back to the namespace
 ``to_args()`` returns, so one ``GenerationRequest`` is safe to reuse across seeds
@@ -91,8 +91,8 @@ class GenerationRequest:
     no_metadata: bool = False
 
     # Verbatim CLI tokens appended after the structured fields, for the long
-    # tail this dataclass doesn't model (e.g. ["--spectrum", "--dcw",
-    # "--dcw_lambda", "0.01"]). Anything here overrides the same flag above.
+    # tail this dataclass doesn't model (e.g. ["--spectrum", "--smc_cfg"]).
+    # Anything here overrides the same flag above.
     extra_argv: Sequence[str] = field(default_factory=tuple)
 
     def to_argv(self) -> list[str]:

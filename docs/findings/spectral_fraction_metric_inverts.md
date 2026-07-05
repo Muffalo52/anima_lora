@@ -2,7 +2,7 @@
 
 Building the DAVE "analytic dot-predictor" (`bench/dave/probe_patch_imprint.py`)
 surfaced two **reusable traps** in how we diagnose representation-level /
-sampler-boundary interventions (DAVE, Spectrum, DCW, CNS, SMC-CFG, mod-guidance —
+sampler-boundary interventions (DAVE, Spectrum, CNS, SMC-CFG, mod-guidance —
 anything that perturbs intermediate features and is judged by the spectrum of the
 resulting change). Both are easy to walk into and both produced a confidently
 wrong answer here. Keep them in mind before trusting a spectral probe's verdict.
@@ -48,7 +48,7 @@ does a lot — so it ranks interventions by inverse-magnitude, not by artifact.
 > total-Δ-energy column so the reader can see a near-no-op masquerading as "high
 > fraction." Any "fraction of this change that is in band X" proxy for "does this
 > change cause artifact X" has the same inversion — it applies verbatim to
-> Spectrum/CNS/DCW spectral diagnostics, not just DAVE.
+> Spectrum/CNS spectral diagnostics, not just DAVE.
 
 ## Trap 2 — a per-block ablation cannot see a *cumulative* artifact
 

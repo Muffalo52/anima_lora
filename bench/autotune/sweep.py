@@ -12,9 +12,9 @@ offloader vs the compiled-backward partitioner recompute is unaudited).
 
 Approach
 --------
-One real ``train.py`` subprocess **per grid cell** — the DCW idiom
-(``bench/dcw/sweep_buckets.py``). A fresh process per cell keeps torch.compile /
-dynamo state clean across the per-budget recompiles, and runs the genuine load →
+One real ``train.py`` subprocess **per grid cell**. A fresh process per cell
+keeps torch.compile / dynamo state clean across the per-budget recompiles, and
+runs the genuine load →
 apply → block-swap → compile → train path, so the measured peak is exactly what a
 real run would use (including the inductor compile-context overhead).
 
@@ -286,7 +286,9 @@ def _drain_wait(reader, threshold_mib: int, max_wait: float) -> int:
     return last
 
 
-def run_cell(args, swap: int, budget: float, reader, run_dir: Path, baseline_used: int) -> dict:
+def run_cell(
+    args, swap: int, budget: float, reader, run_dir: Path, baseline_used: int
+) -> dict:
     argv = _build_argv(args, swap, budget)
     log_path = run_dir / f"cell_s{swap}_b{budget}.log"
 
@@ -406,12 +408,21 @@ def _md_table(rows: list[list[str]]) -> str:
 
 
 def write_surface(run_dir: Path, cells, swaps, budgets) -> list[str]:
-    peak_rows = _grid_table(cells, swaps, budgets, "peak_used_mib", lambda v: f"{int(v)}")
+    peak_rows = _grid_table(
+        cells, swaps, budgets, "peak_used_mib", lambda v: f"{int(v)}"
+    )
     spi_rows = _grid_table(cells, swaps, budgets, "s_per_it", lambda v: f"{v:.2f}")
     loss_rows = _grid_table(cells, swaps, budgets, "avr_loss", lambda v: f"{v:.4f}")
 
     total = next((c["total_mib"] for c in cells if c.get("total_mib")), None)
-    baseline = next((c["baseline_used_mib"] for c in cells if c.get("baseline_used_mib") is not None), 0)
+    baseline = next(
+        (
+            c["baseline_used_mib"]
+            for c in cells
+            if c.get("baseline_used_mib") is not None
+        ),
+        0,
+    )
 
     md = [
         "# Autotune surface: blocks_to_swap × activation_memory_budget\n",
@@ -431,14 +442,33 @@ def write_surface(run_dir: Path, cells, swaps, budgets) -> list[str]:
     with open(run_dir / "surface.csv", "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(
-            ["swap", "budget", "status", "peak_used_mib", "peak_delta_mib",
-             "launch_at_mib", "total_mib", "s_per_it", "avr_loss", "wall_s"]
+            [
+                "swap",
+                "budget",
+                "status",
+                "peak_used_mib",
+                "peak_delta_mib",
+                "launch_at_mib",
+                "total_mib",
+                "s_per_it",
+                "avr_loss",
+                "wall_s",
+            ]
         )
         for c in cells:
             wr.writerow(
-                [c["swap"], c["budget"], c["status"], c["peak_used_mib"],
-                 c["peak_delta_mib"], c.get("launch_at_mib"), c["total_mib"],
-                 c["s_per_it"], c["avr_loss"], c["wall_s"]]
+                [
+                    c["swap"],
+                    c["budget"],
+                    c["status"],
+                    c["peak_used_mib"],
+                    c["peak_delta_mib"],
+                    c.get("launch_at_mib"),
+                    c["total_mib"],
+                    c["s_per_it"],
+                    c["avr_loss"],
+                    c["wall_s"],
+                ]
             )
     return ["surface.md", "surface.csv"]
 
@@ -454,18 +484,40 @@ def parse_args():
     p.add_argument("--preset", default="default")
     p.add_argument("--swaps", default="0,10,20", help="comma list of blocks_to_swap")
     p.add_argument("--budgets", default="1.0,0.99,0.85,0.7,0.6", help="comma list")
-    p.add_argument("--steps", type=int, default=50, help="steps to run per cell before kill")
-    p.add_argument("--skip_steps", type=int, default=2,
-                   help="exclude the first N (compile-heavy) steps from the s/it window")
-    p.add_argument("--sample_ratio", type=float, default=0.01,
-                   help="dataset fraction per cell — small keeps cells fast")
-    p.add_argument("--timeout", type=float, default=600, help="per-cell wall backstop (s)")
+    p.add_argument(
+        "--steps", type=int, default=50, help="steps to run per cell before kill"
+    )
+    p.add_argument(
+        "--skip_steps",
+        type=int,
+        default=2,
+        help="exclude the first N (compile-heavy) steps from the s/it window",
+    )
+    p.add_argument(
+        "--sample_ratio",
+        type=float,
+        default=0.01,
+        help="dataset fraction per cell — small keeps cells fast",
+    )
+    p.add_argument(
+        "--timeout", type=float, default=600, help="per-cell wall backstop (s)"
+    )
     p.add_argument("--poll", type=float, default=0.2, help="GPU sample interval (s)")
-    p.add_argument("--step_poll", type=float, default=1.0, help="step-counter check interval (s)")
-    p.add_argument("--drain_margin", type=int, default=1200,
-                   help="MiB above baseline under which the GPU counts as drained")
-    p.add_argument("--drain_max", type=float, default=45.0,
-                   help="max wait for prior cell's VRAM to drain (s)")
+    p.add_argument(
+        "--step_poll", type=float, default=1.0, help="step-counter check interval (s)"
+    )
+    p.add_argument(
+        "--drain_margin",
+        type=int,
+        default=1200,
+        help="MiB above baseline under which the GPU counts as drained",
+    )
+    p.add_argument(
+        "--drain_max",
+        type=float,
+        default=45.0,
+        help="max wait for prior cell's VRAM to drain (s)",
+    )
     p.add_argument("--label", default=None)
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
@@ -477,8 +529,10 @@ def main():
     budgets = [float(x) for x in args.budgets.split(",") if x.strip() != ""]
 
     grid = [(s, b) for s in swaps for b in budgets]
-    print(f"Grid: {len(grid)} cells — swaps={swaps} budgets={budgets} "
-          f"method={args.method} preset={args.preset} steps={args.steps}")
+    print(
+        f"Grid: {len(grid)} cells — swaps={swaps} budgets={budgets} "
+        f"method={args.method} preset={args.preset} steps={args.steps}"
+    )
     if args.dry_run:
         for s, b in grid:
             print("  " + " ".join(_build_argv(args, s, b)))
@@ -486,8 +540,10 @@ def main():
 
     reader = _make_reader()
     if reader is None:
-        print("ERROR: no GPU memory reader (pynvml / nvidia-smi). Cannot measure peak.",
-              file=sys.stderr)
+        print(
+            "ERROR: no GPU memory reader (pynvml / nvidia-smi). Cannot measure peak.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(f"GPU memory reader: {reader[2]}")
 

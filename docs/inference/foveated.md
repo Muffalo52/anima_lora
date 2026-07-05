@@ -57,7 +57,7 @@ python inference.py ... --fovea_sigma_c 0.75 --fovea_frac 0.25   # faster, knee 
 - **Mutually exclusive with `--spectrum` / `--spd`** (all replace the denoise
   loop). The foveated-Spectrum compose was closed by bench P3: no headroom at
   sane schedules, baseline collapse at aggressive ones — don't re-propose.
-- **DCW / SMC-CFG / FSG / CFG++ are warn-and-ignored** — sampler-boundary
+- **SMC-CFG / FSG / CFG++ are warn-and-ignored** — sampler-boundary
   plug-ins unvalidated against group-shared periphery velocities.
 - **Composes with LoRA / Hydra / soft-tokens / P-GRAFT** — per-step adapter
   setters mirror the standard loop; the per-Linear LoRA delta is

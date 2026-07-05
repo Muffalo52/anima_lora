@@ -29,10 +29,10 @@ Usage::
 
     from bench._common import make_run_dir, write_result
 
-    run_dir = make_run_dir("dcw", label="lambda-sweep")
+    run_dir = make_run_dir("spectrum", label="delta-sweep")
     # ... write artifacts into run_dir ...
     write_result(run_dir, script=__file__, args=args,
-                 metrics={...}, artifacts=["per_step.csv", "gap_curves.png"])
+                 metrics={...}, artifacts=["per_step.csv", "curves.png"])
 
 Cache-level data access (issues.md DX4)::
 
@@ -134,7 +134,7 @@ def make_run_dir(
     """Create and return ``<root>/<YYYYMMDD-HHMM>[-<label>]/``.
 
     Default ``root`` is ``<repo>/bench/<method>/results/``. Pass an explicit
-    ``root`` (e.g. ``post_image_dataset/dcw``) to redirect — useful for
+    ``root`` (e.g. a dir under ``post_image_dataset/``) to redirect — useful for
     calibration data that's logically a cache, not a published-bench artifact.
     """
     ts = (when or datetime.now()).strftime("%Y%m%d-%H%M")

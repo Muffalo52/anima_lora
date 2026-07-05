@@ -48,24 +48,12 @@ The shape of the Tier 2 PR (new method + paper + a turbo bench + docs/methods en
 
 If Phase 1 fails after one rank bump, the proposal explicitly says kill it — don't grind. The phase gates are there to bound the contributor's downside.
 
-### 3. DCW calibration
-
-DCW v4 (`make dcw` → `fusion_head.safetensors`) ships. The wall is calibration coverage: each released LoRA needs its own fusion head, and several v4 controller paths are stubbed. See [`docs/inference/dcw.md`](docs/inference/dcw.md) "Limitations / open questions".
-
-- **σ̂² channel re-train (3-seed rerun).** Prototype fails Gate B on the variance head, so the shipped controller is α̂-only (no σ̂²-shrinkage path) until this clears. Run `make dcw` across 3 independent seeds, retrain `train_fusion_head.py` with the combined pool, re-evaluate Gate B. If it still fails, document the failure and keep the controller α̂-only permanently. *[Tier 1.5 — bench script exists, the contribution is the seed sweep + write-up]*
-- **Tiled inference path.** v4 controller currently no-ops under tiled VAE/DiT. The single-tile `c_pool` / `g_obs` is ill-defined at tile boundaries. Two paths: (a) compute one global `c_pool` / `g_obs` before tiling and broadcast it across tiles, (b) keep the no-op and document. Either is a valid PR; (a) is preferred. *[Tier 1.5]*
-- **CFG drift.** v4 is calibrated at CFG=4 only — the production setting. CFGs other than 4 fall back to scalar. A CFG=1 / CFG=7 calibration pool + a (not-yet-built) CFG-select switch on the calibrator would close the gap. The CFG=1 case in particular intersects with paper-direction sign-flips (`project_dcw_cfg_aspect_signflip`). *[Tier 2-shaped — new calibration pool counts as a bench artifact]*
-- **Cached-Spectrum `x0_pred` ablation.** v4 should still help under Spectrum because the correction is bias-agnostic, but the Chebyshev forecaster biases `x0_pred` and the row hasn't been measured. One bench run, one ablation table. *[Tier 1.5]*
-- **Per-released-LoRA fusion heads.** Each major LoRA release should ship its calibrated head as a sibling artifact (`<lora_name>.fusion_head.safetensors`). The current `make dcw` is incremental — the contribution is running it on each released checkpoint and publishing the head. *[Tier 1 — operational, no code]*
-- **`scripts/dcw/` documentation pass.** `measure_bias.py`, `train_fusion_head.py`, `haar.py`, `trajectory.py`, `collect_fei_sidecar.py` are under-commented. Reviewing each as a contributor would, and improving the docstrings / `--help` strings, is welcome. *[Tier 1]*
-
-### 4. Filling the bench gaps
+### 3. Filling the bench gaps
 
 The `bench/<method>/` convention from Tier 2 below requires every method bench to ship a `README.md` (what it measures, run command, output layout, baseline run, interpretation). Several existing subdirs predate that requirement and are missing it:
 
 | Subdir | Status | What it has | What's needed |
 |---|---|---|---|
-| `bench/dcw/` | **No README** | `covariance_ceiling.py`, `k_supervision_sweep.py`, `stability_predictor_check.py`, `sweep_buckets.py`, `transfer_hypothesis_check.py`, `plot_seed_band.py` + a `results/` corpus | One README that maps each script to a finding and links to a canonical results dir |
 | `bench/spd/`, `bench/dave/`, `bench/mod_guidance/` | Has README | per-method probe ladder + `results/` | Use these as the shape template |
 
 Each missing README is a self-contained Tier 1 PR. Use `bench/spd/README.md` as the model: headline, what each script does, a copy-pasteable run command, the headline number(s) and what "good" looks like, links to representative `results/<timestamp>/` runs, and an "Observed on Anima" section.
@@ -75,7 +63,7 @@ A second-order bench-gap contribution worth calling out:
 - **Envelope conformance.** Older bench scripts predate `bench/_common.py` and don't drop a `result.json` via `make_run_dir` + `write_result`. Auditing each script and converting the holdouts (so cross-run indexing actually works) is a clean Tier 1 PR per script.
 - **A dedicated turbo bench** lands as part of the Turbo LoRA contribution in (2) above (currently `bench/turbo/`).
 
-### 5. Translations & localization
+### 4. Translations & localization
 
 Translatable content lives in four places, each with its own contribution shape but all reviewed as Tier 1 (no bench, no test — `make gui` walkthrough screenshots in the PR description are the proof). Missing entries in every surface below **fall back to English**, so it's fine to ship an incomplete translation and grow it over time. Currently shipped: `en` (canonical), `ko` (mostly complete), `cn` (machine-translated stub, unproofread).
 
@@ -136,7 +124,7 @@ These sit between Tier 1 and Tier 2: no new paper or new docs page is required, 
 **Requirements:**
 
 1. **Bench script.** A runnable script that quantifies the change. Two acceptable shapes:
-   - **Add to an existing `bench/<method>/`** if the change is scoped to one method (e.g. a router tweak goes under that method's bench dir such as `bench/dcw/`). Append a new script and a new section to that bench's README.
+   - **Add to an existing `bench/<method>/`** if the change is scoped to one method (e.g. a router tweak goes under that method's bench dir such as `bench/spd/`). Append a new script and a new section to that bench's README.
    - **Add a small `bench/<topic>/`** for cross-cutting changes (e.g. a sampler-correction optimization belongs in a new dir alongside `bench/dave/`).
 
    The script must report the headline number(s) it claims to move — wall-clock, peak VRAM, loss-at-N-steps, drift, whatever the change targets — for **both before and after**. A single-number claim ("20% faster") with no reproducible script does not clear the bar. If the script loads the DiT, use `bench/_anima.py` (`add_common_args` + `build_anima`) — same rationale as Tier 2 §2 below: every DiT-loading bench needs to expose `--compile` and load the adapter in the right order, and the helper enforces both.
@@ -167,7 +155,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
 
    Hand-rolled methods without prior art are not categorically rejected, but the bar is higher: in the absence of a paper, the bench results have to carry the argument alone, and reviewers will be skeptical. If you are confident, propose the method in an issue first.
 
-2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/dcw/`, `bench/spd/`, `bench/dave/`):
+2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/spd/`, `bench/dave/`, `bench/mod_guidance/`):
 
    ```
    bench/<method_name>/

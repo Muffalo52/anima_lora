@@ -478,8 +478,8 @@ Three differences from the EasyControl node:
    `cond_rope` handling.
 
 Because the output is a plain LoRA, it **composes with the rest of the stack**:
-Spectrum acceleration and DCW sampler correction operate at the sampler/block
-level, orthogonal to a LoRA + concat, so a "BYG edit + Spectrum" workflow is
+Spectrum acceleration operates at the sampler/block level, orthogonal to a
+LoRA + concat, so a "BYG edit + Spectrum" workflow is
 just the graph above with a Spectrum KSampler swapped in.
 
 **This is the open architectural fork** (the one real design choice in the
@@ -503,7 +503,7 @@ Either way the node is "EasyControl-alike." Decide this before writing
 | Is bootstrapping needed on Anima? | Ablate: drive forward from noised source instead. Paper says big degradation; confirm. |
 | Does EMA matter for images here? | Ablate EMA (paper says it's part of image default but optional for video). |
 | Object removal weakness reproduce? | Per-category breakdown; expect *remove* to be the weakest (target caption omits rather than negates — paper's acknowledged limitation). |
-| Composes with our stack? | Does a BYG LoRA still work under `compile_blocks()`? Does inference compose with DCW/Spectrum (it's just a LoRA, so it should)? |
+| Composes with our stack? | Does a BYG LoRA still work under `compile_blocks()`? Does inference compose with Spectrum (it's just a LoRA, so it should)? |
 
 ## Decisions to make
 

@@ -43,7 +43,7 @@ def denoise_one(
 
     Returns the clean latent ``(1, 16, H_lat, W_lat)`` in float32 on CPU.
     Mirrors the dense-path branch of ``library/inference/generation.py:529-706``
-    minus all the extras (spectrum / dcw / mod-guidance / postfix / hydra) —
+    minus all the extras (spectrum / mod-guidance / postfix / hydra) —
     the teacher here is the bare base DiT, so none of those apply.
     """
     from library.inference import sampling as inference_utils
@@ -104,9 +104,9 @@ def _filter_and_cap_pairs(
 ) -> list:
     """Restrict pairs to a (H_pix, W_pix) allowlist and cap N per bucket.
 
-    Mirrors DCW's ``pick_cached_samples`` stratification: shuffle-seeded
-    selection across the bucket's full candidate pool so incremental re-runs
-    grow coverage instead of resampling the same prompts.
+    Shuffle-seeded stratified selection across the bucket's full candidate
+    pool so incremental re-runs grow coverage instead of resampling the same
+    prompts.
     """
     import numpy as np
 

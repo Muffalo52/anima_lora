@@ -2,8 +2,8 @@
 
 Every denoise-loop variant — the standard loop in ``generation.generate_body``
 and the ``--spectrum`` / ``--spd`` runners in ``networks/`` — threads the same
-block of side-channel args: adapter routing (P-GRAFT, soft-tokens), CFG/SNR
-corrections (DCW, SMC-CFG), and the pooled-text override. These are orthogonal
+block of side-channel args: adapter routing (P-GRAFT, soft-tokens), the
+SMC-CFG correction, and the pooled-text override. These are orthogonal
 to each sampler's own knobs (Spectrum's window/Chebyshev params, SPD's
 resolution stages), so bundling them keeps the runner signatures focused on
 what is actually sampler-specific.
@@ -32,11 +32,6 @@ class SamplerSideChannels:
     lora_cutoff_step: Optional[int] = None
     pooled_text_pos: Optional[torch.Tensor] = None
     pooled_text_neg: Optional[torch.Tensor] = None
-    dcw: bool = False
-    dcw_lambda: float = -0.015
-    dcw_schedule: str = "one_minus_sigma"
-    dcw_band_mask: str = "LL"
-    dcw_calibrator: Any = None
     smc_cfg: "Optional[SMCCFGState]" = None
     fsg: Any = None
     cfgpp_lambda: Optional[float] = None
@@ -53,7 +48,6 @@ class SamplerSideChannels:
         lora_cutoff_step: Optional[int] = None,
         pooled_text_pos: Optional[torch.Tensor] = None,
         pooled_text_neg: Optional[torch.Tensor] = None,
-        dcw_calibrator: Any = None,
         smc_cfg: "Optional[SMCCFGState]" = None,
         fsg: Any = None,
         cfgpp_lambda: Optional[float] = None,
@@ -62,19 +56,13 @@ class SamplerSideChannels:
         soft_tokens_neg_seqlens: Optional[torch.Tensor] = None,
     ) -> "SamplerSideChannels":
         """Build from parsed CLI ``args`` plus the runtime objects ``generate_body``
-        already holds. The DCW scalar defaults live here so the two runner call
-        sites don't each repeat the ``getattr(args, ...)`` block.
+        already holds.
         """
         return cls(
             pgraft_network=pgraft_network,
             lora_cutoff_step=lora_cutoff_step,
             pooled_text_pos=pooled_text_pos,
             pooled_text_neg=pooled_text_neg,
-            dcw=getattr(args, "dcw", False),
-            dcw_lambda=getattr(args, "dcw_lambda", -0.015),
-            dcw_schedule=getattr(args, "dcw_schedule", "one_minus_sigma"),
-            dcw_band_mask=getattr(args, "dcw_band_mask", "LL"),
-            dcw_calibrator=dcw_calibrator,
             smc_cfg=smc_cfg,
             fsg=fsg,
             cfgpp_lambda=cfgpp_lambda,

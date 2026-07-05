@@ -5,7 +5,6 @@ import logging
 import math
 import os
 import random
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional, List, Any, Dict, Tuple, Union
 
@@ -145,7 +144,7 @@ def register_spectrum_runner(fn):
 
     The runner must match networks.spectrum.spectrum_denoise's signature: the
     core positional args, a ``SamplerSideChannels`` (see
-    ``library.inference.sampler_context``) carrying the shared DCW / SMC-CFG /
+    ``library.inference.sampler_context``) carrying the shared SMC-CFG /
     soft-tokens / P-GRAFT / pooled-text channels, then the spectrum-specific
     keyword knobs. Called by networks/spectrum.py at import time, or by a
     downstream inference package that ships its own spectrum module.
@@ -492,18 +491,6 @@ def generate_body_tiled(
                 else:
                     new_latents = inference_utils.step(latents, noise_pred, sigmas, i)
 
-                if getattr(args, "dcw", False) and float(sigmas[i + 1]) > 0.0:
-                    from networks.dcw import apply_dcw, parse_band_mask
-
-                    new_latents = apply_dcw(
-                        new_latents.float(),
-                        denoised,
-                        float(sigmas[i]),
-                        lam=args.dcw_lambda,
-                        schedule=args.dcw_schedule,
-                        bands=parse_band_mask(getattr(args, "dcw_band_mask", "LL")),
-                    )
-
                 latents = new_latents.to(latents.dtype)
                 pbar.update()
     finally:
@@ -675,41 +662,6 @@ def generate_body(
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 
-    # DCW: load + setup the learnable calibrator if requested.
-    dcw_calibrator = None
-    calibrator_path = getattr(args, "dcw_calibrator", None) or getattr(
-        args, "dcw_v4", None
-    )
-    if calibrator_path:
-        from library.inference.corrections.dcw_calibrator import OnlineDCWCalibrator
-
-        artifact_path = Path(calibrator_path)
-        if artifact_path.is_dir():
-            artifact_path = artifact_path / "fusion_head.safetensors"
-        try:
-            dcw_calibrator = OnlineDCWCalibrator.from_safetensors(
-                artifact_path, device=device
-            )
-        except Exception as e:
-            logger.warning(
-                "DCW calibrator: failed to load %s: %s — disabling", artifact_path, e
-            )
-            dcw_calibrator = None
-        if dcw_calibrator is not None:
-            calib_embed_mask = (
-                context["embed"][3].to(device)
-                if len(context["embed"]) > 3 and context["embed"][3] is not None
-                else None
-            )
-            dcw_calibrator.setup(
-                embed=embed,
-                embed_mask=calib_embed_mask,
-                gain=getattr(args, "dcw_calibrator_gain", None)
-                or getattr(args, "dcw_v4_alpha_gain", 1.0),
-            )
-            if not dcw_calibrator.is_active:
-                dcw_calibrator = None  # graceful degrade to scalar/none
-
     # Create sampler. Variable kept named `er_sde` for historic minimum-diff
     # reasons; both ERSDESampler and LCMSampler share the same .step interface.
     cns = _build_cns_recolorer(args)
@@ -796,7 +748,6 @@ def generate_body(
         lora_cutoff_step=lora_cutoff_step,
         pooled_text_pos=_pooled_text_pos,
         pooled_text_neg=_pooled_text_neg,
-        dcw_calibrator=dcw_calibrator,
         smc_cfg=smc_cfg,
         fsg=fsg,
         cfgpp_lambda=cfgpp_lambda,
@@ -950,10 +901,6 @@ def generate_body(
                     set_hydra_sigma(anima, t_expand)
                     set_step_expert_index(anima, i)
                     compute_and_set_hydra_fei(anima, latents)
-                    if dcw_calibrator is not None:
-                        # Capture FEI on the pre-forward latent at warmup steps
-                        # for v6 fei_obs={replace,concat} artifacts. No-op for v5.
-                        dcw_calibrator.record_latent_pre_forward(i, latents)
 
                     # Commitment-σ / boost probe: below the cutoff, drive the
                     # conditional pass with the alternate embedding — the boosted
@@ -1068,60 +1015,7 @@ def generate_body(
                             latents, noise_pred, sigmas, i
                         )
 
-                    if dcw_calibrator is not None:
-                        dcw_calibrator.record(i, noise_pred)
-                        dcw_calibrator.fire_head_if_due(i)
-
-                    lam_i_calib: Optional[float] = None
-                    if float(sigmas[i + 1]) > 0.0 and (
-                        dcw_calibrator is not None or getattr(args, "dcw", False)
-                    ):
-                        from networks.dcw import apply_dcw, parse_band_mask
-
-                        if dcw_calibrator is not None:
-                            lam_i_calib = dcw_calibrator.lambda_for_step(
-                                i, float(sigmas[i])
-                            )
-                            new_latents = apply_dcw(
-                                new_latents.float(),
-                                denoised,
-                                float(sigmas[i]),
-                                lam=lam_i_calib,
-                                schedule="const",
-                                bands=frozenset({"LL"}),
-                            )
-                        else:
-                            new_latents = apply_dcw(
-                                new_latents.float(),
-                                denoised,
-                                float(sigmas[i]),
-                                lam=args.dcw_lambda,
-                                schedule=args.dcw_schedule,
-                                bands=parse_band_mask(
-                                    getattr(args, "dcw_band_mask", "LL")
-                                ),
-                            )
-
                     latents = new_latents.to(latents.dtype)
-
-                    if dcw_calibrator is not None and dcw_calibrator.is_active:
-                        # λ_scalar = α̂·gain — the prompt-adaptive equivalent of
-                        # the bench's fixed `lam=0.01, schedule="one_minus_sigma"` scalar.
-                        # λ_i is the post-envelope per-step value actually applied.
-                        lam_scalar = dcw_calibrator.gain * dcw_calibrator.alpha_eff
-                        if i < dcw_calibrator.k_warmup:
-                            pbar.set_postfix_str(
-                                f"λ_i={lam_i_calib:+.4f} (warmup {i + 1}/{dcw_calibrator.k_warmup})"
-                                if lam_i_calib is not None
-                                else f"warmup {i + 1}/{dcw_calibrator.k_warmup}"
-                            )
-                        else:
-                            pbar.set_postfix_str(
-                                f"λ_scalar={lam_scalar:+.4f} λ_i={lam_i_calib:+.4f} "
-                                f"α={dcw_calibrator.alpha_eff:+.4g}"
-                                if lam_i_calib is not None
-                                else f"λ_scalar={lam_scalar:+.4f} α={dcw_calibrator.alpha_eff:+.4g}"
-                            )
 
                     pbar.update()
         finally:

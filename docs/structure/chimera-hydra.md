@@ -180,7 +180,6 @@ Two einsum folds + a single `bmm` per Linear. T-LoRA's mask is folded into `P_co
 | **OrthoLoRA**           | `use_ortho = true` is the chimera default. Both pools share the Cayley parameterization on the OrthoHydra basis. |
 | **Spectrum**            | Cached steps skip transformer blocks → the FreqRouter doesn't fire on those steps. Same caveat as FeRA.        |
 | **Modulation guidance** | Orthogonal. Touches AdaLN only.                                                                                |
-| **DCW (scalar / v4)**   | Orthogonal. Sampler-level correction.                                                                          |
 | **Static merge to DiT** | ❌ MoE — sample-dependent gates can't be folded into a Linear weight.                                          |
 | **FeRA in same ckpt**   | ❌ One MoE scheme per checkpoint.                                                                              |
 

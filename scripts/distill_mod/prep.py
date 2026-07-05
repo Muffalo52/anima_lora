@@ -58,10 +58,10 @@ from library.preprocess.uncond import (  # noqa: E402
 )
 from scripts.distill_mod.synth import generate_synthetic_latents  # noqa: E402
 
-# Phase 2 synthesis allowlist: DCW's top-5 buckets + the next 3 most-frequent
-# in post_image_dataset/lora/, adding the near-square/landscape aspects DCW-5
-# lacks. NOT folded into DCW_ASPECT_BUCKETS — that tuple's order is the
-# canonical aspect_id index for shipped fusion-head checkpoints.
+# Phase 2 synthesis allowlist: the measured top-5 buckets (DCW_ASPECT_NAMES) +
+# the next 3 most-frequent in post_image_dataset/lora/, adding the
+# near-square/landscape aspects the top-5 set lacks. Kept separate from
+# DCW_ASPECT_BUCKETS so that frozen tuple's order stays stable for its consumers.
 _DEFAULT_SYNTH_BUCKETS: tuple[str, ...] = DCW_ASPECT_NAMES + (
     "1120x960",  # near-square portrait
     "1024x1008",  # ~square
@@ -139,9 +139,8 @@ def main() -> None:
         default=3.0,
         help=(
             "Flow-matching sigma shift. Default 3.0 = Anima production env "
-            "(configs/base.toml `discrete_flow_shift=3.0`; every DCW/FeRA bench "
-            "and `scripts/dcw/measure_bias_args.py`). `inference.py`'s 5.0 default "
-            "is upstream cruft that production callers override."
+            "(configs/base.toml `discrete_flow_shift=3.0`). `inference.py`'s 5.0 "
+            "default is upstream cruft that production callers override."
         ),
     )
     parser.add_argument(
@@ -172,7 +171,7 @@ def main() -> None:
             "Default = DCW_ASPECT_NAMES (top-5 by frequency in "
             "post_image_dataset/lora/) plus 1120x960, 1024x1008, 960x1120 — the "
             "next three most-frequent buckets, each a distinct aspect not "
-            "covered by the DCW-5 set. Pass empty string to disable the filter "
+            "covered by the top-5 set. Pass empty string to disable the filter "
             "and synthesize every cached resolution."
         ),
     )
@@ -192,7 +191,7 @@ def main() -> None:
         default=0,
         help=(
             "Deterministic shuffle seed for per-bucket selection when "
-            "--n_per_bucket is set. Same convention as `make dcw`."
+            "--n_per_bucket is set."
         ),
     )
     parser.add_argument(

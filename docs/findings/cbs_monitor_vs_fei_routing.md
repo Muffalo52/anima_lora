@@ -113,7 +113,7 @@ curvature; there is no reason they would align, and they don't.
   curve and the slope-max number, but not the headline: discrimination resolves
   at the clean end is structural, not a div artifact. `m(t)` is computed on the
   raw latent and is div-independent.
-- **CFG=4 only.** CFG injects spatial gradients (cf. DCW's CFG-dependence), so
+- **CFG=4 only.** CFG injects spatial gradients, so
   the front-loading magnitude could differ at CFG=1. A CFG=1 run would settle
   whether the early-curvature spike is intrinsic or guidance-amplified; it will
   not move the noise-end-vs-clean-end conclusion.

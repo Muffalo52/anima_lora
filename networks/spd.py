@@ -28,10 +28,9 @@ follow-on fine-tune):
     incompatible with re-spacing. The probe used plain Euler for exactly this
     reason. If a stochastic sampler is requested we fall back to Euler with a
     one-time warning.
-  * **No DCW / SMC-CFG composition.** Those operate at the sampler boundary on
-    the (re-spaced) σ and are unvalidated against the mid-loop reshape; passing
-    them with ``--spd`` warns and ignores. (DCW for the SPD trajectory is its
-    own calibration run — see the proposal "Out of scope".)
+  * **No SMC-CFG composition.** It operates at the sampler boundary on the
+    (re-spaced) σ and is unvalidated against the mid-loop reshape; passing it
+    with ``--spd`` warns and ignores.
   * **Composes with LoRA / Hydra / soft-tokens / P-GRAFT** — the per-step
     adapter setters are mirrored from the standard loop, and the per-Linear
     LoRA delta is token-count-agnostic so it runs at any stage resolution.
@@ -427,7 +426,7 @@ def spd_denoise(
 
     ``ctx`` carries the shared conditioning side-channels (see
     ``library.inference.sampler_context``). SPD v0 honors soft-tokens / P-GRAFT /
-    pooled-text but ignores DCW / SMC-CFG (they act on the re-spaced σ boundary,
+    pooled-text but ignores SMC-CFG (it acts on the re-spaced σ boundary,
     unvalidated against the mid-loop reshape).
     """
     pgraft_network = ctx.pgraft_network
@@ -444,10 +443,10 @@ def spd_denoise(
             "(spectral expansion re-spaces σ mid-loop, which precomputed "
             "ER-SDE/LCM coefficients cannot follow)."
         )
-    if ctx.dcw or ctx.dcw_calibrator is not None or ctx.smc_cfg is not None:
+    if ctx.smc_cfg is not None:
         log.warning(
-            "--spd v0 does not compose with DCW / SMC-CFG (they act on the "
-            "re-spaced σ boundary and are unvalidated against the mid-loop "
+            "--spd v0 does not compose with SMC-CFG (it acts on the "
+            "re-spaced σ boundary and is unvalidated against the mid-loop "
             "reshape); ignoring. See docs/proposal/spd_finetune_lora.md."
         )
 

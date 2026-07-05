@@ -12,7 +12,7 @@ ReFT (LoReFT, Wu et al. NeurIPS 2024) was imported and wired into the LoRA famil
 
 The theory (from the design discussion that spawned this bench): ReFT is the **only adapter that edits the post-residual fused representation** `h = x + attn_out + ffn_out`, with an **affine** form `h + R^T(W_s·h + b)` confined to a learned-orthonormal `reft_dim`-subspace, applied **uniformly to every patch token** (no spatial structure). That structural profile predicts:
 
-- **Strong** at *global* tone/style/palette steering — the same lever class as mod-guidance ("global-tone lever, not a content lever" — memory `mod_guidance_sigma_film`), DCW, channel-scaling, PiD color drift.
+- **Strong** at *global* tone/style/palette steering — the same lever class as mod-guidance ("global-tone lever, not a content lever" — memory `mod_guidance_sigma_film`), channel-scaling, PiD color drift.
 - **Weak** at *spatial / compositional / fine-identity* edits — its per-token map can't express "red here, blue there."
 - **Possibly param-efficient** on the global-style axis because it intervenes once per block on the fused stream instead of re-skilling weights.
 
@@ -115,7 +115,7 @@ Drives training via the existing trainer (matched configs built on the fly, `--m
 
 ## Scope & named follow-ups (out of phase 1)
 
-- **Distillation polish (phase 3).** The one place ReFT might add to the turbo/DP-DMD student: a `last_8` ReFT **active only at the low-σ step** (Anima's x0 is visually resolved by σ≈0.45 — memory `sigma_signal_resolves_by_045`), polishing systematic few-step tone drift *on top of* the LoRA student. Test `student = LoRA + low-σ-only ReFT` vs `LoRA + matched-rank LoRA` by CMMD. **Caveat:** ReFT isn't foldable, so a win here costs turbo's "output is a plain LoRA" deployability — weigh against the free training-free correctors (DCW/CNS/channel-scaling) that already own this lever.
+- **Distillation polish (phase 3).** The one place ReFT might add to the turbo/DP-DMD student: a `last_8` ReFT **active only at the low-σ step** (Anima's x0 is visually resolved by σ≈0.45 — memory `sigma_signal_resolves_by_045`), polishing systematic few-step tone drift *on top of* the LoRA student. Test `student = LoRA + low-σ-only ReFT` vs `LoRA + matched-rank LoRA` by CMMD. **Caveat:** ReFT isn't foldable, so a win here costs turbo's "output is a plain LoRA" deployability — weigh against the free training-free correctors (CNS/channel-scaling) that already own this lever.
 - **EasyControl:** *not* a candidate to replace cond-LoRA — spatial conditioning is structurally outside ReFT's uniform-per-token map. Excluded by design, not by experiment.
 - **CFG / aspect:** held fixed in phase 1; revisit only if a niche is found (per the DCW lesson, optima move with CFG/aspect).
 

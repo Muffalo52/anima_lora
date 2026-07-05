@@ -88,8 +88,8 @@ class FSGCalibrator(_FSGCalibratorCore):
         unchanged (same object, bit-exact) when this step is not scheduled.
 
         Costs ``3·K`` extra DiT forwards per scheduled step (v^c + v^u at σ,
-        v^u at σ−Δσ). Deterministic — composes with mod-guidance / DAVE / DCW /
-        CNS for free (they patch the model or the post-step x-space, both of
+        v^u at σ−Δσ). Deterministic — composes with mod-guidance / DAVE / CNS
+        for free (they patch the model or the post-step x-space, both of
         which FSG's forwards inherit / precede).
         """
         if not self.scheduled(sigma_i):

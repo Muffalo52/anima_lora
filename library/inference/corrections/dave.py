@@ -17,7 +17,7 @@ knob; the edit is additionally σ-gated to ``[--dave_sigma_lo, --dave_sigma_hi]`
 Design (per ``bench/dave/README.md``): a **post-`forward` hook** on each block
 (forward_hook-not-override invariant) + a per-step model buffer (``_dave_cur_sigma``,
 restamped each forward from the timestep), the Spectrum/mod-guidance pattern — *not*
-a sampler-boundary correction like DCW/CNS. Branchless (``α=1 → atten=0 → exact
+a sampler-boundary correction like CNS. Branchless (``α=1 → atten=0 → exact
 no-op``), so it survives ``compile_blocks()`` (the hook fires eager around each
 block's compiled ``_forward``; the DC mean over dims (1,2,3) is correct for both the
 eager 5D ``(B,T,H,W,D)`` and the native-flattened fake-5D ``(B,1,seq,1,D)`` layout).

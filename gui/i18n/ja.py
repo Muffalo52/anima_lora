@@ -578,7 +578,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + テキストエンコーダー + VAE",
     "model_sam3": "SAM3 — テキストバブルマスキング",
     "model_mit": "MIT — 漫画テキストマスキング",
-    "model_pe": "PE-Core-L14-336 — ビジョンエンコーダー (CMMD 検証 / DCW)",
+    "model_pe": "PE-Core-L14-336 — ビジョンエンコーダー (CMMD 検証)",
     "model_danbooru_tags": "Danbooru タグ DB — キャプション順序補正",
     # HuggingFace 認証 (モデルダイアログ)
     "models_hf_token_placeholder": "HuggingFace トークンを貼り付けてください (hf_…)",

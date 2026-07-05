@@ -1,7 +1,7 @@
 """H2 guard: ``getattr(args, …)`` read keys must be declared argparse flags.
 
 ``docs/findings/entanglement_audit_high_severity.md`` §H2 — the inference
-long-tail (DCW / SMC-CFG / spectrum / soft-tokens) and the training loop read
+long-tail (SMC-CFG / spectrum / soft-tokens) and the training loop read
 config off ``args`` by name via ``getattr(args, "k", default)``. Rename or drop
 the flag and the read silently falls back to its default — feature off, all
 static tests still green.

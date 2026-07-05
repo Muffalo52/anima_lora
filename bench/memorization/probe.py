@@ -159,7 +159,7 @@ def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
     ``pe_encoder`` selects which cached PE sidecar to use as the reference
     feature: ``pe_spatial`` (``{stem}_anima_pe_spatial.safetensors`` — what
     `make preprocess` writes for REPA, present on every artist set) or ``pe``
-    (the pooled PE-Core global, only cached where CMMD/DCW ran)."""
+    (the pooled PE-Core global, only cached where CMMD ran)."""
     from library.config import loader as config_util  # noqa: PLC0415
     from library.config.io import load_dataset_config_from_base  # noqa: PLC0415
 
@@ -508,7 +508,7 @@ def main():
         default="pe_spatial",
         help="Reference feature: 'pe_spatial' (cached by `make preprocess` on "
         "every artist set; composition-sensitive — better for instance copies) "
-        "or 'pe' (pooled PE-Core global; only where CMMD/DCW cached it).",
+        "or 'pe' (pooled PE-Core global; only where CMMD cached it).",
     )
     ap.add_argument("--sample_steps", type=int, default=20)
     ap.add_argument("--cfg", type=float, default=1.0)

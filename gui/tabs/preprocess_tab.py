@@ -1695,7 +1695,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         )
 
     def _run_pe(self, *, queue: bool = False) -> None:
-        # Cache vision-encoder (PE) features; the encoder follows the variant's `repa_encoder` (pe_spatial default; `pe` = PE-Core for CMMD / DCW v4) so the button matches whatever a use_repa run reads.
+        # Cache vision-encoder (PE) features; the encoder follows the variant's `repa_encoder` (pe_spatial default; `pe` = PE-Core for CMMD) so the button matches whatever a use_repa run reads.
         if not self._save_all():
             return
         variant = self._variant or "lora"

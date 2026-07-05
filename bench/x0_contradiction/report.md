@@ -125,7 +125,7 @@ stays a **hint, not a result**.
 
 - **Capture seam.** Monkeypatch `library.inference.sampling.step` (the euler ODE
   step), recomputing the *guided* `x̂₀ = x_t − σ_i·v` exactly as
-  `generation.py:799`. Forces euler (no er_sde/DCW/spectrum) so the seam fires.
+  `generation.py:799`. Forces euler (no er_sde/spectrum) so the seam fires.
   Reuses the real `generate()` path (correct text padding / CFG / schedule) via
   `build_inference_bundle` — base bundle (no adapter) and base+LoRA bundle, each
   loaded once and reused across prompts/seeds. Latent is 5D `(B,C,1,H,W)`, B=1.

@@ -25,7 +25,7 @@ from typing import NamedTuple, Tuple
 # The bands are the natural (min, max) token count each tier historically carried:
 # single-family tiers (768/1280/1536) have lo == hi; 512/896/1024 carry two
 # families. ``freefit_band_for_edge`` widens the non-frozen tiers slightly so the
-# solver has aspect freedom; 1024 stays frozen at (4032, 4200) for DCW.
+# solver has aspect freedom; 1024 stays frozen at (4032, 4200) for the top-5 set.
 EDGE_TOKEN_BANDS: dict = {
     512: (1008, 1024),
     768: (2160, 2160),
@@ -166,9 +166,10 @@ DEFAULT_FREEFIT_MAX_RATIO = 4.0
 # caches.
 FREEFIT_BAND_TOLERANCE = 0.025  # ±2.5% → ~5% interval around the tier's nominal
 
-# The 1024 tier stays frozen at its natural (4032, 4200): DCW calibration keys off
-# the exact 1024-tier aspect set (``DCW_ASPECT_BUCKETS``), and its 2-family band is
-# already the reference width. Bump this set only with the DCW story in mind.
+# The 1024 tier stays frozen at its natural (4032, 4200): the frozen top-5 aspect
+# set (``DCW_ASPECT_BUCKETS``, consumed by CNS calibration + mod-distill) is drawn
+# from this tier, and its 2-family band is already the reference width. Bump this
+# set only with those consumers in mind.
 FREEFIT_FROZEN_EDGES: Tuple[int, ...] = (1024,)
 
 # Bumped whenever the band derivation changes, so free-fit resized PNGs cached
@@ -189,7 +190,7 @@ def freefit_band_for_edge(
     Starts from the tier's natural ``(min, max)`` token band (``EDGE_TOKEN_BANDS``),
     then widens it symmetrically by ``tol`` for every tier **except** the frozen
     ones (``FREEFIT_FROZEN_EDGES`` — currently 1024, kept at ``(4032, 4200)`` for
-    DCW). Without the widening the single-family tiers (768 → 2160, 1280 → 6300,
+    the frozen top-5 aspect set). Without the widening the single-family tiers (768 → 2160, 1280 → 6300,
     1536 → 8640) and the near-degenerate 512 leave the solver no aspect freedom and
     free-fit crops like the old snap.
     """
@@ -249,21 +250,17 @@ def freefit_bucket(
     return wp * patch, hp * patch
 
 
-# DCW v4 calibration aspect-bucket set — a frozen standalone literal.
+# Dataset's measured top-5 (H, W) resolutions by frequency — a frozen literal.
 #
 # These were the top-5 (H, W) resolutions by frequency in post_image_dataset/lora/
 # back when training snapped to the discrete 1024-tier bucket pool (recounted
 # 2026-05-23). That pool is gone (free-fit is the only resize mode now), but this
-# set stays frozen exactly as-is: list order *is* the canonical aspect_id index —
-# DCW v4's per-aspect statistics (fusion_head.safetensors per-bucket μ_g, σ²_prior,
-# λ_scalar) key off this order, so a reorder invalidates every shipped fusion-head
-# checkpoint.
-#
-# Read by both the calibration data-gen path (scripts/tasks/dcw.py drives
-# `make dcw` over these buckets) and the fusion-head trainer
-# (scripts/dcw/fusion_data.py uses the dict for the (H, W) → aspect_id lookup that
-# decides which run rows feed the trainer). Inference itself is bucket-agnostic
-# post-cleanup — see project_dcw_bucket_prior_cosmetic.
+# set stays frozen as-is for the consumers that still key off it: CNS calibration
+# (scripts/calibration/cns_calibrate.py samples the top-N of this set) and
+# mod-guidance distillation (scripts/distill_mod/prep.py uses DCW_ASPECT_NAMES as
+# its default synth-bucket set). The DCW name is retained only because these
+# consumers import the symbol; the retired DCW line that originated it lives under
+# _archive/dcw/.
 DCW_ASPECT_BUCKETS: Tuple[Tuple[int, int], ...] = (
     (1200, 896),  # 0 — 896x1200 portrait (most common, 4200-tok)
     (1344, 800),  # 1 — 800x1344 tall portrait (4200-tok)

@@ -617,7 +617,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + 텍스트 인코더 + VAE",
     "model_sam3": "SAM3 — 말풍선 마스킹",
     "model_mit": "MIT — 만화 텍스트 마스킹",
-    "model_pe": "PE-Core-L14-336 — 비전 인코더 (CMMD 검증 / DCW)",
+    "model_pe": "PE-Core-L14-336 — 비전 인코더 (CMMD 검증)",
     "model_danbooru_tags": "Danbooru 태그 DB — 캡션 순서 교정",
     # HuggingFace 인증 (모델 다이얼로그)
     "models_hf_token_placeholder": "HuggingFace 토큰을 붙여넣으세요 (hf_…)",

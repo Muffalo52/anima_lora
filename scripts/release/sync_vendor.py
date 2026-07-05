@@ -35,7 +35,7 @@ Five targets:
   (the live ``proc.py`` imports psutil for spawn/kill, which the node never
   needs — it errors if the daemon isn't already up rather than auto-starting).
 * ``ComfyUI-Spectrum-KSampler/_vendor/`` — the pure-compute ``*_core`` kernels
-  (FSG / SMC / CNS / DCW / SPD numerics) shared verbatim between the library's
+  (FSG / SMC / CNS / SPD numerics) shared verbatim between the library's
   sampler-boundary plugins and the node's ComfyUI seam wrappers. Like the
   hydralora target this is a standalone published repo (default a sibling of
   anima_lora's parent; override ``ANIMA_SPECTRUM_NODE_REPO``); sync_vendor writes
@@ -75,7 +75,7 @@ HYDRALORA_VENDOR = ADAPTER_NODE_REPO / "_vendor"
 
 # The Spectrum KSampler is also a standalone published repo (default a sibling of
 # anima_lora's parent; override with ``ANIMA_SPECTRUM_NODE_REPO``). sync_vendor
-# writes the pure-compute *_core kernels (FSG / SMC / CNS / DCW / SPD numerics)
+# writes the pure-compute *_core kernels (FSG / SMC / CNS / SPD numerics)
 # into its ``_vendor/`` tree. The node imports the live ``library.*`` / ``networks.*``
 # first and falls back to this tree when installed outside the repo.
 SPECTRUM_NODE_REPO = Path(
@@ -479,15 +479,8 @@ SPECTRUM_VERBATIM: list[tuple[str, str]] = [
         "library/inference/corrections/cns_core.py",
         "library/inference/corrections/cns_core.py",
     ),
-    # DCW: networks/dcw.py (Haar + apply_dcw + FusionHead w/ fei_k) and the
-    # OnlineDCWCalibrator are already pure compute with full v6 support — the
-    # canonical source. The node vendors all three (the calibrator imports fei +
-    # networks.dcw transitively) and keeps only its hook/download/Anima-DiT seam.
-    ("networks/dcw.py", "networks/dcw.py"),
-    (
-        "library/inference/corrections/dcw_calibrator.py",
-        "library/inference/corrections/dcw_calibrator.py",
-    ),
+    # FEI features (frequency-energy indicator) — shared by the Hydra/FeRA
+    # FEI-routing path the node vendors.
     ("library/runtime/fei.py", "library/runtime/fei.py"),
 ]
 

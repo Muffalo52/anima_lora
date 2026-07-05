@@ -32,7 +32,7 @@ We store the *uncontrolled* e_prev so the sliding surface tracks the real
 discrepancy, not the controller's own feedback.
 
 No extra DiT forwards. One velocity-shaped buffer of state.
-Composes with DCW (post-step x-space correction) and mod-guidance (AdaLN-side).
+Composes with mod-guidance (AdaLN-side).
 
 This module is **pure compute** (torch only — no anima/comfy deps) and is the
 single source of truth shared verbatim with the ComfyUI Spectrum node (vendored

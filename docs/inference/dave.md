@@ -110,7 +110,7 @@ DAVE is a **block-forward hook**, not a sampler-boundary plug-in, so it's struct
 | `compile_blocks()` | Works — branchless no-op at α=1; hook fires eager around the compiled `_forward`; DC mean correct for both 5D and native-flatten layouts. |
 | `--spectrum` / `--spd` | **Not wired** — v0 is the standard loop only. Spectrum caches/forecasts block outputs, which the hook would re-edit on cached steps; needs explicit handling before composing. |
 | Mod-guidance (`--pooled_text_proj`) | **Mechanism-probed 2026-06-11, orthogonal** (interaction ≈ 0 on the lock stats — `bench/dave/README.md` Phase 4). MOD re-aims the seed-shared DC (common-mode, lock-invariant); DAVE de-correlates seeds across basins. Compose when a MOD layout failure survives seed re-rolls (it will — MOD failures are seed-independent by construction). |
-| DCW / CNS / SMC-CFG | Different seam (sampler boundary vs block forward), so no structural conflict, but **not A/B-tested together**. |
+| CNS / SMC-CFG | Different seam (sampler boundary vs block forward), so no structural conflict, but **not A/B-tested together**. |
 
 The hooks are removed after each generation (the model is shared across seeds — a stacked hook set would compound the attenuation); `generate()` arms them from `--dave` and tears them down in a `finally`.
 

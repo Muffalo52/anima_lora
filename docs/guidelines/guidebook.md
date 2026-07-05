@@ -233,7 +233,7 @@ make preprocess              # Run all three steps (for LoRA / standard training
 make preprocess-resize       # 1) image_dataset/ → post_image_dataset/resized/
 make preprocess-vae          # 2) VAE latent caching → post_image_dataset/lora/
 make preprocess-te           # 3) Text encoder output caching → post_image_dataset/lora/
-make preprocess-pe           # (Optional) PE-Core vision encoder feature caching — CMMD validation / DCW v4 only
+make preprocess-pe           # (Optional) PE-Core vision encoder feature caching — CMMD validation only
 ```
 
 > **⚠️ Caches are reused — they are never automatically deleted.**
@@ -265,7 +265,7 @@ make preprocess-pe           # (Optional) PE-Core vision encoder feature caching
 
 ### 6.4 PE Vision Feature Caching (Optional)
 
-- Only needed for CMMD validation and the DCW v4 fusion head
+- Only needed for CMMD validation
 - Pre-computes PE-Core-L14-336 vision encoder outputs so the vision encoder doesn't need to be loaded during training
 - Cache location: `post_image_dataset/lora/{stem}_anima_pe.safetensors`
 
@@ -476,8 +476,6 @@ make test MOD=1                  # Modulation guidance (pooled_text_proj) — co
 make test NOLORA=1               # Base DiT only (omits --lora_weight); combine with MOD=1 for mod-only path
 make test-hydra                  # HydraLoRA (router-live, anima_hydra*_moe.safetensors)
 make test-merge                  # Inference with baked standalone DiT (*_merged.safetensors)
-make test-dcw                    # LoRA + DCW scalar correction (sampler-level SNR-t bias correction)
-make test-dcw-v4                 # LoRA + DCW v4 learnable calibrator
 # Experimental inference
 ```
 
@@ -558,12 +556,11 @@ make update -- --dry-run # Preview which files would change
 
 - [`docs/guidelines/base-config.md`](base-config.md) — `base.toml` key-by-key reference (model paths, noise schedule, caching, compile, memory knobs, the dataset blueprint)
 - [`docs/guidelines/training.md`](training.md) — Adapter variants, caption shuffling, masked loss, dataset config details
-- [`docs/guidelines/inference.md`](inference.md) — Inference workflows, flags, DCW, Spectrum, prompt file format
+- [`docs/guidelines/inference.md`](inference.md) — Inference workflows, flags, Spectrum, prompt file format
 - [`docs/guidelines/difference_between_comfy.md`](difference_between_comfy.md) — Implementation differences between anima_lora and ComfyUI core
 - [`docs/methods/timestep_mask.md`](../methods/timestep_mask.md) — T-LoRA timestep mask
 - [`docs/methods/psoft-integrated-ortholora.md`](../methods/psoft-integrated-ortholora.md) — OrthoLoRA details (the orthogonal rotation part of the recommended `tlora` variant)
 - [`docs/inference/spectrum.md`](../inference/spectrum.md) — Spectrum acceleration: how it works and options
-- [`docs/inference/dcw.md`](../inference/dcw.md) — DCW (scalar + v4 learnable calibrator)
 - [`docs/inference/mod-guidance.md`](../inference/mod-guidance.md) — Modulation guidance
 - [`docs/methods/hydra-lora.md`](../methods/hydra-lora.md) — HydraLoRA multi-head routing
 

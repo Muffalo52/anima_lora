@@ -31,7 +31,7 @@ is to show the raw primitives. Either way each script keeps a `sys.path` shim so
 |---|---|---|
 | [`01_generate.py`](01_generate.py) | Text-to-image: `get_generation_settings` → `generate` → `save_output`, optionally with one or more LoRA adapters attached at DiT load | DiT + VAE + text encoder (+ adapter `.safetensors` for LoRA) |
 | [`02_config_and_train.py`](02_config_and_train.py) | `load_method_preset` merge chain + `create_network` (three-axis routing) + in-process training via `AnimaTrainer().train(args)` | config part: nothing; `--build-network`: DiT; `--train`: preprocessed cache |
-| [`03_generate_with_correction.py`](03_generate_with_correction.py) | Training-free sampler correction (DCW / Spectrum) via the `GenerationRequest.extra_argv` escape hatch for long-tail method flags | DiT + VAE + text encoder |
+| [`03_generate_with_correction.py`](03_generate_with_correction.py) | Training-free sampler correction (SMC-CFG / Spectrum) via the `GenerationRequest.extra_argv` escape hatch for long-tail method flags | DiT + VAE + text encoder |
 | [`09_easycontrol_train_and_infer.py`](09_easycontrol_train_and_infer.py) | **Image-conditioned** end-to-end: `--method easycontrol` training (same merge-chain + `AnimaTrainer().train()` as `02`) and image-conditioned inference via the typed `easycontrol_weight` / `easycontrol_image` request fields | config: nothing; `--train`: paired cache in `easycontrol-dataset/`; `--infer`: adapter + ref image |
 
 **Building blocks** — the raw primitives for writing your own `scripts/` tool:
@@ -74,7 +74,7 @@ python examples/01_generate.py --prompt "a red fox in a snowy forest"
 python examples/01_generate.py --lora_weight output/ckpt/my_lora.safetensors --prompt "…"
 python examples/02_config_and_train.py --method lora --preset default
 python examples/02_config_and_train.py --train --max_train_epochs 8
-python examples/03_generate_with_correction.py --correction dcw   # extra_argv method knobs
+python examples/03_generate_with_correction.py --correction spectrum   # extra_argv method knobs
 python examples/09_easycontrol_train_and_infer.py                 # print easycontrol config
 python examples/09_easycontrol_train_and_infer.py --train --max_train_epochs 6
 python examples/09_easycontrol_train_and_infer.py --infer --ref path/to/ref.png
@@ -96,7 +96,7 @@ python examples/07_stack_ortho_init_tlora.py --steps 3      # stack OrthoInit + 
   `anima_lora.GenerationRequest` and call `.to_args()` — which feeds the request
   through `inference.parse_args` under the hood, so every optional knob the
   generation code reads via `getattr()` still gets a value. The long tail of
-  method knobs (spectrum/dcw/ip-adapter) rides through the request's `extra_argv`,
+  method knobs (spectrum/smc-cfg/ip-adapter) rides through the request's `extra_argv`,
   or you can build the `argparse.Namespace` straight from `inference.parse_args(argv)`.
 - **Adapter family is in the checkpoint, not the call.** `01 --lora_weight` passes
   any LoRA / OrthoLoRA / T-LoRA / Hydra / FeRA `.safetensors`; the DiT loader reads

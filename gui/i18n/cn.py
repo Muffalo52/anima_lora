@@ -556,7 +556,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + 文本编码器 + VAE",
     "model_sam3": "SAM3 — 对话气泡蒙版",
     "model_mit": "MIT — 漫画文字蒙版",
-    "model_pe": "PE-Core-L14-336 — 视觉编码器 (CMMD 验证 / DCW)",
+    "model_pe": "PE-Core-L14-336 — 视觉编码器 (CMMD 验证)",
     "model_danbooru_tags": "Danbooru 标签 DB — 标注顺序校正",
     # HuggingFace 认证（模型对话框）
     "models_hf_token_placeholder": "粘贴你的 HuggingFace 令牌 (hf_…)",

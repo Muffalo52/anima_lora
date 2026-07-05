@@ -190,7 +190,7 @@ def spectrum_denoise(
             growing window. ``"sea"`` = accumulate the SEA-filtered relative-L1
             distance of the input latent across steps and refresh when it crosses
             ``delta`` (SeaCache Eq. 4/8; only the *decision* changes — the
-            forecast+head reuse path is untouched, so SMC-CFG / mod-guidance / DCW
+            forecast+head reuse path is untouched, so SMC-CFG / mod-guidance
             composition is unaffected). ``window_size``/``flex_window`` are unused
             in SEA mode.
         delta: SEA threshold. ``None`` or ``<=0`` = auto-calibrate to
@@ -205,7 +205,7 @@ def spectrum_denoise(
             the target explicitly (for sweeps). Do not hard-code: the window
             fraction varies with step count (~0.45 at 28 steps, ~0.62 at 24).
         sea_beta: Natural-image power-law exponent for the SEA filter (default 2).
-        ctx: Shared conditioning side-channels (DCW / SMC-CFG / soft-tokens /
+        ctx: Shared conditioning side-channels (SMC-CFG / soft-tokens /
             P-GRAFT / pooled-text / FSG) — see ``library.inference.sampler_context``.
             ``ctx.fsg``, when set, forces its scheduled σ-band steps to actual
             forwards (excluded from the window/SEA decision domain) and calibrates
@@ -220,28 +220,21 @@ def spectrum_denoise(
             (output-side periphery pooling of every emitted v — forecast steps
             included; post-unpatchify, so forecaster state is untouched), and
             ``final_readout(latents)`` (bicubic merged-representation readout).
-            Unvalidated against DCW / SMC-CFG — both are warned about and
-            ignored while foveation is active (mirrors SPD's posture).
+            Unvalidated against SMC-CFG — it is warned about and ignored
+            while foveation is active (mirrors SPD's posture).
     """
     # Unpack the shared side-channels into the locals the loop body uses.
     pgraft_network = ctx.pgraft_network
     lora_cutoff_step = ctx.lora_cutoff_step
     pooled_text_pos = ctx.pooled_text_pos
     pooled_text_neg = ctx.pooled_text_neg
-    dcw = ctx.dcw
-    dcw_lambda = ctx.dcw_lambda
-    dcw_schedule = ctx.dcw_schedule
-    dcw_band_mask = ctx.dcw_band_mask
-    dcw_calibrator = ctx.dcw_calibrator
     smc_cfg = ctx.smc_cfg
-    if foveation is not None and (
-        dcw or dcw_calibrator is not None or smc_cfg is not None
-    ):
+    if foveation is not None and smc_cfg is not None:
         logger.warning(
-            "Spectrum foveation does not compose with DCW / SMC-CFG yet "
-            "(unvalidated against pooled periphery velocities) — ignoring them."
+            "Spectrum foveation does not compose with SMC-CFG yet "
+            "(unvalidated against pooled periphery velocities) — ignoring it."
         )
-        dcw, dcw_calibrator, smc_cfg = False, None, None
+        smc_cfg = None
     soft_tokens_net = ctx.soft_tokens_net
     soft_tokens_embed_seqlens = ctx.soft_tokens_embed_seqlens
     soft_tokens_neg_seqlens = ctx.soft_tokens_neg_seqlens
@@ -426,12 +419,6 @@ def spectrum_denoise(
 
                 t_exp = t.expand(latents.shape[0])
                 set_hydra_sigma(anima, t_exp)
-                if dcw_calibrator is not None:
-                    # Capture FEI on the pre-forward latent at warmup steps
-                    # for v6 fei_obs={replace,concat} artifacts. Spectrum forces
-                    # actual forwards while i < warmup_steps, so this lines up
-                    # with the v4 g_obs capture at line 409 below.
-                    dcw_calibrator.record_latent_pre_forward(i, latents)
 
                 if actual:
                     # Foveation eval-view: below σ_c the DiT evaluates on the
@@ -543,41 +530,6 @@ def spectrum_denoise(
                     new_latents = sampler.step(latents, denoised, i)
                 else:
                     new_latents = inference_utils.step(latents, noise_pred, sigmas, i)
-
-                # DCW v4: observe post-CFG noise_pred + maybe fire the head.
-                # Warmup observations all land within Spectrum's warmup window
-                # (Spectrum forces actual forwards while i < warmup_steps), so
-                # v4 sees real-DiT velocities even when caching kicks in later.
-                if dcw_calibrator is not None:
-                    dcw_calibrator.record(i, noise_pred)
-                    dcw_calibrator.fire_head_if_due(i)
-
-                # DCW: bias-correct against denoised x0_pred (carries Spectrum's
-                # cached-step prediction error, but correction is bias-agnostic).
-                if float(sigmas[i + 1]) > 0.0 and (dcw_calibrator is not None or dcw):
-                    from networks.dcw import apply_dcw, parse_band_mask
-
-                    if dcw_calibrator is not None:
-                        lam_i_calib = dcw_calibrator.lambda_for_step(
-                            i, float(sigmas[i])
-                        )
-                        new_latents = apply_dcw(
-                            new_latents.float(),
-                            denoised,
-                            float(sigmas[i]),
-                            lam=lam_i_calib,
-                            schedule="const",
-                            bands=frozenset({"LL"}),
-                        )
-                    else:
-                        new_latents = apply_dcw(
-                            new_latents.float(),
-                            denoised,
-                            float(sigmas[i]),
-                            lam=dcw_lambda,
-                            schedule=dcw_schedule,
-                            bands=parse_band_mask(dcw_band_mask),
-                        )
 
                 latents = new_latents.to(latents.dtype)
 

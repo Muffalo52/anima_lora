@@ -455,68 +455,11 @@ def build_parser() -> argparse.ArgumentParser:
         "static center rect.",
     )
 
-    # DCW (arXiv:2604.16044): opposite-sign on Anima -- see bench/dcw/findings.md.
-    parser.add_argument(
-        "--dcw",
-        action="store_true",
-        help="Enable post-step DCW correction (pixel mode). Composes with --spectrum, "
-        "--sampler, --tiled_diffusion. Negligible overhead.",
-    )
-    parser.add_argument(
-        "--dcw_lambda",
-        type=float,
-        default=-0.015,
-        help="DCW scaler λ. Default -0.015 (negative -- see docs/inference/dcw.md). "
-        "Paper-positive values widen |gap| on Anima. Use λ ≈ -0.010 if you "
-        "switch --dcw_band_mask to 'all'.",
-    )
-    parser.add_argument(
-        "--dcw_schedule",
-        type=str,
-        default="one_minus_sigma",
-        choices=["one_minus_sigma", "sigma_i", "const", "none"],
-        help="Per-step schedule: scaler(i) = λ · sched(σ_i). Default "
-        "one_minus_sigma -- matches Anima's late-σ bias envelope.",
-    )
-    parser.add_argument(
-        "--dcw_band_mask",
-        type=str,
-        default="LL",
-        help="Restrict DCW correction to a subset of Haar subbands. Default 'LL' "
-        "(LL-only is strictly better than broadband on Anima -- see "
-        "docs/inference/dcw.md §LL-only correction). Format: 'LL', 'HH', "
-        "'LH+HL+HH', or 'all'.",
-    )
-
-    # DCW learnable calibrator (online observation + prompt fusion).
-    # See docs/proposal/dcw-learnable-calibrator-v4.md.
-    parser.add_argument(
-        "--dcw_calibrator",
-        "--dcw_v4",  # legacy alias -- drop after one release
-        type=str,
-        default=None,
-        dest="dcw_calibrator",
-        help="Path to a fusion_head.safetensors artifact (or a directory "
-        "containing one). When set, overrides --dcw_lambda with a per-step λ "
-        "from the calibrator. LL-only by default.",
-    )
-    parser.add_argument(
-        "--dcw_calibrator_gain",
-        "--dcw_v4_alpha_gain",  # legacy alias -- drop after one release
-        type=float,
-        default=1.0,
-        dest="dcw_calibrator_gain",
-        help="Multiplier on top of the head's α̂. α̂ is in λ-units "
-        "(median |α̂| ≈ lambda_anchor from training, default 0.015) so 1.0 is "
-        "identity -- use 2.0 to double the per-prompt magnitude, or a negative "
-        "value to flip sign. The per-step λ is clamped to ±0.05.",
-    )
-
     # SMC-CFG: Sliding-Mode Control CFG (α-adaptive variant; arXiv:2603.03281).
     # Drop-in CFG modification: replaces w·e with w·(e + Δe) where
     # Δe = -k_t·sign(s), s = (e - e_prev) + λ·e_prev, k_t = α·mean(|e_t|).
     # No extra DiT forwards; one prev-step velocity-residual buffer. Composes
-    # with --dcw / --spectrum / --mod_guidance (operates strictly on the
+    # with --spectrum / --mod_guidance (operates strictly on the
     # velocity-space CFG combine). See docs/inference/smc_cfg.md.
     parser.add_argument(
         "--smc_cfg",
@@ -544,7 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
     # calibration: at scheduled mid-σ steps, run K forward(cond)-backward(uncond)
     # fixed-point iterations to pull x_t onto the golden path, then denoise from
     # x̂_t. Training-free, deterministic; ~3·K extra forwards per scheduled step.
-    # Composes with --mod_guidance / --dave / --dcw / --cns / --smc_cfg (FSG's
+    # Composes with --mod_guidance / --dave / --cns / --smc_cfg (FSG's
     # calibration uses plain γ-combine; the outer step keeps the configured CFG
     # variant). Ignored under --spectrum / --spd (they replace the loop). See
     # docs/inference/fsg.md and docs/proposal/foresight_guidance.md.
