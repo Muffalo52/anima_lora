@@ -56,6 +56,18 @@ def set_hydra_sigma(model: Any, timesteps: torch.Tensor) -> None:
             set_sigma(sigma)
 
 
+def set_xattn_gain(model: Any, gain: float) -> None:
+    """Set the per-block cross-attn residual gain (frontload_text_boost arm b).
+
+    Writes each Block's non-persistent ``_xattn_gain`` buffer in place so
+    compiled block graphs pick the new value up without a recompile. 1.0
+    restores exact identity; callers gating on σ must reset it themselves
+    (and before any uncond forward when boosting the cond pass only).
+    """
+    for block in model.blocks:
+        block._xattn_gain.fill_(gain)
+
+
 def clear_hydra_sigma(model: Any) -> None:
     """Clear cached sigma from router-live HydraLoRA adapters."""
     for network in iter_hydra_networks(model):

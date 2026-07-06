@@ -38,6 +38,12 @@ class SamplerSideChannels:
     soft_tokens_net: Any = None
     soft_tokens_embed_seqlens: Optional[torch.Tensor] = None
     soft_tokens_neg_seqlens: Optional[torch.Tensor] = None
+    # Front-loaded cross-attn residual gain (--xattn_boost): λ for the cond
+    # forward at σ ≥ xattn_boost_band, None = off. Runners must reset the
+    # per-block gain to 1.0 before any uncond forward and on loop exit
+    # (library.inference.adapters.set_xattn_gain).
+    xattn_boost: Optional[float] = None
+    xattn_boost_band: float = 0.85
 
     @classmethod
     def from_args(
@@ -58,7 +64,10 @@ class SamplerSideChannels:
         """Build from parsed CLI ``args`` plus the runtime objects ``generate_body``
         already holds.
         """
+        _boost = float(getattr(args, "xattn_boost", 1.0) or 1.0)
         return cls(
+            xattn_boost=_boost if _boost != 1.0 else None,
+            xattn_boost_band=float(getattr(args, "xattn_boost_band", 0.85)),
             pgraft_network=pgraft_network,
             lora_cutoff_step=lora_cutoff_step,
             pooled_text_pos=pooled_text_pos,

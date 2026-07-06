@@ -1075,6 +1075,12 @@ class Block(nn.Module):
         self.gradient_checkpointing = False
         self.unsloth_offload_checkpointing = False
 
+        # Inference-side cross-attn residual gain (frontload_text_boost arm b).
+        # Non-persistent buffer read inside the compiled _forward so the sampler
+        # can retune it per step via fill_() without a recompile — same pattern
+        # as the _mod_guidance_* buffers. 1.0 = exact identity.
+        self.register_buffer("_xattn_gain", torch.ones(()), persistent=False)
+
     def enable_gradient_checkpointing(self, unsloth_offload: bool = False):
         self.gradient_checkpointing = True
         self.unsloth_offload_checkpointing = unsloth_offload
@@ -1186,7 +1192,9 @@ class Block(nn.Module):
             crossattn_emb,
             rope_cos_sin=rope_cos_sin,
         ).unflatten(1, (T, H, W))
-        x_B_T_H_W_D = result * gate_cross_attn_B_T_1_1_D + x_B_T_H_W_D
+        x_B_T_H_W_D = (
+            result * (gate_cross_attn_B_T_1_1_D * self._xattn_gain) + x_B_T_H_W_D
+        )
 
         normalized_x = _adaln_fn(
             x_B_T_H_W_D, self.layer_norm_mlp, scale_mlp_B_T_1_1_D, shift_mlp_B_T_1_1_D

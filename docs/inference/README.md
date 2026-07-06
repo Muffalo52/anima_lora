@@ -30,6 +30,7 @@ Edit intermediate block features inside the forward (a hook), not the sampler bo
 | Doc | What it is | Flag | Load-bearing gotcha |
 |-----|-----------|------|---------------------|
 | [dave.md](dave.md) | Same-prompt **diversity** recovery — per-block post-`forward` hook attenuates the cross-seed-shared DC (spatial mean) during the early steps, freeing the seed-specific AC. Flat 8–18 pool. | `--dave auto` / `make test DAVE=1` | Text/hand damage tracks **window width** not dose — defaults `τ0.10·s0.3`; baked `≤18` cap forecloses the patch-grid dots. Block-hook (survives `compile_blocks`), no sampler-boundary compose yet (v0). |
+| [xattn_boost.md](xattn_boost.md) | Front-loaded cross-attn boost — per-block `_xattn_gain` buffer scales the cross-attn residual by λ on the **cond forward only**, σ ≥ band (default 0.85, the plan-writing window). Fixes weak-tag relations/bindings. | `--xattn_boost 2` / `make test XATTN_BOOST=2` | Amplifies **all** caption tags (framing priors ride along); can't conjure unknown concepts. The σ-gated CFG arm of the same proposal is CLOSED (style collapse) — don't re-propose. |
 
 ## Serving
 

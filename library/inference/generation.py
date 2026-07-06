@@ -21,6 +21,7 @@ from library.inference.adapters import (
     set_hydra_crossattn,
     set_hydra_sigma,
     set_step_expert_index,
+    set_xattn_gain,
 )
 from library.inference import sampling as inference_utils
 from library.inference.cfg_delta_probe import CfgDeltaProbe
@@ -379,6 +380,12 @@ def generate_body_tiled(
     pgraft_network = getattr(anima, "_pgraft_network", None)
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
 
+    # --xattn_boost: cond-forward-only cross-attn gain at σ ≥ band (mirrors
+    # generate_body; applied per tile, reset before each uncond tile pass).
+    _boost_raw = float(getattr(args, "xattn_boost", 1.0) or 1.0)
+    xattn_boost = _boost_raw if _boost_raw != 1.0 else None
+    xattn_boost_band = float(getattr(args, "xattn_boost_band", 0.85))
+
     try:
         with tqdm(total=len(timesteps), desc="Denoising steps (tiled)") as pbar:
             for i, t in enumerate(timesteps):
@@ -412,6 +419,9 @@ def generate_body_tiled(
                         1, 1, 1, h_latent, w_latent, device=device, dtype=torch.bfloat16
                     )
 
+                _boost_step = (
+                    xattn_boost is not None and float(sigmas[i]) >= xattn_boost_band
+                )
                 for y, x in positions:
                     tile_h = min(tile_size, h_latent - y)
                     tile_w = min(tile_size, w_latent - x)
@@ -436,6 +446,8 @@ def generate_body_tiled(
                         soft_tokens_net.append_postfix(
                             embed, soft_tokens_embed_seqlens, timesteps=t_expand
                         )
+                    if _boost_step:
+                        set_xattn_gain(anima, xattn_boost)
                     with torch.no_grad():
                         tile_pred = anima(
                             tile_latent,
@@ -445,6 +457,8 @@ def generate_body_tiled(
                             h_offset=h_off,
                             w_offset=w_off,
                         )
+                    if _boost_step:
+                        set_xattn_gain(anima, 1.0)  # uncond runs at identity
                     noise_acc[:, :, :, y : y + tile_h, x : x + tile_w] += tile_pred * bw
                     weight_acc[:, :, :, y : y + tile_h, x : x + tile_w] += bw
 
@@ -494,6 +508,8 @@ def generate_body_tiled(
                 latents = new_latents.to(latents.dtype)
                 pbar.update()
     finally:
+        if xattn_boost is not None:
+            set_xattn_gain(anima, 1.0)
         clear_hydra_sigma(anima)
         clear_hydra_fei(anima)
         # P-GRAFT: restore LoRA for next generation
@@ -850,6 +866,18 @@ def generate_body(
         )
     else:
         cfg_delta_probe = CfgDeltaProbe.maybe_create()
+        # --xattn_boost: cross-attn residual gain on the cond forward for
+        # σ ≥ band (see SamplerSideChannels). Set before / reset right after
+        # the cond forward so the uncond pass (and FSG's internal forwards)
+        # always run at identity; the finally below guarantees no gain leaks
+        # into subsequent generations.
+        xattn_boost = _side_channels.xattn_boost
+        xattn_boost_band = _side_channels.xattn_boost_band
+        if xattn_boost is not None:
+            logger.info(
+                f"xattn boost active: λ={xattn_boost} at σ ≥ {xattn_boost_band}"
+                + ("" if do_cfg else " (CFG 1.0 — boosting the single forward)")
+            )
         # Capability probe (ANIMA_TEXT_KNOCKOUT_SIGMA=<cutoff>): below the cutoff
         # sigma, continue unconditionally (noise_pred = uncond) so the prompt has
         # zero effect there. Measures how much late-sigma text still steers the
@@ -918,6 +946,11 @@ def generate_body(
                         soft_tokens_net.append_postfix(
                             cond_embed, soft_tokens_embed_seqlens, timesteps=t_expand
                         )
+                    _boost_step = (
+                        xattn_boost is not None and float(sigmas[i]) >= xattn_boost_band
+                    )
+                    if _boost_step:
+                        set_xattn_gain(anima, xattn_boost)
                     with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": _pooled_text_pos}
@@ -931,6 +964,8 @@ def generate_body(
                             padding_mask=padding_mask,
                             **_pos_kw,
                         )
+                    if _boost_step:
+                        set_xattn_gain(anima, 1.0)  # uncond runs at identity
 
                     if do_cfg:
                         set_hydra_content(anima, negative_embed)
@@ -1021,6 +1056,8 @@ def generate_body(
         finally:
             if cfg_delta_probe is not None:
                 cfg_delta_probe.flush()
+            if xattn_boost is not None:
+                set_xattn_gain(anima, 1.0)
             clear_hydra_sigma(anima)
             clear_hydra_fei(anima)
             # P-GRAFT: restore LoRA for next generation

@@ -55,6 +55,9 @@ def _base_test_args(*, lora_default: bool = True) -> list[str]:
       tune via ``FSG_BAND='lo,hi'``, ``FSG_K=``, ``FSG_D_SIGMA=``, ``FSG_GAMMA=``.
       Composes with ``SPECTRUM=1`` (incl. ``SEA=1``) — calibrated steps are forced
       to actual forwards. No-op under ``SPD=1`` (it replaces the loop).
+    - ``XATTN_BOOST=<λ>`` appends ``--xattn_boost λ`` (front-loaded cross-attn
+      gain, cond forward only, σ ≥ band; band via ``XATTN_BOOST_BAND=``,
+      default 0.85). Composes with every other lever here.
     """
     args = list(INFERENCE_BASE)
     nolora_env = os.environ.get("NOLORA")
@@ -78,6 +81,10 @@ def _base_test_args(*, lora_default: bool = True) -> list[str]:
         args += _dave_flags()
     if _env_truthy("FSG"):
         args += _fsg_flags()
+    if boost := os.environ.get("XATTN_BOOST", "").strip():
+        args += ["--xattn_boost", boost]
+        if band := os.environ.get("XATTN_BOOST_BAND", "").strip():
+            args += ["--xattn_boost_band", band]
     return args
 
 

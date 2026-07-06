@@ -76,6 +76,7 @@ from library.inference.adapters import (
     set_hydra_content,
     set_hydra_crossattn,
     set_hydra_sigma,
+    set_xattn_gain,
 )
 from library.inference.sampler_context import SamplerSideChannels
 
@@ -331,6 +332,11 @@ def foveated_denoise(
     pgraft_network = ctx.pgraft_network
     lora_cutoff_step = ctx.lora_cutoff_step
     soft_tokens_net = ctx.soft_tokens_net
+    # --xattn_boost: cond-forward-only cross-attn gain at σ ≥ band. The band
+    # (default σ ≥ 0.85) sits entirely above any sane σ_c crossing, so the
+    # boost acts on full-grid steps and composes trivially with the merge.
+    xattn_boost = ctx.xattn_boost
+    xattn_boost_band = ctx.xattn_boost_band
 
     h_lat, w_lat = int(latents.shape[-2]), int(latents.shape[-1])
     cell_px = int(anima.patch_spatial) * int(merge_edge)  # latent px per merge cell
@@ -364,7 +370,16 @@ def foveated_denoise(
             if ctx.pooled_text_pos is not None
             else {}
         )
-        v_c = anima(x, t, embed, padding_mask=padding_mask, **_pos_kw, **merge_kw)
+        _boost_step = (
+            xattn_boost is not None and float(sigma_scalar) >= xattn_boost_band
+        )
+        if _boost_step:
+            set_xattn_gain(anima, xattn_boost)
+        try:
+            v_c = anima(x, t, embed, padding_mask=padding_mask, **_pos_kw, **merge_kw)
+        finally:
+            if _boost_step:
+                set_xattn_gain(anima, 1.0)  # uncond runs at identity
         if not do_cfg:
             return v_c, None
         set_hydra_content(anima, negative_embed)

@@ -455,6 +455,33 @@ def build_parser() -> argparse.ArgumentParser:
         "static center rect.",
     )
 
+    # Front-loaded cross-attn boost (frontload_text_boost arm (b), Phase-0
+    # G1+G2 PASS): scale the cross-attn residual of every block by λ on the
+    # CONDITIONAL forward only, gated to σ ≥ band — the plan-writing window
+    # where cross-attn text drive exists at all (peaks σ=1, ~0.02 floor below
+    # σ≈0.85 — docs/findings/crossattn_self_attn_dominance.md). Improves
+    # weak-tag adherence / relation bindings; amplifies ALL caption tags
+    # (framing priors ride along). Composes with --spectrum (real forwards
+    # boosted, forecast steps extrapolate from boosted features) and with
+    # --smc_cfg / --cfgpp / --mod_guidance (they touch the combine or the
+    # modulation pathway, not the cond forward). Under CFG 1.0 (turbo) the
+    # single forward is boosted. See docs/inference/xattn_boost.md.
+    parser.add_argument(
+        "--xattn_boost",
+        type=float,
+        default=1.0,
+        help="Cross-attn residual gain λ for σ ≥ --xattn_boost_band, cond "
+        "forward only. 1.0 = off (exact identity). Phase-0 winner: 2.0 "
+        "(1.5 milder; 2.0 costs ~-8%% saturation on complex prompts).",
+    )
+    parser.add_argument(
+        "--xattn_boost_band",
+        type=float,
+        default=0.85,
+        help="σ cutoff for --xattn_boost (boost at σ ≥ band). Default 0.85 = "
+        "the drive-floor σ; ~10 of 28 shifted-schedule steps.",
+    )
+
     # SMC-CFG: Sliding-Mode Control CFG (α-adaptive variant; arXiv:2603.03281).
     # Drop-in CFG modification: replaces w·e with w·(e + Δe) where
     # Δe = -k_t·sign(s), s = (e - e_prev) + λ·e_prev, k_t = α·mean(|e_t|).

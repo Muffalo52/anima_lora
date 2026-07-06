@@ -53,6 +53,7 @@ from library.inference.adapters import (
     set_hydra_content,
     set_hydra_crossattn,
     set_hydra_sigma,
+    set_xattn_gain,
 )
 from library.inference.sampler_context import SamplerSideChannels
 
@@ -107,6 +108,11 @@ def spd_denoise(
     soft_tokens_net = ctx.soft_tokens_net
     soft_tokens_embed_seqlens = ctx.soft_tokens_embed_seqlens
     soft_tokens_neg_seqlens = ctx.soft_tokens_neg_seqlens
+    # --xattn_boost: cond-forward-only cross-attn gain at σ ≥ band. The gate
+    # reads the (possibly re-spaced) per-step σ, so the boost window tracks
+    # SPD's mid-loop σ reshaping.
+    xattn_boost = ctx.xattn_boost
+    xattn_boost_band = ctx.xattn_boost_band
 
     if sampler is not None:
         log.warning(
@@ -159,7 +165,16 @@ def spd_denoise(
             if pooled_text_pos is not None
             else {}
         )
-        v_c = anima(x, t, embed, padding_mask=pad_mask, **_pos_kw)
+        _boost_step = (
+            xattn_boost is not None and float(sigma_scalar) >= xattn_boost_band
+        )
+        if _boost_step:
+            set_xattn_gain(anima, xattn_boost)
+        try:
+            v_c = anima(x, t, embed, padding_mask=pad_mask, **_pos_kw)
+        finally:
+            if _boost_step:
+                set_xattn_gain(anima, 1.0)  # uncond runs at identity
         if not do_cfg:
             return v_c
         set_hydra_content(anima, negative_embed)

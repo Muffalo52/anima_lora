@@ -1,6 +1,11 @@
 # Front-loaded text-drive boost — amplify the text pathway in the first 2–3 steps only
 
-Status: **PROPOSED 2026-07-06 (Phase 0 not run).**
+Status: **Phase 1 RUN 2026-07-06** — arm (a) CLOSED (Phase 0, style
+collapse); arm (b) G1+G2 PASS and **SHIPPED** as `--xattn_boost` /
+`XATTN_BOOST=` (see `docs/inference/xattn_boost.md`); arm (c) validated at
+bench level — beats (b) on bindings + side effects, loses on rare-item
+assembly (complementary, not redundant; production span-flag deferred).
+Full reads: `bench/frontload_text_boost/report.md`.
 
 Two banked findings compose into a lever nobody has pulled, and it's a
 one-afternoon falsification either way.
@@ -67,13 +72,31 @@ mechanism claim gets rewritten before Phase 1.
 
 ## Phase 1 (only on a G1+G2 pass)
 
-- Compose-flag plumbing so it stacks with `SPECTRUM=1`/`MOD=1` like every other
-  correction; SMC-CFG interaction test.
-- Turbo check: the 4-step student lives entirely at σ ∈ {1.0, 0.9, 0.75, 0.5} —
-  the band covers half its steps, and turbo runs CFG 1.0, so only arm (b)
-  applies there. Separate small grid.
+- **Arm (c) — token-selective boost** (added 2026-07-06 off the Phase-0
+  surprise): scale only selected weak-tag token spans of the cond embedding by
+  α, gated to the same σ ≥ band window; artist/style/framing tags stay at 1.0.
+  Motivated by the two Phase-0 side effects of the uniform gain (it amplified
+  `cropped` and artist framing priors — the lever works but has no aim), and by
+  a mechanism question the residual gain can't answer: (b) raises output
+  *loudness* after attention has allocated, (c) works through K/V and can shift
+  *allocation toward* the weak tag. Read: (c) > (b) on bindings ⇒ allocation is
+  the win; (c) ≈ (b) ⇒ loudness suffices, ship the simpler lever. Theremin-class
+  prompts stay in as the no-signal control (should fail under both).
+  **Guard note:** embedding-level tag boost was killed once (`cross_attn_drive`
+  Phase-0c "rescale trap") — that kill is for the late/low-σ window where the
+  feature is already decided; (c) targets the pre-commitment window that
+  Phase 0 just showed is editable. Same guard logic that cleared arm (b).
+- ~~Compose-flag plumbing~~ **DONE 2026-07-06** — `--xattn_boost` /
+  `--xattn_boost_band` + `XATTN_BOOST=` env lever; wired into inline/tiled
+  loops and the spectrum/SPD/foveated runners; SMC-CFG + Spectrum interaction
+  smoke-passed. `docs/inference/xattn_boost.md`.
+- ~~Turbo check~~ **DONE 2026-07-06** — the band covers 2 of the student's 4
+  steps; at CFG 1.0 the single forward is boosted (arm (c) works there too —
+  the CFG-only reasoning was wrong). Result: lever survives distillation;
+  token 2.0 binds band_trio 2/2 seeds on `anima_turbo_S` where baseline
+  fails. See the report's turbo addendum.
 - Node export decision (Spectrum-KSampler repo) after the repo-side version has
-  survived real use.
+  survived real use. Still open.
 
 ## Kill criteria
 

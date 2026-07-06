@@ -21,7 +21,11 @@ from typing import Optional
 import torch
 from tqdm import tqdm
 
-from library.inference.adapters import clear_hydra_sigma, set_hydra_sigma
+from library.inference.adapters import (
+    clear_hydra_sigma,
+    set_hydra_sigma,
+    set_xattn_gain,
+)
 from library.inference import sampling as inference_utils
 from library.inference.sampler_context import SamplerSideChannels
 from networks.spectrum_sea import (
@@ -240,6 +244,13 @@ def spectrum_denoise(
     soft_tokens_neg_seqlens = ctx.soft_tokens_neg_seqlens
     fsg = ctx.fsg
     cfgpp_lambda = ctx.cfgpp_lambda
+    # --xattn_boost: applied to actual cond forwards at σ ≥ band (reset before
+    # the uncond forward). Forecast steps skip the blocks entirely, so in-band
+    # cached predictions extrapolate from boosted cond features — consistent
+    # with the boost, and the warmup window covers the earliest (highest-σ)
+    # steps with actual forwards anyway.
+    xattn_boost = ctx.xattn_boost
+    xattn_boost_band = ctx.xattn_boost_band
 
     do_cfg = guidance_scale != 1.0
     num_steps = len(timesteps)
@@ -433,6 +444,11 @@ def spectrum_denoise(
                         soft_tokens_net.append_postfix(
                             embed, soft_tokens_embed_seqlens, timesteps=t_exp
                         )
+                    _boost_step = (
+                        xattn_boost is not None and float(sigmas[i]) >= xattn_boost_band
+                    )
+                    if _boost_step:
+                        set_xattn_gain(anima, xattn_boost)
                     with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": pooled_text_pos}
@@ -442,6 +458,8 @@ def spectrum_denoise(
                         noise_pred = anima(
                             model_x, t_exp, embed, padding_mask=padding_mask, **_pos_kw
                         )
+                    if _boost_step:
+                        set_xattn_gain(anima, 1.0)  # uncond runs at identity
                     feat = captured["feat"]
                     if cond_fc is None:
                         cond_fc = SpectrumPredictor(
@@ -580,6 +598,8 @@ def spectrum_denoise(
         )
 
     finally:
+        if xattn_boost is not None:
+            set_xattn_gain(anima, 1.0)
         clear_hydra_sigma(anima)
         if pgraft_network is not None and lora_cutoff_step is not None:
             pgraft_network.set_enabled(True)
