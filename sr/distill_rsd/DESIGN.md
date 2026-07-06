@@ -4,7 +4,7 @@ Reconstruction of **RSD** (One-Step Residual Shifting Diffusion for Image SR via
 Distillation, ICML 2026, paper `22490`). Their repo is a "Coming soon" placeholder,
 so this is built from the paper (Algorithm 1 App. B; hyperparams App. C; schedule
 App. J) on top of the vendored ResShift source (`sr/resshift/`). Proposal context:
-`docs/proposal/resshift_sr_sidecar.md` §3 Phase 2.
+`_archive/proposals/resshift_sr_sidecar.md` §3 Phase 2 (retired — shipped).
 
 RSD = **DMD2 distribution-matching distillation ported to ResShift**. Same machinery
 as our `turbo` DP-DMD loop (`docs/methods/turbo.md`, `networks/methods/turbo_dmd.py`)

@@ -1,6 +1,11 @@
 # ReFT — does block-level residual-stream intervention earn its place vs plain LoRA?
 
-**Status:** decide-before-keep. ReFT is being **downgraded from a shipped variant to a bench probe** — this plan is the evidence gate that decides whether it gets retired, re-scoped, or promoted back. Not currently a recommended method.
+**Status: DECIDED 2026-07-05 — see `report.md`.** The evidence gate ran as
+Phase-1' (a baseline-reuse + register-synergy cut of the design below):
+**`REFT IS REDUNDANT` — stays retired**; register+ReFT synergy null
+(adoption-blocked, defers to the headroom Phase-2 unfrozen-QKV sweep). This
+file is kept as the pre-registered plan; the matched-budget Phase-1 below was
+superseded by Phase-1' and remains unexecuted.
 
 **Owner question:** *At a **matched trainable-parameter budget**, can ReFT (a) converge faster than plain LoRA, (b) reach competitive final quality, or (c) reach states plain LoRA structurally cannot — on Anima personalization? If none of the three, retire it with evidence.*
 

@@ -1,5 +1,10 @@
 # ReFT — re-integration map
 
+> **Bench verdict landed 2026-07-05: `REFT IS REDUNDANT` — see `report.md`.**
+> Per the terms below, this directory is now the kept record; do not re-apply
+> this map unless the headroom Phase-2 adoption gate someday reopens the
+> register-synergy route.
+
 ReFT was **removed from the live codebase on 2026-06-08** and downgraded to this
 bench probe (see `plan.md`). It was unproven on Anima (off-by-default, never
 benched, not foldable). This file is the obituary-and-restore map: if the bench

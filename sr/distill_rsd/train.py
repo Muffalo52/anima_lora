@@ -7,7 +7,6 @@ Run in the root venv:  make sr-rsd-train ARGS="--iters 3000 [--bs 6 --compile] [
 (perf defaults benched 2026-07-02 — see DESIGN.md "Throughput".)
 """
 import argparse
-import copy
 import json
 import sys
 import time
@@ -18,19 +17,13 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from library.training.ema import ema_update, make_ema
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsd_models as M  # noqa: E402
 from data import ArtSRDataset  # noqa: E402
 from rsd_models import make_eps, predict_x0  # noqa: E402
-
-
-@torch.no_grad()
-def ema_update(ema, model, decay):
-    for pe, pm in zip(ema.parameters(), model.parameters()):
-        pe.lerp_(pm.detach(), 1 - decay)
-    for be, bm in zip(ema.buffers(), model.buffers()):
-        be.copy_(bm)
 
 
 def dc_loss(a, b, k=32):
@@ -48,7 +41,7 @@ def dc_loss(a, b, k=32):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=12000, help="generator updates")
+    ap.add_argument("--iters", type=int, default=24000, help="generator updates")
     ap.add_argument("--K", type=int, default=5, help="fake updates per generator update")
     ap.add_argument("--bs", type=int, default=4,
                     help="batch size (default 4: benched 2026-07-02 on the 16GB 5070 Ti — "
@@ -107,7 +100,7 @@ def main():
     ap.add_argument("--save_dir", default=None,
                     help="default: output/sr/rsd (x4) or output/sr/rsd_x2 (x2)")
     ap.add_argument("--log_every", type=int, default=40)
-    ap.add_argument("--save_every", type=int, default=2000)
+    ap.add_argument("--save_every", type=int, default=3000)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
     args = ap.parse_args()
 
@@ -136,9 +129,7 @@ def main():
     vdt = next(vqgan.parameters()).dtype
     diff = M.build_diffusion(cfg)
     T = diff.num_timesteps
-    ema = copy.deepcopy(student).eval()
-    for p in ema.parameters():
-        p.requires_grad_(False)
+    ema = make_ema(student)
     # provenance for inference (rebuilds the matching noise-injection arch) + A/B tracking
     ckpt_meta = {"noise_mode": student.noise_mode, "noise_channels": student.noise_channels,
                  "sid_denom": args.sid_denom}

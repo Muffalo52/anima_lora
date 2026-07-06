@@ -36,7 +36,6 @@ Run in the root venv:  make sr-train ARGS="--iters 30000 [--bs 8 --compile] [--n
 or:                    make sr-train ARGS="--iters 30000 --bs 8"
 """
 import argparse
-import copy
 import json
 import sys
 import time
@@ -49,6 +48,8 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader
 
+from library.training.ema import ema_update, make_ema
+
 HERE = Path(__file__).resolve().parent
 SR = HERE.parent
 sys.path.insert(0, str(SR / "distill_rsd"))   # reuse rsd_models + data
@@ -59,14 +60,6 @@ from models.unet import UNetModelSwin  # noqa: E402  (vendored ResShift, on sys.
 
 CONFIG = SR / "configs" / "realsr_x2_art.yaml"
 X4_V2 = M.WEIGHTS / "resshift_realsrx4_s15_v2.pth"
-
-
-@torch.no_grad()
-def ema_update(ema, model, decay):
-    for pe, pm in zip(ema.parameters(), model.parameters()):
-        pe.lerp_(pm.detach(), 1 - decay)
-    for be, bm in zip(ema.buffers(), model.buffers()):
-        be.copy_(bm)
 
 
 def dc_loss(a, b, k=32):
@@ -231,9 +224,7 @@ def main():
     diff = M.build_diffusion(cfg)
     T = diff.num_timesteps
 
-    ema = copy.deepcopy(model).eval()
-    for p in ema.parameters():
-        p.requires_grad_(False)
+    ema = make_ema(model)
     for m in ema.modules():  # ema is sample-only — grad-ckpt has no benefit and warns under no_grad
         if hasattr(m, "use_checkpoint"):
             m.use_checkpoint = False

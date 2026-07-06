@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ._common import _resolve_run_mode, run_command
+
 ROOT = Path(__file__).resolve().parents[2]
 SR = ROOT / "sr"
 VENV_PY = ROOT / ".venv" / "bin" / "python"
@@ -63,8 +65,12 @@ def cmd_sr_train(extra):
 
     Defaults --src to sr/data/hr_pool when it exists (build it with `make sr-build-hr-pool`);
     otherwise train.py falls back to image_dataset. Pass ARGS=\"--iters … --bs … --amp\".
+
+    Routes through the daemon like every other GPU target (attach by default;
+    ``--queue`` detaches, ``--inline`` runs the child directly for debugging).
     """
-    _run([_venv_py(), str(SR / "train_x2" / "train.py"), *extra])
+    mode, extra = _resolve_run_mode(list(extra))
+    run_command("sr-train", [str(SR / "train_x2" / "train.py"), *extra], mode=mode)
 
 
 def cmd_sr_rsd_train(extra):
@@ -83,13 +89,14 @@ def cmd_sr_rsd_train(extra):
     if version and not any(a == "--version" or a.startswith("--version=") for a in argv):
         argv = ["--version", version, *argv]
     if not any(a == "--src" or a.startswith("--src=") for a in argv):
-        cache = SR / "data" / "rsd_hr_cap4096"
+        cache = SR / "data" / "rsd_hr_cap2048"
         if cache.is_dir():
             print(f"[sr-rsd-train] defaulting --src to {cache} (pass --src to override)")
             argv = ["--src", str(cache), *argv]
         else:
             print(f"[sr-rsd-train] {cache} absent — train.py will fall back to image_dataset")
-    _run([_venv_py(), str(SR / "distill_rsd" / "train.py"), *argv])
+    mode, argv = _resolve_run_mode(argv)
+    run_command("sr-rsd-train", [str(SR / "distill_rsd" / "train.py"), *argv], mode=mode)
 
 
 def cmd_sr_rsd_dryrun(extra):

@@ -54,9 +54,9 @@ The `bench/<method>/` convention from Tier 2 below requires every method bench t
 
 | Subdir | Status | What it has | What's needed |
 |---|---|---|---|
-| `bench/spd/`, `bench/dave/`, `bench/mod_guidance/` | Has README | per-method probe ladder + `results/` | Use these as the shape template |
+| `bench/dave/`, `bench/mod_guidance/`, `bench/memorization/` | Has README | per-method probe ladder + `results/` | Use these as the shape template |
 
-Each missing README is a self-contained Tier 1 PR. Use `bench/spd/README.md` as the model: headline, what each script does, a copy-pasteable run command, the headline number(s) and what "good" looks like, links to representative `results/<timestamp>/` runs, and an "Observed on Anima" section.
+Each missing README is a self-contained Tier 1 PR. Use `_archive/spd/bench/README.md` as the model (the SPD bench is retired, but its README remains the shape to copy): headline, what each script does, a copy-pasteable run command, the headline number(s) and what "good" looks like, links to representative `results/<timestamp>/` runs, and an "Observed on Anima" section.
 
 A second-order bench-gap contribution worth calling out:
 
@@ -124,7 +124,7 @@ These sit between Tier 1 and Tier 2: no new paper or new docs page is required, 
 **Requirements:**
 
 1. **Bench script.** A runnable script that quantifies the change. Two acceptable shapes:
-   - **Add to an existing `bench/<method>/`** if the change is scoped to one method (e.g. a router tweak goes under that method's bench dir such as `bench/spd/`). Append a new script and a new section to that bench's README.
+   - **Add to an existing `bench/<method>/`** if the change is scoped to one method (e.g. a router tweak goes under that method's bench dir such as `bench/turbo/`). Append a new script and a new section to that bench's README.
    - **Add a small `bench/<topic>/`** for cross-cutting changes (e.g. a sampler-correction optimization belongs in a new dir alongside `bench/dave/`).
 
    The script must report the headline number(s) it claims to move — wall-clock, peak VRAM, loss-at-N-steps, drift, whatever the change targets — for **both before and after**. A single-number claim ("20% faster") with no reproducible script does not clear the bar. If the script loads the DiT, use `bench/_anima.py` (`add_common_args` + `build_anima`) — same rationale as Tier 2 §2 below: every DiT-loading bench needs to expose `--compile` and load the adapter in the right order, and the helper enforces both.
@@ -155,7 +155,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
 
    Hand-rolled methods without prior art are not categorically rejected, but the bar is higher: in the absence of a paper, the bench results have to carry the argument alone, and reviewers will be skeptical. If you are confident, propose the method in an issue first.
 
-2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/spd/`, `bench/dave/`, `bench/mod_guidance/`):
+2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/dave/`, `bench/mod_guidance/`, `bench/memorization/`):
 
    ```
    bench/<method_name>/
@@ -201,7 +201,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
    - **Interpretation** — what the numbers mean, including what would falsify the method.
    - **Baseline run** — at least one results directory checked in (or linked from a release artifact if large), with the exact CLI used to produce it.
 
-   `bench/spd/README.md` is a good template — it documents the measurement, has an "Observed on Anima" section with a dated baseline, and a "Next actions" section. Aim for that.
+   `_archive/spd/bench/README.md` is a good template (the SPD bench itself is retired — the README shape is what to copy): it documents the measurement, has an "Observed on Anima" section with a dated baseline, and a "Next actions" section. Aim for that.
 
 3. **Documentation.** A method doc at `docs/methods/<name>.md` covering the algorithm, config knobs, training/inference flow, and known failure modes. Cross-link from the README's "Experimental features" table.
 

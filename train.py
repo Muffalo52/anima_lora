@@ -1655,11 +1655,11 @@ class AnimaTrainer:
             and args.blocks_to_swap is not None
             and args.blocks_to_swap > 0
         ):
-            logger.warning(
-                "Register tokens + blocks_to_swap>0 is unaudited — the "
-                "mid-stack token insertion pre-hooks have not been validated "
-                "against the block-swap offloader. Prefer blocks_to_swap=0 "
-                "(use block compile for memory instead)."
+            raise ValueError(
+                "Register tokens (extra_seq_tokens>0) require blocks_to_swap=0 — "
+                "the mid-stack token insertion pre-hooks have not been validated "
+                "against the block-swap offloader and can silently desync it. "
+                "Use block compile for memory instead."
             )
 
         # apply network to unet and text_encoder

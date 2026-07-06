@@ -51,3 +51,4 @@ bench/x0_contradiction/prompts/
 /sr/.venv/
 /sr/data/
 /sr/**/weights/
+/post_image_dataset

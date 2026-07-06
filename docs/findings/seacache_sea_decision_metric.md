@@ -132,15 +132,18 @@ the lagging residual Spectrum currently has. Keep Spectrum's Chebyshev forecasti
 for the *reuse* — only the *when-to-skip* changes, which is orthogonal to the
 plugin boundary, so SMC-CFG / mod-guidance composition is unaffected.
 
-**Shipped.** The SEA-distance trigger is wired into `spectrum_denoise`
-(`networks/spectrum.py` + the `networks/spectrum_sea.py` helpers) as the opt-in
-`--spectrum_schedule sea` mode with auto-δ matched-compute calibration — see
-`docs/inference/spectrum.md` §"SEA schedule". The growing window remains the
-default.
+**Shipped — library + ComfyUI node.** The SEA-distance trigger is wired into
+`spectrum_denoise` (`networks/spectrum.py` + the `networks/spectrum_sea.py`
+helpers) as the opt-in `--spectrum_schedule sea` mode with auto-δ matched-compute
+calibration — see `docs/inference/spectrum.md` §"SEA schedule". The growing
+window remains the default. The **node mirror is done too**: `SpectrumKSampler`
+in `~/ComfyUI-Spectrum-KSampler` exposes the `schedule='sea'` mode
+(`spectrum.py` + vendored `spectrum_sea.py`). The P2 CMMD A/B ship gate was
+resolved by **eyeball A/B** — a near-tie as predicted (SEA at matched compute is
+~85% the same schedule as the window), so the node mirror was not held back.
 
 Not yet settled:
 
-- **β sensitivity.** All runs used the natural-image power-law β = 2; untuned.
 - **β sensitivity.** All runs used the natural-image power-law β = 2; untuned.
 - The σ<0.45 tail carries ≈0% of SEA-weighted skip-cost (consistent with x̂₀
   resolving by σ≈0.45) yet the blind schedule force-computes the last 3 steps —

@@ -1,6 +1,6 @@
 # gui/CLAUDE.md
 
-Guidance for the PySide6 (Qt6) desktop GUI. Scoped to `gui/` — read the root `CLAUDE.md` for the training/config/daemon contracts this GUI drives. ~18.8k lines across 44 Python files; the two big tabs (`tabs/config_tab.py` 1739, `tabs/preprocess_tab.py` 1878) hold most of the surface (see `docs/proposal/gui_refactor_plan.md` for the module-layout cleanup in progress — Phases 1, 2, 4 done, Phase 3 in progress: `tabs/image_tab.py`'s autotag worker split into `tabs/_autotag.py`).
+Guidance for the PySide6 (Qt6) desktop GUI. Scoped to `gui/` — read the root `CLAUDE.md` for the training/config/daemon contracts this GUI drives. ~18.8k lines across 44 Python files; the two big tabs (`tabs/config_tab.py` 1739, `tabs/preprocess_tab.py` 1878) hold most of the surface (module-layout cleanup complete — history in `_archive/proposals/gui_refactor_plan.md`; `tabs/image_tab.py`'s autotag worker lives in `tabs/_autotag.py`).
 
 ## What it is
 

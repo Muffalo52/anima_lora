@@ -842,7 +842,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     if bool(args.grad_ckpt) and gan_loss_weight_gen > 0.0:
         # View × deferred-ckpt-recompute hazard: a forward that flips the global
         # view after the rollout's checkpointed forwards corrupts their recompute.
-        logger.warning(
+        raise ValueError(
             "--grad_ckpt with gan.weight_gen > 0: the rollout's checkpointed "
             "student forwards recompute after the GAN gen forward flipped the "
             "view to 'teacher' — the recomputed blocks drop the student LoRA "

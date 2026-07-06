@@ -61,4 +61,10 @@ checkpointing_epochs = 4
 caption_dropout_rate = 0.1
 cache_llm_adapter_outputs = true
 
+# The mid-stack register-token pre-hooks are unaudited against the block-swap
+# offloader, so train.py hard-fails on extra_seq_tokens>0 + blocks_to_swap>0.
+# Pin 0 here (method wins over preset) so low-VRAM presets don't trip it —
+# use block compile for memory instead.
+blocks_to_swap = 0
+
 output_name = "anima_register"

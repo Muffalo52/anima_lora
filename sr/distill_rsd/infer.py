@@ -43,7 +43,8 @@ def load_lr(path, device, scale):
 
 
 @torch.no_grad()
-def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True):
+def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True,
+                 zT_noise=None, eps_noise=None):
     """One tile: reflect-pad to `align` (Swin needs dims % lq_size), encode -> 1-step
     student -> decode -> crop back. In/out 1x3xHxW in [-1,1].
 
@@ -54,7 +55,14 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True):
     bf16 *outside* autocast: autocast keeps GroupNorm on its fp32 list, which would
     materialize the full-res norm activations in fp32 (the dominant tensors). Native
     bf16 keeps them bf16 too — GroupNorm still reduces in fp32 internally, so it's safe.
-    The student stays under autocast (matches training)."""
+    The student stays under autocast (matches training).
+
+    `zT_noise`/`eps_noise` (latent-shaped, matching z_y's spatial dims) inject a
+    precomputed noise slice instead of drawing fresh per-tile randn — the shared-noise
+    path (`student_sr(shared_noise=True)`) uses this so overlapping tiles draw the SAME
+    noise field and the overlap-average is seam-free. Both default to None = the original
+    independent per-tile draw. Only valid when the tile is un-padded (ph==pw==0), which
+    holds for every tile in the tiled path (chop is an align multiple)."""
     h, w = hr_t.shape[2:]
     ph, pw = (-h) % align, (-w) % align
     if ph or pw:
@@ -62,17 +70,19 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True):
     ctx = torch.autocast("cuda", dtype=torch.bfloat16) if amp else nullcontext()
     vdt = next(vqgan.parameters()).dtype   # bf16 when amp (see main), else fp32
     z_y = vqgan.encode(hr_t.to(vdt)) * cfg.diffusion.params.scale_factor
-    z_T = z_y + diff.kappa * torch.randn_like(z_y)
+    zt_n = torch.randn_like(z_y) if zT_noise is None else zT_noise.to(z_y.dtype)
+    z_T = z_y + diff.kappa * zt_n
+    eps = make_eps(student, z_y) if eps_noise is None else eps_noise.to(z_y.dtype)
     tT = torch.full((z_y.shape[0],), diff.num_timesteps - 1, device=device, dtype=torch.long)
     with ctx:
-        z0 = predict_x0(diff, student, z_T, z_y, tT, make_eps(student, z_y))
+        z0 = predict_x0(diff, student, z_T, z_y, tT, eps)
     img = vqgan.decode(z0.to(vdt), force_not_quantize=True).clamp(-1, 1)
     return img[:, :, :h, :w].float()
 
 
 @torch.no_grad()
 def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=None,
-               chop=512, tile_batch=1, amp=True):
+               chop=512, tile_batch=1, amp=True, shared_noise=True, noise_seed=None):
     """1-step student SR on an HR-sized (upsampled-LR) tensor 1x3xHxW in [-1,1].
 
     The student is spatially same-resolution (the x4 lives in the residual-shift, not a
@@ -87,14 +97,48 @@ def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=Non
     `tile_batch` stacks that many tiles into one forward (ImageSpliterTh.extra_bs) — small
     tiles underfill the GPU one-at-a-time, so batching amortizes launch/overhead for a big
     speedup; VRAM scales ~linearly with it, so it's a card-specific cap. Every tile is
-    exactly chop×chop (chop is an align multiple), so the batch stacks with no ragged pad."""
+    exactly chop×chop (chop is an align multiple), so the batch stacks with no ragged pad.
+
+    `shared_noise` (default on): the student is stochastic — it injects two independent
+    noise draws per forward (the 3-ch residual-shift `z_T` noise + the 1-ch `make_eps`
+    injection). Drawn per-tile, neighbouring tiles get INDEPENDENT noise fields and the
+    overlap-average has to blend that discontinuity, leaving a faint tile-block seam in
+    flat regions. Instead we draw ONE full-image latent noise field per source up front
+    and slice each tile's noise from it by its latent position (pixel start // f), so
+    overlapping tiles read IDENTICAL noise and the average is seam-free. The field is a
+    few MB (latent-res, ≪ the VAE decode peak) and drawing it once is marginally cheaper
+    than per-tile. `noise_seed` seeds it for reproducibility (None = the prior unseeded
+    behaviour, now spatially coherent). Interior tiles align exactly (their pixel starts
+    are f-multiples); a last tile whose start isn't an f-multiple is shifted by <f px of
+    noise — one boundary, negligible. Only the tiled path uses it (a single un-tiled tile
+    has no seam)."""
     if overlap is None:
         overlap = align
     H, W = lq_img.shape[2:]
     if H > chop or W > chop:
         spliter = ImageSpliterTh(lq_img, chop, stride=chop - overlap, sf=1, extra_bs=tile_batch)
+        g_zT = g_eps = None
+        if shared_noise:
+            ch_mult = cfg.autoencoder.params.ddconfig.ch_mult
+            f = 2 ** (len(ch_mult) - 1)               # VQ-f4 -> 4
+            z_ch = cfg.autoencoder.params.ddconfig.z_channels
+            gen = None
+            if noise_seed is not None:
+                gen = torch.Generator(device=device).manual_seed(int(noise_seed))
+            gpad = chop // f                          # margin so any tile start slices in-bounds
+            hl, wl = H // f + gpad, W // f + gpad
+            g_zT = torch.randn(1, z_ch, hl, wl, device=device, generator=gen)
+            g_eps = torch.randn(1, student.noise_channels, hl, wl, device=device, generator=gen)
+            lt = chop // f                            # per-tile latent size
         for pch, info in spliter:
-            spliter.update(_sample_tile(cfg, diff, vqgan, student, pch, align, device, amp), info)
+            zt_noise = eps_noise = None
+            if shared_noise:
+                zt_noise = torch.cat([g_zT[:, :, h0 // f:h0 // f + lt, w0 // f:w0 // f + lt]
+                                      for (h0, _, w0, _) in info], dim=0)
+                eps_noise = torch.cat([g_eps[:, :, h0 // f:h0 // f + lt, w0 // f:w0 // f + lt]
+                                       for (h0, _, w0, _) in info], dim=0)
+            spliter.update(_sample_tile(cfg, diff, vqgan, student, pch, align, device, amp,
+                                        zT_noise=zt_noise, eps_noise=eps_noise), info)
         img = spliter.gather()
     else:
         img = _sample_tile(cfg, diff, vqgan, student, lq_img, align, device, amp)
@@ -130,6 +174,13 @@ def main():
                          "for a big speedup. VRAM scales ~linearly, so tune to the card (e.g. "
                          "--chop 256 --tile_batch 8).")
     ap.add_argument("--no_bf16", action="store_true", help="disable bf16 autocast (inference matches training's --amp by default; ~2x slower + 2x VRAM if set)")
+    ap.add_argument("--no_shared_noise", action="store_true",
+                    help="disable the shared full-image noise field (revert to independent "
+                         "per-tile noise). Shared noise (default on) makes overlapping tiles draw "
+                         "identical noise so the overlap-average is seam-free — a few MB, quality-"
+                         "neutral. Only matters when the image is tiled (> --chop).")
+    ap.add_argument("--noise_seed", type=int, default=None,
+                    help="seed the shared noise field for reproducible output (default: unseeded).")
     ap.add_argument("--weights", choices=["ema", "student"], default="ema",
                     help="ema = smoothed (best late); student = raw (better for EARLY ckpts, "
                          "EMA still drags the teacher-init there)")
@@ -205,7 +256,8 @@ def main():
     for lr_path in pbar:
         lq_t, _ = load_lr(lr_path, dev, scale)
         sr = student_sr(cfg, diff, vqgan, student, lq_t, dev, align=align, overlap=overlap,
-                        chop=args.chop, tile_batch=args.tile_batch, amp=not args.no_bf16)
+                        chop=args.chop, tile_batch=args.tile_batch, amp=not args.no_bf16,
+                        shared_noise=not args.no_shared_noise, noise_seed=args.noise_seed)
         Image.fromarray(sr).save(out_dir / lr_path.name)
         row = {"stem": lr_path.stem}
         if musiq is not None:

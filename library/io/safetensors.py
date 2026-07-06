@@ -383,9 +383,7 @@ class TensorWeightAdapter:
     If tensors is None, the hook should return only the new keys (for split) or new key (for concat), without tensors.
 
     No need to implement __enter__ and __exit__ methods, as they are handled by the original MemoryEfficientSafeOpen.
-    Do not use this wrapper as a context manager directly, like `with WeightConvertHookWrapper(...) as f:`.
-
-    **concat_hook is not tested yet.**
+    Do not use this wrapper as a context manager directly, like `with TensorWeightAdapter(...) as f:`.
     """
 
     def __init__(

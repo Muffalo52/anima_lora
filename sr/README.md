@@ -3,7 +3,7 @@
 Standalone super-resolution for our art, **deliberately outside the Anima adapter
 system** (it has its own VQGAN, latent space, and training loop). Design rationale,
 phasing, and the ×2-vs-×4 / degradation decisions live in
-[`docs/proposal/resshift_sr_sidecar.md`](../docs/proposal/resshift_sr_sidecar.md).
+[`_archive/proposals/resshift_sr_sidecar.md`](../_archive/proposals/resshift_sr_sidecar.md) (retired — shipped).
 This README is the ops surface.
 
 ## Self-contained: vendored source, no external clone
