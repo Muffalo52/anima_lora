@@ -19,7 +19,14 @@ What it does:
     random scale in [2, --scale_jitter_max 4] so tiny glyphs appear with GT
     supervision instead of being hallucinated at inference.
   - per step: t ~ U[0,T), z_t = q_sample(z0, z_y, t), pred = model(scale_input(z_t),
-    t, lq=z_y), loss = MSE(pred, z0). Optional decoded-image LPIPS (--lambda_lpips).
+    t, lq=z_y), loss = MSE(pred, z0) + decoded-image LPIPS (--lambda_lpips, default ON
+    since 2026-07-06: the latent-MSE-only teacher was confirmed as the student quality
+    ceiling — edge detail regresses to the mean) + low-freq DC color anchor
+    (--lambda_dc, ported from distill_rsd: LPIPS opens the color null-space that pure
+    MSE kept pinned, so the two ship together). The image losses compare decode(pred)
+    against decode(z0), NOT raw gt — the frozen VQ roundtrip is color-tinted on this
+    data, so referencing raw gt disagrees with the latent MSE zero and bakes a green
+    cast into the model (fixed 2026-07-06; see the loss-branch comment).
   - EMA, bf16 AMP + native-bf16 VQGAN (default ON), optional block-compile /
     Swin grad-checkpointing, periodic p_sample_loop montage eval.
     Perf defaults follow the 2026-07-02 distill_rsd pass (same net, same 256² crops):
@@ -60,6 +67,18 @@ def ema_update(ema, model, decay):
         pe.lerp_(pm.detach(), 1 - decay)
     for be, bm in zip(ema.buffers(), model.buffers()):
         be.copy_(bm)
+
+
+def dc_loss(a, b, k=32):
+    """L1 on the low-frequency (DC + coarse tone) band of the decoded image.
+
+    Same rationale as distill_rsd/train.py: VGG-LPIPS is ~invariant to a uniform
+    color/tone shift, so once LPIPS joins the objective the global DC becomes an
+    unconstrained null-space (the pure-MSE teacher measured ~0 drift — it's LPIPS
+    that opens it). Avg-pooling to a coarse map and matching L1 pins that band
+    without touching high-freq detail. Both a,b are image-space [-1,1].
+    """
+    return F.l1_loss(F.avg_pool2d(a, k), F.avg_pool2d(b, k))
 
 
 def warm_start(model, ckpt_path):
@@ -128,10 +147,15 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--lr_min", type=float, default=2e-5, help="cosine floor (set ==lr to disable)")
     ap.add_argument("--warmup", type=int, default=500, help="linear LR warmup steps")
-    ap.add_argument("--lambda_lpips", type=float, default=0.0,
-                    help="decoded-image VGG-LPIPS on the per-step x0 prediction. 0 = pure "
-                         "latent MSE (canonical ResShift). Raise (~0.5) to push perceptual "
-                         "sharpness; costs a VQGAN decode per step.")
+    ap.add_argument("--lambda_lpips", type=float, default=0.5,
+                    help="decoded-image VGG-LPIPS on the per-step x0 prediction. Default ON "
+                         "(0.5) since 2026-07-06 — pure latent MSE was confirmed as the "
+                         "detail ceiling the students inherit. 0 = canonical ResShift "
+                         "latent MSE; costs a VQGAN decode per step when on.")
+    ap.add_argument("--lambda_dc", type=float, default=1.0,
+                    help="low-freq DC/color L1 on the same decoded x0 (dc_loss, k=32) — "
+                         "pins the global tone LPIPS leaves free. Inert extra decode cost "
+                         "only when --lambda_lpips 0; set 0 to disable.")
     ap.add_argument("--ema", type=float, default=0.999)
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                     help="bf16 autocast on the net + NATIVE-bf16 VQGAN (matches distill_rsd; "
@@ -278,6 +302,7 @@ def main():
     log_path = save_dir / "progress.jsonl"
     snap = {"method": "resshift_x2", "config": args.config, "sf": sf, "init": args.init,
             "iters": args.iters, "bs": args.bs, "lr": args.lr, "lambda_lpips": args.lambda_lpips,
+            "lambda_dc": args.lambda_dc,
             "amp": args.amp, "compile": args.compile, "grad_ckpt": args.grad_ckpt,
             "text_boxes": args.text_boxes, "text_crop_prob": args.text_crop_prob,
             "scale_jitter_prob": args.scale_jitter_prob,
@@ -288,7 +313,7 @@ def main():
     t0 = time.time()
     print(f"training: iters={args.iters} bs={args.bs}x{args.grad_accum} sf={sf} T={T} "
           f"amp={args.amp} compile={args.compile} grad_ckpt={args.grad_ckpt} "
-          f"lpips={args.lambda_lpips} src={src}")
+          f"lpips={args.lambda_lpips} dc={args.lambda_dc} src={src}")
 
     for step in range(args.iters):
         lr_now = set_lr(step)
@@ -304,14 +329,31 @@ def main():
                 pred = predict_x0(diff, model, z_t, z_y, t)        # predict_type=xstart -> pred IS z0
                 L_mse = F.mse_loss(pred.float(), z0.float())
             L = L_mse
-            if lp is not None:
+            if lp is not None or args.lambda_dc > 0:
                 # decode runs native bf16 outside autocast (grad flows through the frozen
-                # decoder; matches distill_rsd), image back to fp32 for the loss
+                # decoder; matches distill_rsd), image back to fp32 for the losses
                 img = vqgan.decode(pred.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
-                with autocast():
-                    L_lpips = lp(img, gt).mean()
-                L = L + args.lambda_lpips * L_lpips
-                logs["L_lpips"] = L_lpips.detach().item()
+                # reference the roundtrip-consistent target decode(z0), NOT raw gt. The frozen
+                # VQ-f4 roundtrip is color-tinted on this art data (measured ~[+2.5 R, +0.9 B]
+                # u8 on content crops), so comparing decode(pred) against raw gt puts the
+                # LPIPS/dc color-minimum at the *anti*-tint while the latent MSE(pred, z0) zero
+                # sits at the tint — the two references disagree by exactly the roundtrip color,
+                # and the model bakes in the anti-tint (measured ~[-1.8 R, -1.1 B] green-cast
+                # drift, compounded through the 15-step rollout). decode(z0) coincides with the
+                # MSE zero at pred==z0, so there is no color tug-of-war and the perceptual/detail
+                # signal is untouched. Kept as a separate no_grad decode (not fused into the pred
+                # decode) so no decoder activations are stored for it.
+                with torch.no_grad():
+                    gt_img = vqgan.decode(z0.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
+                if lp is not None:
+                    with autocast():
+                        L_lpips = lp(img, gt_img).mean()
+                    L = L + args.lambda_lpips * L_lpips
+                    logs["L_lpips"] = L_lpips.detach().item()
+                if args.lambda_dc > 0:
+                    L_dc = dc_loss(img, gt_img)
+                    L = L + args.lambda_dc * L_dc
+                    logs["L_dc"] = L_dc.detach().item()
             (L / args.grad_accum).backward()
             logs["L_mse"] = L_mse.detach().item()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

@@ -263,9 +263,17 @@ def main():
             # decode runs native bf16 outside autocast (grad flows through the frozen
             # decoder; matches infer.py's VAE handling), image back to fp32 for the losses
             x0_img = vqgan.decode(z0_single.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
+            # reference the roundtrip-consistent decode(z0), NOT raw gt: the frozen VQ roundtrip
+            # is color-tinted on this data, so comparing decode(pred) against raw gt puts the
+            # LPIPS/dc color-minimum at the anti-tint and injects a color drift (the 1-step
+            # student can't compound it like the x2 rollout does, but the residual is real —
+            # ~-0.03 blue). decode(z0) coincides with the latent objective's zero. See the
+            # matching fix + full derivation in sr/train_x2/train.py.
+            with torch.no_grad():
+                gt_img = vqgan.decode(z0.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
             with autocast():
-                L_lpips = lp(x0_img, gt).mean()
-                L_dc = dc_loss(x0_img, gt.float())
+                L_lpips = lp(x0_img, gt_img).mean()
+                L_dc = dc_loss(x0_img, gt_img.float())
                 L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, z_y, eps=eps))).mean()
             loss = (L_theta + args.lambda_lpips * L_lpips + args.lambda_dc * L_dc
                     + args.lambda_gan * L_gan_g) / args.grad_accum
