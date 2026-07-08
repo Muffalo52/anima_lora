@@ -134,7 +134,7 @@ def save_montage(path, lq, sr, gt, n=4):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=30000, help="optimizer steps")
+    ap.add_argument("--iters", type=int, default=45000, help="optimizer steps")
     ap.add_argument("--bs", type=int, default=8)
     ap.add_argument("--grad_accum", type=int, default=1)
     ap.add_argument("--lr", type=float, default=5e-5)
@@ -185,10 +185,10 @@ def main():
     ap.add_argument("--scale_jitter_max", type=float, default=4.0,
                     help="upper degradation scale for --scale_jitter_prob draws")
     ap.add_argument("--num_workers", type=int, default=6)
-    ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "x2"))
+    ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "x2_lpips_30k"))
     ap.add_argument("--log_every", type=int, default=50)
-    ap.add_argument("--save_every", type=int, default=3000)
-    ap.add_argument("--sample_every", type=int, default=3000,
+    ap.add_argument("--save_every", type=int, default=5000)
+    ap.add_argument("--sample_every", type=int, default=2500,
                     help="render a p_sample_loop montage every N steps (0=off)")
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap (0=off)")
     args = ap.parse_args()

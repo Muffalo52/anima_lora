@@ -26,6 +26,51 @@ REPO = M.REPO
 CKPT_DIR = REPO / "output" / "sr" / "rsd"
 
 
+class FeatheredSpliter(ImageSpliterTh):
+    """ImageSpliterTh with raised-cosine feathered overlap blending.
+
+    The upstream gather() is a uniform box average: every covering tile gets weight 1, so
+    the blend weight STEPS at the overlap edges (1 tile ↔ 2 tiles). Even with the shared
+    noise field, tiles disagree slightly in the overlap (each tile's VQGAN encode + Swin
+    sees different context), and the box average concentrates that whole disagreement into
+    a visible line exactly at the overlap edges (measured 2026-07-08 on the x2 comfy
+    renders: seams sit at the 1→2/2→1 transitions, ~1.5× background even with shared
+    noise). Feathering ramps each tile's weight 0→1 over the overlap width from its own
+    edge (Hann profile, separable), so any tile disagreement fades in smoothly instead of
+    switching on. gather() renormalizes by the accumulated weight, so borders (no
+    neighbour → single tile at partial weight) still come out exact; overlap == 0 falls
+    back to the box path unchanged."""
+
+    def __init__(self, im, pch_size, stride, sf=1, extra_bs=1):
+        super().__init__(im, pch_size, stride, sf=sf, extra_bs=extra_bs)
+        self.ramp = (pch_size - stride) * sf   # overlap width at output res = feather span
+        self._wcache = {}
+
+    def _tile_weight(self, h, w, dtype, device):
+        if self.ramp <= 0:
+            return None
+        key = (h, w, dtype, device)
+        if key not in self._wcache:
+            def prof(length):
+                d = torch.arange(length, device=device, dtype=torch.float32) + 0.5
+                d = torch.minimum(d, length - d).clamp(max=self.ramp) / self.ramp
+                return 0.5 - 0.5 * torch.cos(torch.pi * d)
+            w2d = (prof(h)[:, None] * prof(w)[None, :]).clamp(min=1e-3)
+            self._wcache[key] = w2d.to(dtype)[None, None]
+        return self._wcache[key]
+
+    def update(self, pch_res, index_infos):
+        wt = self._tile_weight(pch_res.shape[-2], pch_res.shape[-1],
+                               pch_res.dtype, pch_res.device)
+        if wt is None:
+            return super().update(pch_res, index_infos)
+        pch_list = torch.split(pch_res, self.true_bs, dim=0)
+        assert len(pch_list) == len(index_infos)
+        for cur, (h0, h1, w0, w1) in zip(pch_list, index_infos):
+            self.im_res[:, :, h0:h1, w0:w1] += cur * wt
+            self.pixel_count[:, :, h0:h1, w0:w1] += wt
+
+
 def latest_ckpt(ckpt_dir: Path) -> Path:
     """Most recently written rsd_student_*.pth (final or numbered)."""
     cands = sorted(ckpt_dir.glob("rsd_student_*.pth"), key=lambda p: p.stat().st_mtime)
@@ -40,6 +85,25 @@ def load_lr(path, device, scale):
     up = im.resize((im.width * scale, im.height * scale), Image.BICUBIC)
     t = torch.from_numpy(np.asarray(up, np.float32) / 127.5 - 1).permute(2, 0, 1)[None]
     return t.to(device), up
+
+
+def _dc_loss(a, b, k=32):
+    """Low-freq (DC + coarse tone) L1 on [-1,1] images — mirrors train.py's dc_loss."""
+    return F.l1_loss(F.avg_pool2d(a, k), F.avg_pool2d(b, k)).item()
+
+
+@torch.no_grad()
+def roundtrip_ref(vqgan, gt_t, sf_scale, vdt):
+    """decode(z0), z0 = scale_factor * encode(gt) — the roundtrip-consistent color
+    reference the training image losses target (train.py:264), NOT raw gt.
+
+    The frozen VQ roundtrip decode(encode(gt)) is not identity: it carries a fixed
+    directional color tint on this art data (~[+2.5R, +0.9B] u8), so a latent-faithful
+    student's output inherits that tint. Scoring color vs raw HR therefore penalizes the
+    correct student and rewards an anti-tint hack — decode(z0) puts the color minimum at
+    the latent objective's zero (pred==z0). gt_t is a [-1,1] tensor at output resolution."""
+    z0 = vqgan.encode(gt_t.to(vdt)) * sf_scale
+    return vqgan.decode(z0, force_not_quantize=True).float().clamp(-1, 1)
 
 
 @torch.no_grad()
@@ -57,12 +121,12 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True,
     bf16 keeps them bf16 too — GroupNorm still reduces in fp32 internally, so it's safe.
     The student stays under autocast (matches training).
 
-    `zT_noise`/`eps_noise` (latent-shaped, matching z_y's spatial dims) inject a
-    precomputed noise slice instead of drawing fresh per-tile randn — the shared-noise
-    path (`student_sr(shared_noise=True)`) uses this so overlapping tiles draw the SAME
-    noise field and the overlap-average is seam-free. Both default to None = the original
-    independent per-tile draw. Only valid when the tile is un-padded (ph==pw==0), which
-    holds for every tile in the tiled path (chop is an align multiple)."""
+    `zT_noise`/`eps_noise` (latent-shaped, chop//f-sized) inject a precomputed noise
+    slice instead of drawing fresh per-tile randn — the shared-noise path
+    (`student_sr(shared_noise=True)`) uses this so overlapping tiles draw the SAME noise
+    field and the overlap-average is seam-free. Both default to None = the original
+    independent per-tile draw. Slices are cropped to z_y's actual latent dims, so skinny
+    tiles (image dim ≤ chop on one axis, padded to less than chop) work too."""
     h, w = hr_t.shape[2:]
     ph, pw = (-h) % align, (-w) % align
     if ph or pw:
@@ -70,9 +134,14 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True,
     ctx = torch.autocast("cuda", dtype=torch.bfloat16) if amp else nullcontext()
     vdt = next(vqgan.parameters()).dtype   # bf16 when amp (see main), else fp32
     z_y = vqgan.encode(hr_t.to(vdt)) * cfg.diffusion.params.scale_factor
-    zt_n = torch.randn_like(z_y) if zT_noise is None else zT_noise.to(z_y.dtype)
+    # Noise slices are chop//f-sized; a skinny tile (image dim ≤ chop on one axis) pads to
+    # LESS than chop, so crop the slice to the actual latent dims before injecting.
+    hz, wz = z_y.shape[2:]
+    zt_n = (torch.randn_like(z_y) if zT_noise is None
+            else zT_noise[:, :, :hz, :wz].to(z_y.dtype))
     z_T = z_y + diff.kappa * zt_n
-    eps = make_eps(student, z_y) if eps_noise is None else eps_noise.to(z_y.dtype)
+    eps = (make_eps(student, z_y) if eps_noise is None
+           else eps_noise[:, :, :hz, :wz].to(z_y.dtype))
     tT = torch.full((z_y.shape[0],), diff.num_timesteps - 1, device=device, dtype=torch.long)
     with ctx:
         z0 = predict_x0(diff, student, z_T, z_y, tT, eps)
@@ -116,7 +185,7 @@ def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=Non
         overlap = align
     H, W = lq_img.shape[2:]
     if H > chop or W > chop:
-        spliter = ImageSpliterTh(lq_img, chop, stride=chop - overlap, sf=1, extra_bs=tile_batch)
+        spliter = FeatheredSpliter(lq_img, chop, stride=chop - overlap, sf=1, extra_bs=tile_batch)
         g_zT = g_eps = None
         if shared_noise:
             ch_mult = cfg.autoencoder.params.ddconfig.ch_mult
@@ -156,18 +225,28 @@ def main():
     ap.add_argument("--ckpt_dir", default=None,
                     help="dir to pick the most recent ckpt from when --ckpt is unset "
                          "(default: output/sr/rsd for x4, output/sr/rsd_x2 for x2)")
-    ap.add_argument("--eval", action="store_true", help="score vs teacher+bicubic on Phase-0 set")
+    ap.add_argument("--eval", action="store_true",
+                    help="reference eval on the Phase-0 set: MUSIQ (no-ref) plus, when --hr_dir "
+                         "matches, DC + LPIPS against the ROUNDTRIP-consistent decode(z0) "
+                         "reference (NOT raw HR). The frozen VQ roundtrip carries a fixed color "
+                         "tint on this art data, so scoring color vs raw HR penalizes a "
+                         "latent-faithful student for the decoder's tint and rewards an anti-tint "
+                         "hack — the exact trap the training-loss fix (commit 3119d5d3) removed. "
+                         "decode(z0) is the correct color reference; raw-HR DC is kept as a "
+                         "diagnostic (dc_hr) so the tint gap stays visible.")
     ap.add_argument("--in_dir", default=str(REPO / "sr" / "data" / "lr_eval"))
+    ap.add_argument("--hr_dir", default=str(REPO / "sr" / "data" / "hr_eval"),
+                    help="ground-truth HR dir (stem-matched to --in_dir) for the reference DC/LPIPS "
+                         "in --eval. Skipped per-image when no stem match exists.")
     ap.add_argument("--out_dir", default=None,
                     help="default: <ckpt_dir>/infer")
     ap.add_argument("--chop", type=int, default=256, help="tile size (px) for large images; must be a multiple of the align stride. 2048 single-tiles the 512->2048 eval (no overlap-redundancy ~2.2x compute saving); lower it (e.g. 1024) if VRAM-bound")
     ap.add_argument("--overlap", type=int, default=64,
-                    help="tile seam overlap in px (default = the Swin align stride, currently 256). "
-                         "Sets the tile stride = chop - overlap, which must be > 0 — so lowering it "
-                         "is what lets you use a --chop at or near the align stride (e.g. --chop 256 "
-                         "--overlap 128). Independent of Swin alignment; only --chop must be a "
-                         "multiple of the align stride. Smaller overlap = fewer redundant tiles but "
-                         "less seam blending.")
+                    help="tile seam overlap in px (default 64). Sets the tile stride = chop - "
+                         "overlap, which must be > 0. Independent of Swin alignment; only --chop "
+                         "must be a multiple of the align stride. The overlap is also the feather "
+                         "ramp width (raised-cosine blend weights across it), so 0 = hard-abutted "
+                         "box tiles; smaller overlap = fewer redundant tiles but narrower blending.")
     ap.add_argument("--tile_batch", type=int, default=8,
                     help="stack this many chop-tiles into one forward (default 1 = serial). Small "
                          "tiles underfill the GPU one-at-a-time; batching amortizes launch overhead "
@@ -227,12 +306,17 @@ def main():
         student = torch.compile(student, dynamic=True)
         print("torch.compile(dynamic=True) enabled on student")
     scale = cfg.diffusion.params.sf
-    # Pixel alignment the SwinUNet needs: the deepest level runs at latent / 2^(L-1) with a
-    # fixed window=8, so latent must be divisible by window*2^(L-1); ×sf for the pixel grid.
+    # Pixel alignment the SwinUNet needs. Tiles are cut at MODEL-INPUT (post-upsample)
+    # resolution, so latent = pixels / f_vq and the deepest level runs at latent / 2^(L-1)
+    # with a hard window_partition view (no internal pad): each tile dim must be divisible
+    # by f_vq·window·2^(L-1) = 256, INDEPENDENT of sf. (The old ×sf formula was correct at
+    # ×4 only because sf == f_vq == 4; at ×2 it under-aligned to 128, so an edge tile
+    # reflect-padded to a 128-but-not-256 multiple crashed the deepest window_partition.)
     n_levels = len(cfg.model.params.get("channel_mult", [1, 2, 2, 4]))
-    align = int(scale) * int(cfg.model.params.window_size) * (2 ** (n_levels - 1))
+    f_vq = 2 ** (len(cfg.autoencoder.params.ddconfig.ch_mult) - 1)
+    align = f_vq * int(cfg.model.params.window_size) * (2 ** (n_levels - 1))
     if args.chop % align:
-        raise SystemExit(f"--chop {args.chop} must be a multiple of {align} (sf×window×2^{n_levels-1})")
+        raise SystemExit(f"--chop {args.chop} must be a multiple of {align} (f_vq×window×2^{n_levels-1})")
     overlap = args.overlap if args.overlap is not None else align
     if not 0 <= overlap < args.chop:
         raise SystemExit(f"--overlap {overlap} must be in [0, chop={args.chop}) so the tile "
@@ -242,7 +326,8 @@ def main():
     print(f"tiling: chop={args.chop} overlap={overlap} stride={args.chop - overlap} "
           f"align={align} tile_batch={args.tile_batch}")
 
-    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     in_dir = Path(args.in_dir)
     rows = []
     try:
@@ -250,6 +335,18 @@ def main():
         musiq = pyiqa.create_metric("musiq", device=dev)
     except Exception:  # noqa: BLE001
         musiq = None
+
+    # reference color/perceptual metrics (--eval only): scored against decode(z0), not raw HR.
+    hr_dir = Path(args.hr_dir) if args.eval else None
+    sf_scale = cfg.diffusion.params.scale_factor
+    vdt = next(vqgan.parameters()).dtype
+    lpips_fn = None
+    if args.eval:
+        try:
+            import lpips
+            lpips_fn = lpips.LPIPS(net="vgg").to(dev).eval()
+        except Exception:  # noqa: BLE001
+            lpips_fn = None
 
     lr_paths = sorted(in_dir.glob("*.png"))
     pbar = tqdm(lr_paths, desc="student SR", unit="img")
@@ -264,6 +361,20 @@ def main():
             t = torch.from_numpy(sr.astype(np.float32) / 255).permute(2, 0, 1)[None]
             row["musiq_student"] = round(float(musiq(t).item()), 3)
             pbar.set_postfix(musiq=row["musiq_student"])
+        if hr_dir is not None and (hr_dir / lr_path.name).exists():
+            # student output and raw HR (resized to output res) as [-1,1] tensors
+            sr_t = (torch.from_numpy(sr.astype(np.float32) / 127.5 - 1)
+                    .permute(2, 0, 1)[None].to(dev))
+            gt_im = (Image.open(hr_dir / lr_path.name).convert("RGB")
+                     .resize((sr.shape[1], sr.shape[0]), Image.BOX))
+            gt_t = (torch.from_numpy(np.asarray(gt_im, np.float32) / 127.5 - 1)
+                    .permute(2, 0, 1)[None].to(dev))
+            with torch.no_grad():
+                ref = roundtrip_ref(vqgan, gt_t, sf_scale, vdt)   # decode(z0): correct color ref
+                row["dc_z0"] = round(_dc_loss(sr_t, ref), 5)      # primary color metric
+                row["dc_hr"] = round(_dc_loss(sr_t, gt_t), 5)     # diagnostic: raw-HR (tint-biased)
+                if lpips_fn is not None:
+                    row["lpips_z0"] = round(float(lpips_fn(sr_t, ref).item()), 5)
         rows.append(row)
     peak_gb = round(torch.cuda.max_memory_allocated() / 1e9, 2) if dev == "cuda" else None
     # alloc_retries > 0 means we hit the OOM-edge retry path (free-cache + cudaFree + retry):
@@ -276,16 +387,26 @@ def main():
                        "num_ooms": ms.get("num_ooms", 0)}
     else:
         summary_mem = {}
+    def _mean(key):
+        vals = [r[key] for r in rows if key in r]
+        return round(float(np.mean(vals)), 5) if vals else None
+
     summary = {"n": len(rows), "ckpt": str(ckpt), "chop": args.chop, "peak_vram_gb": peak_gb,
                **summary_mem,
                "musiq_student_mean": round(float(np.mean([r["musiq_student"] for r in rows
                                                           if "musiq_student" in r])), 3) if musiq else None}
+    if args.eval:
+        # decode(z0) is the correct color reference; dc_hr (raw-HR) is a tint-biased diagnostic.
+        summary.update({"dc_z0_mean": _mean("dc_z0"), "lpips_z0_mean": _mean("lpips_z0"),
+                        "dc_hr_mean_diag": _mean("dc_hr"),
+                        "n_ref": sum(1 for r in rows if "dc_z0" in r)})
     (out_dir / "infer_summary.json").write_text(json.dumps({"summary": summary, "rows": rows}, indent=2))
     print(json.dumps(summary, indent=2))
     print(f"student 1-step outputs -> {out_dir}")
     if args.eval:
-        print("(teacher/bicubic comparison: run sr-phase0 metrics on the same set; "
-              "student MUSIQ above is the 1-step number.)")
+        print("(DC/LPIPS above are vs the roundtrip decode(z0) reference — the training image-loss "
+              "target. dc_hr_mean_diag is vs raw HR and is tint-biased: use dc_z0 to rank students. "
+              "Teacher/bicubic comparison: run sr-phase0 metrics on the same set.)")
 
 
 if __name__ == "__main__":

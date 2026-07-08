@@ -41,7 +41,7 @@ def dc_loss(a, b, k=32):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=24000, help="generator updates")
+    ap.add_argument("--iters", type=int, default=18000, help="generator updates")
     ap.add_argument("--K", type=int, default=5, help="fake updates per generator update")
     ap.add_argument("--bs", type=int, default=4,
                     help="batch size (default 4: benched 2026-07-02 on the 16GB 5070 Ti — "
@@ -96,11 +96,11 @@ def main():
     ap.add_argument("--version", choices=["x4", "x2"], default="x4",
                     help="teacher family: x4 = released 15-step v2; x2 = our sr-train finetune")
     ap.add_argument("--config", default=None, help="override the version's ResShift config yaml")
-    ap.add_argument("--teacher", default=None, help="override the version's teacher checkpoint")
+    ap.add_argument("--teacher", default="output/sr/x2_lpips_30k/resshift_x2_final.pth", help="override the version's teacher checkpoint")
     ap.add_argument("--save_dir", default=None,
                     help="default: output/sr/rsd (x4) or output/sr/rsd_x2 (x2)")
     ap.add_argument("--log_every", type=int, default=40)
-    ap.add_argument("--save_every", type=int, default=3000)
+    ap.add_argument("--save_every", type=int, default=4500)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
     args = ap.parse_args()
 
