@@ -74,6 +74,35 @@ def resolve_cache_path(
     return os.path.join(target_dir, stem + suffix)
 
 
+def caption_key(image_path: str | os.PathLike, image_dir: str | os.PathLike | None = None) -> str:
+    """Stable, subdir-aware key for the caption index (``build_caption_index``).
+
+    The index keys ``image_meta``/``groups`` by an image's path **relative to
+    the dataset root**, extension stripped, separators normalized to ``/`` —
+    e.g. ``en/1.png`` under root ``image_dataset`` → ``en/1``. This mirrors the
+    nested-cache disambiguation (:func:`resolve_cache_path`): the same bare stem
+    may legally repeat across subfolders (``en/1`` vs ``ew/1``), so a bare-
+    basename key would conflate them. The dataset root is mirrored across the
+    original caption tree and the resized/cache tree, so the same relpath key is
+    reconstructable on both sides (builder relativizes against ``--src``; the
+    training loop against ``subset.image_dir``).
+
+    ``image_dir`` is the root to relativize against. When it is ``None`` or
+    ``image_path`` escapes it (``..``), falls back to the bare posix stem — the
+    legacy flat-layout key, which is *identical* to the relpath key for
+    un-nested datasets (so old flat indexes keep matching).
+    """
+    stem_no_ext = os.path.splitext(os.fspath(image_path))[0]
+    if image_dir is not None:
+        try:
+            rel = os.path.relpath(stem_no_ext, os.fspath(image_dir))
+        except ValueError:
+            rel = ""
+        if rel and rel != "." and not rel.startswith(".."):
+            return rel.replace(os.sep, "/")
+    return os.path.basename(stem_no_ext)
+
+
 class CachedImage(NamedTuple):
     """A preprocessed image with its cached latent and optional text encoder output."""
 

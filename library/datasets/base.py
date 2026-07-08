@@ -1286,6 +1286,21 @@ class BaseDataset(torch.utils.data.Dataset):
             cond = cond_flipped
         return torch.FloatTensor(cond)
 
+    def _caption_key(self, info: ImageInfo) -> str:
+        """Caption-index key for an image (posix relpath under its subset's
+        ``image_dir``, extension stripped — see :func:`library.io.cache.caption_key`).
+
+        Matches the key ``build_caption_index`` writes: the resized subdir tree
+        mirrors the original caption tree, so relativizing this image's path
+        against ``subset.image_dir`` reproduces the same ``subdir/stem`` key and
+        keeps duplicate bare stems across folders (``en/1`` vs ``ew/1``) distinct.
+        """
+        from library.io.cache import caption_key
+
+        subset = self.image_to_subset.get(info.image_key)
+        image_dir = getattr(subset, "image_dir", None) if subset is not None else None
+        return caption_key(info.absolute_path, image_dir)
+
     def setup_contrastive_negatives(
         self,
         index_path: str,
@@ -1318,8 +1333,7 @@ class BaseDataset(torch.utils.data.Dataset):
         from library.datasets.identity_pairs import IdentityPairSampler
 
         registered = {
-            os.path.splitext(os.path.basename(info.absolute_path))[0]
-            for info in self.image_data.values()
+            self._caption_key(info) for info in self.image_data.values()
         }
         self.contrastive_neg_sampler = IdentityPairSampler(
             index_path,
@@ -1714,8 +1728,11 @@ class BaseDataset(torch.utils.data.Dataset):
             neg_stem, _lvl = neg_sampler.draw(target_stem, mode, nrng)
             if neg_stem == target_stem:
                 continue  # no distinct negative reachable
+            # neg_stem is a caption-index key (posix ``subdir/stem``); the TE
+            # cache filename uses the *bare* stem while rel_dir supplies the
+            # subdir, so split them here to avoid a doubled subdir in the path.
             feat = self._load_te_for_stem(
-                neg_stem, subset, neg_sampler.rel_dir(neg_stem)
+                os.path.basename(neg_stem), subset, neg_sampler.rel_dir(neg_stem)
             )
             if feat is not None:
                 neg_feats.append(feat)
@@ -1835,9 +1852,7 @@ class BaseDataset(torch.utils.data.Dataset):
             target_sizes_hw.append((int(target_size[1]), int(target_size[0])))
             flippeds.append(flipped)
 
-            target_stem = os.path.splitext(os.path.basename(image_info.absolute_path))[
-                0
-            ]
+            target_stem = self._caption_key(image_info)
 
             caption = image_info.caption
 
@@ -2037,8 +2052,11 @@ class BaseDataset(torch.utils.data.Dataset):
         else:
             example["neg_jaccard"] = None
 
-        if self.debug_dataset:
-            example["image_keys"] = bucket[image_index : image_index + self.batch_size]
+        # Per-item identity (image_data keys, i.e. absolute paths). Always
+        # present: the debug walker and the online memorization Δ-gap tracker
+        # (library/training/mem_reweight.py) key their state off these; a
+        # short string list rides the batch like ``captions``.
+        example["image_keys"] = bucket[image_index : image_index + self.batch_size]
         return example
 
     def get_item_for_caching(self, bucket, bucket_batch_size, image_index):

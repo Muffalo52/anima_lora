@@ -10,16 +10,20 @@ limited by the vocab's frequency cutoff), and writes a single JSON index to
     {
       "meta":  {... provenance: vocab path+mtime, src, n_images, generated ...},
       "image_meta": {
-        "<stem>": {"path": "<rel>", "character": [...], "copyright": [...],
-                   "artist": [...], "count": [...]},
+        "<key>": {"path": "<rel>", "character": [...], "copyright": [...],
+                  "artist": [...], "count": [...]},
         ...
       },
       "groups": {
-        "character": {"<tag>": ["<stem>", ...], ...},
+        "character": {"<tag>": ["<key>", ...], ...},
         "copyright": {...},
         "artist":    {...}
       }
     }
+
+The ``<key>`` is the caption's path relative to the source root, extension
+stripped and posix-normalized (e.g. ``en/1``) — subdir-disambiguated so the
+same bare filename may repeat across folders (see :func:`caption_key`).
 
 This is a *dataset artifact* — it lives beside the VAE/PE caches under
 ``post_image_dataset/`` (not in any checkpoint) and is regenerated when the
@@ -42,6 +46,7 @@ from pathlib import Path
 from library.captioning.taxonomy import CAPTION_RATINGS, is_artist_tag, is_count_tag
 from library.datasets.image_utils import IMAGE_EXTENSIONS
 from library.datasets.subsets import filter_paths_by_glob
+from library.io.cache import caption_key
 from library.io.walk import safe_walk
 
 
@@ -124,12 +129,15 @@ def _load_vocab_sets(vocab_path: str) -> dict[str, set[str]]:
 
 
 def _iter_captions(src: Path, path_pattern: str | None = None):
-    """Yield ``(stem, rel_path, text)`` for every ``.txt`` under ``src``.
+    """Yield ``(key, rel_path, text)`` for every ``.txt`` under ``src``.
 
     ``image_dataset`` is a symlink to a tree of (possibly symlinked) artist
     dirs, so resolve the root and walk with ``followlinks=True`` — a plain walk
-    descends into neither. Stems are assumed unique across the tree (the same
-    invariant the stem-keyed VAE/PE caches rely on)."""
+    descends into neither. The yielded key is the caption's path **relative to
+    the root**, extension stripped, posix-normalized (:func:`caption_key`) — so
+    the same bare stem may legally repeat across subfolders (``en/1`` vs
+    ``ew/1``), matching the nested-cache disambiguation the rest of the pipeline
+    already relies on."""
     root = Path(os.path.realpath(src))
     for dirpath, _dirnames, filenames in safe_walk(root, followlinks=True):
         for name in filenames:
@@ -155,8 +163,12 @@ def _iter_captions(src: Path, path_pattern: str | None = None):
                 text = abs_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            rel = os.path.relpath(abs_path, root)
-            yield name[:-4], rel, text
+            # Posix-normalize so the JSON artifact is OS-portable: the key and
+            # the ``path`` field both use ``/`` regardless of build platform,
+            # and ``rel_dir`` (os.path.dirname on ``path``) stays correct when a
+            # Windows-built index is consumed on Linux (or vice-versa).
+            rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+            yield caption_key(abs_path, root), rel, text
 
 
 def _classify(
@@ -242,21 +254,21 @@ def build_index(
     }
 
     n_seen = 0
-    for stem, rel, text in sorted(_iter_captions(Path(src), path_pattern)):
-        n_seen += 1
+    for key, rel, text in sorted(_iter_captions(Path(src), path_pattern)):
         typed = _classify(
             text,
             vsets,
             recover_paren=recover_paren,
             recover_positional=recover_positional,
         )
-        if stem in image_meta:
-            # Stems must be unique across the tree — surface collisions, don't drop.
-            raise SystemExit(
-                f"duplicate caption stem {stem!r} (paths: "
-                f"{image_meta[stem]['path']} vs {rel}); stems must be unique"
-            )
-        image_meta[stem] = {
+        if key in image_meta:
+            # Keys are posix relpaths (subdir-disambiguated), so two *distinct*
+            # captions can never collide; a repeat means the same file was
+            # reached twice (e.g. a symlink loop under followlinks=True). The
+            # content is identical — skip the revisit rather than crash.
+            continue
+        n_seen += 1
+        image_meta[key] = {
             "path": rel,
             "character": typed["character"],
             "copyright": typed["copyright"],
@@ -265,7 +277,7 @@ def build_index(
         }
         for axis in ("character", "copyright", "artist"):
             for tag in typed[axis]:
-                groups[axis].setdefault(tag, []).append(stem)
+                groups[axis].setdefault(tag, []).append(key)
 
     for axis in groups:
         groups[axis] = {

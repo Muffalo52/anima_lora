@@ -5,6 +5,7 @@ vocab predates (e.g. `endministrator (arknights)`)."""
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -146,3 +147,53 @@ def test_original_crossover_keeps_character():
     # the franchise character survives.
     typed = bci._classify("1girl, dawn (pokemon), pokemon, original, @x", VSETS)
     assert "dawn (pokemon)" in typed["character"]
+
+
+# ── build_index: cross-folder duplicate stems (nested disambiguation) ────────
+
+
+def _write_vocab(tmp_path: Path) -> str:
+    vocab = {
+        "tags": [
+            {"name": "hatsune miku", "category": "character"},
+            {"name": "vocaloid", "category": "copyright"},
+            {"name": "genshin impact", "category": "copyright"},
+            {"name": "1girl", "category": "count"},
+        ]
+    }
+    p = tmp_path / "vocab.json"
+    p.write_text(json.dumps(vocab), encoding="utf-8")
+    return str(p)
+
+
+def test_duplicate_bare_stem_across_folders_kept_distinct(tmp_path):
+    # The same bare filename in two subfolders (``en/1.txt`` vs ``ew/1.txt``)
+    # must NOT collide or crash — keys are posix relpaths, so both survive.
+    src = tmp_path / "captions"
+    (src / "en").mkdir(parents=True)
+    (src / "ew").mkdir(parents=True)
+    (src / "en" / "1.txt").write_text("1girl, hatsune miku, vocaloid", encoding="utf-8")
+    (src / "ew" / "1.txt").write_text("1girl, genshin impact", encoding="utf-8")
+
+    index = bci.build_index(str(src), _write_vocab(tmp_path))
+
+    assert set(index["image_meta"]) == {"en/1", "ew/1"}
+    assert index["image_meta"]["en/1"]["path"] == "en/1.txt"
+    assert index["image_meta"]["ew/1"]["path"] == "ew/1.txt"
+    assert index["meta"]["n_images"] == 2
+    # groups reference the disambiguated keys, not a conflated bare "1".
+    assert index["groups"]["copyright"]["vocaloid"] == ["en/1"]
+    assert index["groups"]["copyright"]["genshin impact"] == ["ew/1"]
+
+
+def test_flat_layout_key_is_bare_stem(tmp_path):
+    # A flat (un-nested) dataset keys by the bare stem — identical to the legacy
+    # behavior, so pre-existing flat indexes keep matching.
+    src = tmp_path / "captions"
+    src.mkdir()
+    (src / "pic.txt").write_text("1girl, hatsune miku, vocaloid", encoding="utf-8")
+
+    index = bci.build_index(str(src), _write_vocab(tmp_path))
+
+    assert set(index["image_meta"]) == {"pic"}
+    assert index["image_meta"]["pic"]["path"] == "pic.txt"
