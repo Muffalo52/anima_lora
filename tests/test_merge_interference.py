@@ -82,7 +82,9 @@ def test_identical_loras_full_subspace_overlap():
     ov = rep.pair_overlap[(0, 1)]
     assert abs(ov.out - 1.0) < 1e-5
     assert abs(ov.inp - 1.0) < 1e-5
-    assert ov.band == "colliding"
+    # Identical deltas fully overlap AND point the same way (cos +1): the
+    # overlap is sign-explained, so it reinforces — it does NOT "collide".
+    assert ov.band == "reinforcing"
 
 
 def test_negated_loras_still_full_overlap():
@@ -90,7 +92,10 @@ def test_negated_loras_still_full_overlap():
     torch.manual_seed(5)
     down, up = torch.randn(4, 64), torch.randn(48, 4)
     rep = ma.analyze([_lora(down, up), _lora(down, -up)], ["a", "b"])
-    assert abs(rep.pair_overlap[(0, 1)].out - 1.0) < 1e-5
+    ov = rep.pair_overlap[(0, 1)]
+    assert abs(ov.out - 1.0) < 1e-5
+    # Full overlap, cos −1: the shared subspace cancels, not collides.
+    assert ov.band == "cancelling"
 
 
 def test_disjoint_output_rows_zero_out_overlap_full_in_overlap():
@@ -124,8 +129,10 @@ def test_shared_subspace_orthogonal_directions_is_the_blind_spot():
     # ambient: chance ≈ r/d_out = 0.016, observed ≈ r/(2r) = 0.5.
     assert ov.out > 0.3
     assert ov.out_xrandom > ma.OVERLAP_COLLIDING_X
-    # And the signed cosine stays uninformative (independent random mixes).
+    # And the signed cosine stays uninformative (independent random mixes) — so
+    # the sign can't explain the overlap and it stays a genuine collision.
     assert abs(rep.pair_cosine[(0, 1)]) < 0.5
+    assert ov.band == "colliding"
 
 
 def test_random_loras_overlap_near_chance():
@@ -152,6 +159,35 @@ def test_tlora_masked_ranks_do_not_dilute_overlap():
     up_b = torch.cat([core @ torch.randn(2, 2), torch.zeros(48, 2)], dim=1)
     rep = ma.analyze([_lora(down, up_a), _lora(down, up_b)], ["a", "b"])
     assert abs(rep.pair_overlap[(0, 1)].out - 1.0) < 1e-4
+
+
+def test_shared_init_basin_reinforces_not_collides():
+    # The soup case: N adapters fine-tuned from ONE shared uncond init carry a
+    # dominant common-mode ΔW + small per-artist residual → high cos AND high
+    # overlap. That is reinforcement (benign), not a collision — the whole point
+    # of the sign-aware band. The old sign-blind band called every pair here
+    # "colliding", which is exactly backwards for a maximally-constructive merge.
+    torch.manual_seed(11)
+    down_common, up_common = torch.randn(4, 64), torch.randn(48, 4)
+    loaded = []
+    for k in range(4):
+        torch.manual_seed(100 + k)
+        # 0.9·shared + 0.1·noise → strongly aligned, same subspace.
+        down = down_common + 0.1 * torch.randn(4, 64)
+        up = up_common + 0.1 * torch.randn(48, 4)
+        loaded.append(_lora(down, up))
+    rep = ma.analyze(loaded, [f"soup{k}" for k in range(4)])
+    # Net constructive and near-parallel.
+    assert rep.overall_energy_ratio > 1.05
+    for pair, ov in rep.pair_overlap.items():
+        assert rep.pair_cosine[pair] > ma.COS_ALIGNED
+        assert ov.out_xrandom > ma.OVERLAP_COLLIDING_X  # subspaces DO overlap...
+        assert ov.band == "reinforcing"  # ...but that's benign, not a collision
+    # The rendered report must not list any "colliding" module for this merge.
+    text = ma.format_report(rep)
+    assert "most colliding modules" not in text
+    # worst_overlap surfaces the (reinforcing) pair without escalating it.
+    assert rep.worst_overlap[1].band == "reinforcing"
 
 
 def test_marker_payload_carries_overlap():

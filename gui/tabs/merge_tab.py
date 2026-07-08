@@ -710,7 +710,8 @@ class MergeTab(LazyTabMixin, QWidget):
             strength = t(
                 "merge_analysis_strong" if strong else "merge_analysis_moderate"
             )
-            key = "merge_analysis_reinforce" if cos >= 0 else "merge_analysis_cancel"
+            reinforcing = cos >= 0
+            key = "merge_analysis_reinforce" if reinforcing else "merge_analysis_cancel"
             text = t(
                 key,
                 strength=strength,
@@ -721,7 +722,16 @@ class MergeTab(LazyTabMixin, QWidget):
                 shared=shared,
                 modules=modules,
             )
-            sev, bg = ("err", "#3d0a0a") if strong else ("warn", "#3d2e0a")
+            # Reinforcement is benign — the default normalize=global rescales the
+            # aligned sum back to single-LoRA magnitude, so there is no overdrive
+            # (it only signals near-duplicate ingredients ⇒ caution, never a red
+            # alert; common for soup-of-soups off a shared init). Only genuine
+            # cancellation, where the deltas erase each other, goes red when
+            # strong. Mirrors the sign-aware CLI band in library.anima.merge_analysis.
+            if reinforcing:
+                sev, bg = "warn", "#3d2e0a"
+            else:
+                sev, bg = ("err", "#3d0a0a") if strong else ("warn", "#3d2e0a")
 
         self.analysis_label.setText(text)
         self.analysis_label.setStyleSheet(
