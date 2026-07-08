@@ -63,18 +63,20 @@ from library.vision.encoder import (
 logger = logging.getLogger(__name__)
 
 # Auto-fetch repo when ckpt_dir is missing required files. Mirrors the ComfyUI
-# loader's auto-download (custom_nodes/comfyui-anima-tagger/nodes.py); checkpoint
-# lives at the repo root (no version subfolder).
+# loader's auto-download (custom_nodes/comfyui-anima-tagger/nodes.py). The live
+# checkpoint (v3-refit — spatial-head headroom Phase-1) lives under the ``v3/``
+# subfolder; the repo root still holds the legacy v2 files.
 TAGGER_HF_REPO = "sorryhyun/anima-tagger"
+TAGGER_HF_SUBFOLDER = "v3"
 TAGGER_REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
 TAGGER_OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml")
-DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v2"
+DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v3-refit"
 
 
 def ensure_tagger_checkpoint(
     ckpt_dir: str | Path,
     repo: str = TAGGER_HF_REPO,
-    subfolder: str = "",
+    subfolder: str = TAGGER_HF_SUBFOLDER,
 ) -> Path:
     """Fetch the tagger checkpoint into ``ckpt_dir`` if any required file is missing.
 
