@@ -264,6 +264,27 @@ class DaemonClient:
                 return {"error": "no active job"}
         return self._request("POST", f"/jobs/{job_id}/stop")
 
+    def pause_job(self, job_id: Optional[str] = None) -> dict:
+        """Freeze a running job's tree (SIGSTOP). ``None`` → the active job.
+        Returns ``{job_id, state, error?}``; ``error`` on a refusal (wrong state
+        / multi-GPU accelerate run)."""
+        if job_id is None:
+            health = self.health() or {}
+            job_id = health.get("active_job")
+            if not job_id:
+                return {"error": "no active job"}
+        return self._request("POST", f"/jobs/{job_id}/pause")
+
+    def resume_job(self, job_id: Optional[str] = None) -> dict:
+        """Thaw a paused job's tree (SIGCONT) back to running. ``None`` → the
+        active (paused) job. Returns ``{job_id, state, error?}``."""
+        if job_id is None:
+            health = self.health() or {}
+            job_id = health.get("active_job")
+            if not job_id:
+                return {"error": "no active job"}
+        return self._request("POST", f"/jobs/{job_id}/resume")
+
     def shutdown(self, *, kill_jobs: bool = True) -> Optional[dict]:
         try:
             return self._request("POST", "/shutdown", {"kill_jobs": kill_jobs})

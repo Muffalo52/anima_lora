@@ -54,11 +54,12 @@ _REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml
 _OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml")
 
 # The tagger is dual-encoder only (PE-Core + PE-Spatial, hard-routed). The
-# pre-dual single-encoder ``v1`` checkpoint no longer loads. The dual-encoder
-# checkpoint now lives at the repo root of ``sorryhyun/anima-tagger`` (it used
-# to sit under a ``v2/`` subfolder), so no subfolder prefix is needed.
-_HF_SUBFOLDER = ""
-_DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v2"
+# pre-dual single-encoder ``v1`` checkpoint no longer loads. The live
+# checkpoint (v3-refit — spatial-head headroom Phase-1) sits under the ``v3/``
+# subfolder of ``sorryhyun/anima-tagger``; the repo root keeps the legacy v2
+# files.
+_HF_SUBFOLDER = "v3"
+_DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v3-refit"
 
 # Default vision-encoder checkpoints (auto-fetched if absent). Listed as the
 # first dropdown row so a fresh install resolves to the auto-download target
@@ -296,8 +297,8 @@ class AnimaTaggerLoader:
             pe_aux_resolved = Path(pe_aux_str)
             if not pe_aux_resolved.is_absolute():
                 pe_aux_resolved = ANIMA_LORA / pe_aux_resolved
-        # The only loadable architecture is the dual-encoder checkpoint, now at
-        # the root of the HF repo (_HF_SUBFOLDER == "").
+        # The only loadable architecture is the dual-encoder checkpoint, now
+        # under the v3/ subfolder of the HF repo (_HF_SUBFOLDER == "v3").
         _ensure_tagger_dir(tdir, hf_subfolder=_HF_SUBFOLDER)
         device = comfy.model_management.get_torch_device()
         logger.info(

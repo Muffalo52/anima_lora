@@ -63,18 +63,20 @@ from library.vision.encoder import (
 logger = logging.getLogger(__name__)
 
 # Auto-fetch repo when ckpt_dir is missing required files. Mirrors the ComfyUI
-# loader's auto-download (custom_nodes/comfyui-anima-tagger/nodes.py); checkpoint
-# lives at the repo root (no version subfolder).
+# loader's auto-download (custom_nodes/comfyui-anima-tagger/nodes.py). The live
+# checkpoint (v3-refit — spatial-head headroom Phase-1) lives under the ``v3/``
+# subfolder; the repo root still holds the legacy v2 files.
 TAGGER_HF_REPO = "sorryhyun/anima-tagger"
+TAGGER_HF_SUBFOLDER = "v3"
 TAGGER_REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
 TAGGER_OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml")
-DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v2"
+DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v3-refit"
 
 
 def ensure_tagger_checkpoint(
     ckpt_dir: str | Path,
     repo: str = TAGGER_HF_REPO,
-    subfolder: str = "",
+    subfolder: str = TAGGER_HF_SUBFOLDER,
 ) -> Path:
     """Fetch the tagger checkpoint into ``ckpt_dir`` if any required file is missing.
 
@@ -344,6 +346,16 @@ class AnimaTagger:
                 tag_idx = [tag_to_idx[t] for t in g.tags if t in tag_to_idx]
                 if not tag_idx:
                     continue
+                # Sentinel groups carry a synthetic "<none:group>" vocab slot:
+                # appended to the candidate list so argmax can pick "none of
+                # these" and the group emits nothing (vs the legacy behavior
+                # of always emitting a winner).
+                sentinel_local: Optional[int] = None
+                if g.sentinel:
+                    s_idx = tag_to_idx.get(tg.sentinel_tag_name(g.name))
+                    if s_idx is not None:
+                        sentinel_local = len(tag_idx)
+                        tag_idx.append(s_idx)
                 self._group_lookup[g.name] = {
                     "mode": g.mode,
                     "tag_idx": torch.tensor(
@@ -351,6 +363,7 @@ class AnimaTagger:
                     ),
                     "tag_names": tuple(g.tags),
                     "escape_names": tuple(g.escape),
+                    "sentinel_local": sentinel_local,
                 }
             from re import compile as _re_compile
 
@@ -464,10 +477,12 @@ class AnimaTagger:
             self.tag_entries[i].name: float(tag_probs_cpu[i])
             for i in range(self.cfg.n_tags)
         }
+        # Sentinel slots ("<none:group>") are internal rejection classes —
+        # they stay visible in ``scores`` but are never emitted as tags.
         kept = {
             self.tag_entries[i].name: float(tag_probs_cpu[i])
             for i in range(self.cfg.n_tags)
-            if kept_mask[i]
+            if kept_mask[i] and not tg.is_sentinel_name(self.tag_entries[i].name)
         }
         rating_idx = int(rating_probs.argmax().item())
         out: Dict[str, object] = {
@@ -509,12 +524,16 @@ class AnimaTagger:
                 idx_t = info["tag_idx"]
                 group_logits = tag_logits_row.index_select(0, idx_t)
                 winner_local = int(group_logits.argmax().item())
-                winner_idx = int(idx_t[winner_local].item())
-                winner_name = self.tag_entries[winner_idx].name
                 # Drop sigmoid-admitted group tags, re-add the argmax winner with
                 # its sigmoid prob so callers can still inspect a confidence.
                 for t in info["tag_names"]:
                     kept.pop(t, None)
+                if winner_local == info.get("sentinel_local"):
+                    # "None of these" won — the group emits nothing.
+                    group_preds[name] = None
+                    continue
+                winner_idx = int(idx_t[winner_local].item())
+                winner_name = self.tag_entries[winner_idx].name
                 kept[winner_name] = float(tag_probs_cpu[winner_idx])
                 group_preds[name] = winner_name
             out["kept"] = kept
