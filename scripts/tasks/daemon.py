@@ -74,28 +74,111 @@ _STATUS_JOB_FIELDS = (
     "chained_job_id",
 )
 
+# Default job cap for the compact view — the full history grows unboundedly, so
+# a bare `daemon-status` shows only the most-recent slice (newest first). `--all`
+# lifts the cap; `--limit N` sets it. `jobs_total`/`jobs_shown` in the output
+# report the truncation so a capped view never reads as "that's everything".
+_STATUS_DEFAULT_LIMIT = 15
+
+# Shorthand state groups for `--running` / `--failed` / `--done`.
+_STATUS_ACTIVE_STATES = frozenset({"running", "paused"})
+_STATUS_FAILED_STATES = frozenset({"error", "stopped"})
+
+
+def _parse_status_flags(extra):
+    """Parse the ``daemon-status`` filter flags out of ``extra``.
+
+    ``--full`` (raw records) · ``--all`` (no cap) · ``--limit N`` ·
+    ``--state s[,s]`` · ``--running``/``--active`` · ``--failed`` · ``--done``.
+    Unknown tokens are ignored (forward-compatible with the make ARGS shim).
+    """
+    extra = list(extra or [])
+    opts = {"full": False, "all": False, "states": None, "limit": _STATUS_DEFAULT_LIMIT}
+    i = 0
+    while i < len(extra):
+        a = extra[i]
+        if a == "--full":
+            opts["full"] = True
+        elif a == "--all":
+            opts["all"] = True
+        elif a in ("--running", "--active"):
+            opts["states"] = set(_STATUS_ACTIVE_STATES)
+        elif a == "--failed":
+            opts["states"] = set(_STATUS_FAILED_STATES)
+        elif a == "--done":
+            opts["states"] = {"done"}
+        elif a == "--state" and i + 1 < len(extra):
+            i += 1
+            opts["states"] = {s.strip() for s in extra[i].split(",") if s.strip()}
+        elif a == "--limit" and i + 1 < len(extra):
+            i += 1
+            try:
+                opts["limit"] = int(extra[i])
+            except ValueError:
+                pass
+        i += 1
+    return opts
+
+
+def _job_target(job: dict) -> str | None:
+    """Best-effort label for *what* a job operates on — the missing piece when
+    skimming the queue. Command jobs (soup/preprocess/distill) carry it in
+    ``argv`` (``--name`` / ``--path_pattern``, else the ``-m`` module); train jobs
+    carry it as the ``output_name`` override, else fall back to ``method``."""
+    argv = job.get("argv") or []
+    if job.get("kind") == "command":
+        for flag in ("--name", "--path_pattern", "--output_name"):
+            if flag in argv:
+                i = argv.index(flag)
+                if i + 1 < len(argv):
+                    return argv[i + 1]
+        if "-m" in argv:
+            i = argv.index("-m")
+            if i + 1 < len(argv):
+                return argv[i + 1]
+        return argv[0] if argv else None
+    overrides = job.get("overrides") or {}
+    return overrides.get("output_name") or job.get("method")
+
 
 def cmd_daemon_status(extra):
     """Daemon status as one JSON object on stdout — the agent/script surface.
 
     ``{"up", "base_url", "pid", "port", "root", "stale_code", "paused",
-    "active_job", "jobs"}``. Passive: never starts a daemon (safe to poll);
-    ``up: false`` + exit 1 when nothing answers ``/health``. ``base_url`` is
-    resolved from the pidfile each call, so it follows a fallback-to-ephemeral
-    port — read it from here rather than assuming 8765. ``stale_code: true``
-    means the resident daemon is serving source older than the current on-disk
-    ``anima_daemon/*`` — the next submit will eagerly restart it (Phase 0a).
-    Jobs are compact summaries (id/state/error/ckpt_path/…); pass ``--full`` for
-    the raw records.
+    "active_job", "jobs_total", "jobs_shown", "jobs"}``. Passive: never starts a
+    daemon (safe to poll); ``up: false`` + exit 1 when nothing answers
+    ``/health``. ``base_url`` is resolved from the pidfile each call, so it
+    follows a fallback-to-ephemeral port — read it from here rather than assuming
+    8765. ``stale_code: true`` means the resident daemon is serving source older
+    than the current on-disk ``anima_daemon/*`` — the next submit will eagerly
+    restart it (Phase 0a).
+
+    Jobs are compact summaries (id/state/error/ckpt_path/… plus a derived
+    ``target`` = what the job operates on), **newest first** and capped to the
+    most-recent ``_STATUS_DEFAULT_LIMIT``; ``jobs_total`` vs ``jobs_shown`` report
+    any truncation. Filter flags: ``--full`` (raw records) · ``--all`` (no cap) ·
+    ``--limit N`` · ``--state s[,s]`` · ``--running`` · ``--failed`` · ``--done``.
     """
+    opts = _parse_status_flags(extra)
     cl = _client.DaemonClient()
     health = cl.health()
     if health is None:
         print(json.dumps({"up": False, "base_url": None, "jobs": []}))
         sys.exit(1)
     jobs = cl.list_jobs()
-    if "--full" not in (extra or []):
-        jobs = [{k: j.get(k) for k in _STATUS_JOB_FIELDS} for j in jobs]
+    jobs.sort(key=lambda j: j.get("submitted_at") or 0, reverse=True)  # newest first
+    jobs_total = len(jobs)
+    if opts["states"] is not None:
+        jobs = [j for j in jobs if j.get("state") in opts["states"]]
+    if not opts["all"] and opts["limit"] is not None and opts["limit"] >= 0:
+        jobs = jobs[: opts["limit"]]
+    if opts["full"]:
+        out_jobs = [{**j, "target": _job_target(j)} for j in jobs]
+    else:
+        out_jobs = [
+            {**{k: j.get(k) for k in _STATUS_JOB_FIELDS}, "target": _job_target(j)}
+            for j in jobs
+        ]
     print(
         json.dumps(
             {
@@ -107,7 +190,9 @@ def cmd_daemon_status(extra):
                 "stale_code": _client.daemon_is_stale(health),
                 "paused": health.get("paused"),
                 "active_job": health.get("active_job"),
-                "jobs": jobs,
+                "jobs_total": jobs_total,
+                "jobs_shown": len(out_jobs),
+                "jobs": out_jobs,
             },
             indent=2,
         )

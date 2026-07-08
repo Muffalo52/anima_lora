@@ -26,13 +26,25 @@ The daemon auto-starts on first submit — you rarely start it by hand. But:
 python tasks.py daemon            # start it, detached, wait for /health
 python -m anima_daemon          # equivalent (what the spawner runs)
 python tasks.py daemon-status     # one JSON object: health + resolved base_url
-                                  # + compact job summaries (--full for raw
-                                  # records); passive, exit 1 when down
+                                  # + compact job summaries (newest first, capped)
 curl -s 127.0.0.1:8765/health     # {"ok":true,"pid":…,"active_job":…,"paused":…}
 ```
 
 `daemon-status` is the one-shot answer to "is anything running and where do I
 talk to it" — scripts and agents should start there instead of assuming a port.
+Each compact job carries a derived `target` (what it operates on — the soup
+name, the train `output_name`), and `jobs_total`/`jobs_shown` report truncation.
+The job list is **newest first** and capped to the most-recent 15 by default;
+filter it with `ARGS="…"` (or pass the flags directly to the CLI):
+
+```bash
+python tasks.py daemon-status --running        # only running/paused jobs
+python tasks.py daemon-status --failed         # only error/stopped
+python tasks.py daemon-status --state done     # exact state(s), comma-separated
+python tasks.py daemon-status --limit 40       # raise/lower the cap
+python tasks.py daemon-status --all            # no cap (full history)
+python tasks.py daemon-status --full           # raw records, not compact
+```
 
 The port is **not** guaranteed to be 8765: if a stranger holds that port the
 daemon falls back to an OS-chosen one and records it in the pidfile. Always

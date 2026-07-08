@@ -1089,13 +1089,25 @@ def test_daemon_status_json(daemon, monkeypatch, capsys):
     assert out["base_url"] == cl.base
     assert out["stale_code"] is False  # in-process daemon shares current source
     assert any(j["id"] == jid for j in out["jobs"])
-    # compact by default: heavy record fields are stripped…
+    # compact by default: heavy record fields are stripped, target is derived…
     assert "argv" not in out["jobs"][0] and "extra_env" not in out["jobs"][0]
+    assert "target" in out["jobs"][0]
+    # …truncation is reported honestly
+    assert out["jobs_total"] >= 1 and out["jobs_shown"] == len(out["jobs"])
 
-    # …and --full restores the raw records
+    # …and --full restores the raw records (still with a derived target)
     daemon_tasks.cmd_daemon_status(["--full"])
     full = json.loads(capsys.readouterr().out)
-    assert "argv" in full["jobs"][0]
+    assert "argv" in full["jobs"][0] and "target" in full["jobs"][0]
+
+    # --limit caps the list without hiding the total; --state filters it
+    daemon_tasks.cmd_daemon_status(["--limit", "0"])
+    capped = json.loads(capsys.readouterr().out)
+    assert capped["jobs"] == [] and capped["jobs_total"] >= 1
+
+    daemon_tasks.cmd_daemon_status(["--state", "no-such-state"])
+    filtered = json.loads(capsys.readouterr().out)
+    assert filtered["jobs"] == [] and filtered["jobs_total"] >= 1
 
 
 def test_daemon_status_down_exits_1(monkeypatch, capsys):
