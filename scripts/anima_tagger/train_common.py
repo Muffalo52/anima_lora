@@ -34,6 +34,49 @@ def pos_weight_sqrt(multi_hot: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(n_neg / n_pos)
 
 
+# Spatial-branch submodule prefixes (see AnimaTaggerHead): the PE-Spatial pool,
+# its projection trunk, and the localized-tag sub-head. Disjoint from the core /
+# rating / people params, which is what makes the spatial-only refit stage a
+# clean freeze and the spatial param-group a real (non-loss-scaling) lever.
+_SPATIAL_PARAM_PREFIXES = ("pool_spatial.", "trunk_spatial.", "tag_head_spatial.")
+
+
+def spatial_param_names(model: torch.nn.Module) -> set[str]:
+    """Names of the parameters that belong to the PE-Spatial branch.
+
+    A parameter is spatial iff its dotted name starts with one of the spatial
+    submodule prefixes. Everything else (core pool/trunk, tag_head_core,
+    rating_head, people_head) is the "rest" partition.
+    """
+    return {
+        name
+        for name, _ in model.named_parameters()
+        if name.startswith(_SPATIAL_PARAM_PREFIXES)
+    }
+
+
+def spatial_mean_ap(
+    tag_logits: torch.Tensor,  # [B, n_tags]
+    multi_hot: torch.Tensor,  # [B, n_tags]
+    spatial_idx: torch.Tensor,  # LongTensor [n_spatial]
+) -> float:
+    """Threshold-free mean AP over the spatial-routed tags (softmax-inclusive).
+
+    This is the metric the ceiling probe optimizes and the one the deployed
+    macro-F1 was blind to: it (a) restricts to ``tag_indices_spatial`` (the
+    branch that floors) and (b) unlike the trainer's macro-F1, does NOT drop
+    softmax-group tags — AP is threshold-free, so eye/hair-color group tags
+    count. NaN per-tag APs (no positives in the split) are ignored by the
+    nan-mean, matching ``bench/tagger_ceiling``.
+    """
+    from .eval_metrics import per_tag_average_precision
+
+    sub_logits = tag_logits.index_select(1, spatial_idx.to(tag_logits.device))
+    sub_target = multi_hot.index_select(1, spatial_idx.to(multi_hot.device))
+    ap = per_tag_average_precision(sub_logits.float(), sub_target)
+    return float(ap.nanmean().item())
+
+
 def build_warmup_cosine_scheduler(
     opt: torch.optim.Optimizer,
     *,

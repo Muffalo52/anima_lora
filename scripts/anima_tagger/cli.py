@@ -335,6 +335,59 @@ def parse_args() -> argparse.Namespace:
         "if the manifest carries labels).",
     )
 
+    # ── Spatial-branch headroom levers (docs/proposal/tagger_spatial_head_headroom.md) ──
+    # bench/tagger_ceiling showed the spatial branch floors ~0.12 AP below an
+    # isolated same-arch head. The trunks are disjoint, so the fix is selection +
+    # optimization, not loss-scaling (AdamW cancels a uniform spatial up-weight).
+    p.add_argument(
+        "--select_metric",
+        choices=["macro_f1", "spatial_ap"],
+        default="macro_f1",
+        help="Which val metric selects the best checkpoint. 'macro_f1' (default, "
+        "legacy) EXCLUDES softmax-group tags and mixes in the near-solved core "
+        "slices, so it is blind to the spatial branch's floor. 'spatial_ap' — "
+        "threshold-free mean AP over the PE-Spatial-routed tags "
+        "(softmax-inclusive), matching bench/tagger_ceiling — is the right "
+        "selection signal for the localized-semantic slices.",
+    )
+    p.add_argument(
+        "--spatial_refit_epochs",
+        type=int,
+        default=0,
+        help="If > 0, run a second stage after joint training that FREEZES the "
+        "core / rating / people params and refits only the spatial branch "
+        "(pool_spatial + trunk_spatial + tag_head_spatial) for N epochs, "
+        "selecting on val spatial_ap. Reproduces the isolated-branch ceiling "
+        "(bench/tagger_ceiling dep_arch__nobal, +0.123 AP) while guaranteeing "
+        "the identity/core slices cannot regress. The refit is kept only if it "
+        "beats the joint checkpoint's spatial_ap. 0 (default) = joint-only, "
+        "bit-identical to the pre-refit path.",
+    )
+    p.add_argument(
+        "--spatial_refit_lr",
+        type=float,
+        default=None,
+        help="LR for the spatial refit stage (default: reuse --lr). Only read "
+        "when --spatial_refit_epochs > 0.",
+    )
+    p.add_argument(
+        "--lr_spatial",
+        type=float,
+        default=None,
+        help="Override LR for the spatial branch param-group in the JOINT stage. "
+        "None (default) = single param-group, bit-identical to the pre-lever "
+        "path. A higher spatial LR is a real lever (the trunks are disjoint, so "
+        "unlike a loss up-weight it is not cancelled by AdamW normalization).",
+    )
+    p.add_argument(
+        "--wd_spatial",
+        type=float,
+        default=None,
+        help="Override weight-decay for the spatial branch param-group (joint "
+        "stage) and the refit optimizer. None (default) = inherit "
+        "--weight_decay.",
+    )
+
     p.add_argument(
         "--image",
         default=None,

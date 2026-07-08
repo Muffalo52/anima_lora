@@ -33,6 +33,8 @@ from .train_common import (
     people_class_weights,
     rating_class_weights,
     save_history_plot,
+    spatial_mean_ap,
+    spatial_param_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,7 +142,7 @@ def _make_cfg_from_args(
     )
 
 
-def _save_cfg_dict(args, cfg, d_in, best_f1):
+def _save_cfg_dict(args, cfg, d_in, best_f1, best_ap=None):
     return {
         "model": cfg.to_dict(),
         "encoder": args.encoder,
@@ -148,6 +150,11 @@ def _save_cfg_dict(args, cfg, d_in, best_f1):
         "d_in": d_in,
         "d_in_aux": cfg.d_in_aux,
         "best_val_macro_f1": best_f1,
+        "best_val_spatial_ap": best_ap,
+        "select_metric": getattr(args, "select_metric", "macro_f1"),
+        "spatial_refit_epochs": int(getattr(args, "spatial_refit_epochs", 0) or 0),
+        "lr_spatial": getattr(args, "lr_spatial", None),
+        "wd_spatial": getattr(args, "wd_spatial", None),
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "lr": args.lr,
@@ -179,11 +186,17 @@ def _eval_via_token_loader(
     lambda_rating: float,
     lambda_people: float,
     threshold: float = 0.5,
+    spatial_idx: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     """Run val through the paired-token DataLoader and compute the macro
     metrics. Logits are concatenated across buckets before metric reduction
     so macro-F1 / per-group accuracy are over the full val set. Batch format
     is ``(tokens, tokens_aux, mh, rate, people, bucket_pair)``.
+
+    When ``spatial_idx`` is given, also reports ``spatial_ap`` — threshold-free
+    mean AP over the spatial-routed tags (softmax-inclusive). That is the
+    model-selection signal the deployed macro-F1 was blind to (macro-F1 drops
+    softmax-group tags and mixes in the near-solved core slices).
     """
     model.eval()
     tag_chunks: List[torch.Tensor] = []
@@ -257,6 +270,8 @@ def _eval_via_token_loader(
             (people_logits.argmax(dim=-1) == people_idx).float().mean().item()
         )
     out["val_loss"] = val_l_total.item()
+    if spatial_idx is not None:
+        out["spatial_ap"] = spatial_mean_ap(tag_logits, multi_hot, spatial_idx)
 
     # Per-softmax-group argmax accuracy.
     if router.is_active():
@@ -295,6 +310,240 @@ def _eval_via_token_loader(
             out[f"acc_{g.name}"] = (pred_idx == true_idx).float().mean().item()
             out[f"n_{g.name}"] = n_keep
     return out
+
+
+def _build_optimizer(
+    model,
+    args,
+    *,
+    spatial_names: Optional[set] = None,
+) -> torch.optim.Optimizer:
+    """AdamW over the model. When ``--lr_spatial``/``--wd_spatial`` is set, the
+    spatial branch (``spatial_names``) rides its own param-group so it can take a
+    different LR / weight-decay than the core/rating/people params.
+
+    With neither override set this returns a single param-group AdamW that is
+    bit-identical to the pre-param-group path (verified by test). Because the two
+    trunks are disjoint, a spatial LR/WD is a *real* optimization lever — unlike
+    a uniform loss up-weight, which AdamW's per-parameter normalization cancels.
+    """
+    lr_spatial = getattr(args, "lr_spatial", None)
+    wd_spatial = getattr(args, "wd_spatial", None)
+    fused = torch.cuda.is_available()
+    if (lr_spatial is None and wd_spatial is None) or not spatial_names:
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            fused=fused,
+        )
+    spatial_params, rest_params = [], []
+    for name, p in model.named_parameters():
+        (spatial_params if name in spatial_names else rest_params).append(p)
+    groups = [
+        {"params": rest_params, "lr": args.lr, "weight_decay": args.weight_decay},
+        {
+            "params": spatial_params,
+            "lr": args.lr if lr_spatial is None else lr_spatial,
+            "weight_decay": (args.weight_decay if wd_spatial is None else wd_spatial),
+        },
+    ]
+    logger.info(
+        "spatial param-group: lr=%.2e wd=%.4g (core lr=%.2e wd=%.4g)",
+        groups[1]["lr"],
+        groups[1]["weight_decay"],
+        groups[0]["lr"],
+        groups[0]["weight_decay"],
+    )
+    return torch.optim.AdamW(groups, fused=fused)
+
+
+def _run_train_stage(
+    *,
+    model,
+    opt,
+    sched,
+    train_loader,
+    val_loader,
+    epochs: int,
+    device,
+    router: GroupRouter,
+    ce: torch.nn.Module,
+    ce_people: Optional[torch.nn.Module],
+    args: argparse.Namespace,
+    spatial_idx: torch.Tensor,
+    select_metric: str,
+    stage: str,
+    start_epoch: int = 0,
+    also_track: Tuple[str, ...] = (),
+) -> Tuple[
+    Dict[str, torch.Tensor],
+    Dict[str, float],
+    List[Dict[str, float]],
+    Dict[str, Tuple[Dict[str, torch.Tensor], Dict[str, float]]],
+]:
+    """Run ``epochs`` of train+val, tracking the best checkpoint by
+    ``select_metric`` (``"macro_f1"`` or ``"spatial_ap"``).
+
+    Returns ``(best_state, best_val_metrics, history, extra_best)``.
+    ``best_state`` is a CPU clone of the full ``state_dict`` at the epoch that
+    maximized ``select_metric``; frozen params (during a refit stage) simply
+    pass through unchanged. ``extra_best`` maps each metric named in
+    ``also_track`` to its own ``(best_state, best_val_metrics)`` — used to keep
+    the best-``macro_f1`` checkpoint (the legacy selection criterion) alongside
+    the primary ``spatial_ap`` one, so a single run compares on both axes.
+    Epoch numbers in ``history`` start at ``start_epoch + 1`` so a two-stage
+    run reads as one continuous curve.
+    """
+    from tqdm import tqdm as _tqdm
+
+    postfix_every = max(1, int(getattr(args, "postfix_every", 10)))
+    best_val = -1.0
+    best_state: Dict[str, torch.Tensor] = {}
+    best_metrics: Dict[str, float] = {}
+    history: List[Dict[str, float]] = []
+    extra_best: Dict[str, Tuple[Dict[str, torch.Tensor], Dict[str, float]]] = {}
+    extra_val = {m: -1.0 for m in also_track}
+
+    for epoch in range(epochs):
+        train_loader.batch_sampler.set_epoch(start_epoch + epoch)
+        model.train()
+        ep_loss = torch.zeros((), device=device)
+        ep_tag_loss = torch.zeros((), device=device)
+        ep_rate_loss = torch.zeros((), device=device)
+        ep_people_loss = torch.zeros((), device=device)
+        n_batches = 0
+        bar = _tqdm(
+            train_loader,
+            desc=f"{stage} ep {epoch + 1}/{epochs}",
+            leave=False,
+            unit="step",
+        )
+        for step, batch in enumerate(bar):
+            tokens, tokens_aux, mh_cpu, rate_cpu, people_cpu, _bucket = batch
+            tokens = tokens.to(device, non_blocking=True)
+            tokens_aux = tokens_aux.to(device, non_blocking=True)
+            mh = mh_cpu.to(device, non_blocking=True)
+            rate = rate_cpu.to(device, non_blocking=True)
+            people = people_cpu.to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                tag_logits, rating_logits, people_logits = model(tokens, tokens_aux)
+                l_tag, _per_group = compute_grouped_loss(
+                    tag_logits,
+                    mh,
+                    router,
+                    label_smooth=args.label_smooth,
+                    inactive_neg_weight=args.inactive_neg_weight,
+                    ce_maxsup=args.ce_maxsup,
+                )
+                l_rate = ce(rating_logits, rate)
+                use_maxsup = args.ce_maxsup and args.label_smooth > 0.0
+                if use_maxsup:
+                    l_rate = l_rate + args.label_smooth * maxsup_term(rating_logits)
+                loss = l_tag + args.lambda_rating * l_rate
+                if ce_people is not None and people_logits is not None:
+                    l_people = ce_people(people_logits, people)
+                    if use_maxsup:
+                        l_people = l_people + args.label_smooth * maxsup_term(
+                            people_logits
+                        )
+                    loss = loss + args.lambda_people * l_people
+                else:
+                    l_people = loss.new_zeros(())
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            sched.step()
+            ep_loss += loss.detach()
+            ep_tag_loss += l_tag.detach()
+            ep_rate_loss += l_rate.detach()
+            ep_people_loss += l_people.detach()
+            n_batches += 1
+            if step % postfix_every == 0:
+                postfix = {
+                    "loss": f"{loss.item():.4f}",
+                    "tag": f"{l_tag.item():.4f}",
+                    "rate": f"{l_rate.item():.4f}",
+                }
+                if ce_people is not None and people_logits is not None:
+                    postfix["ppl"] = f"{l_people.item():.4f}"
+                bar.set_postfix(**postfix)
+        denom = max(n_batches, 1)
+        avg_loss = (ep_loss / denom).item()
+        avg_tag = (ep_tag_loss / denom).item()
+        avg_rate = (ep_rate_loss / denom).item()
+        avg_people = (ep_people_loss / denom).item()
+        val_metrics = _eval_via_token_loader(
+            model,
+            val_loader,
+            device=device,
+            router=router,
+            ce=ce,
+            ce_people=ce_people,
+            lambda_rating=args.lambda_rating,
+            lambda_people=args.lambda_people,
+            spatial_idx=spatial_idx,
+        )
+        people_acc = val_metrics.get("people_acc", float("nan"))
+        people_loss = val_metrics.get("val_people_loss", float("nan"))
+        logger.info(
+            "[%s] epoch %2d/%d  loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
+            "val_loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
+            "val_f1=%.4f  spatial_ap=%.4f  rate_acc=%.4f  people_acc=%.4f  lr=%.2e",
+            stage,
+            start_epoch + epoch + 1,
+            start_epoch + epochs,
+            avg_loss,
+            avg_tag,
+            avg_rate,
+            avg_people,
+            val_metrics["val_loss"],
+            val_metrics["val_tag_loss"],
+            val_metrics["val_rate_loss"],
+            people_loss,
+            val_metrics["macro_f1"],
+            val_metrics.get("spatial_ap", float("nan")),
+            val_metrics["rating_acc"],
+            people_acc,
+            sched.get_last_lr()[-1],
+        )
+        history.append(
+            {
+                "epoch": start_epoch + epoch + 1,
+                "stage": stage,
+                "loss": avg_loss,
+                "tag_loss": avg_tag,
+                "rate_loss": avg_rate,
+                "people_loss": avg_people,
+                **val_metrics,
+            }
+        )
+        sel = val_metrics.get(select_metric)
+        if sel is None:
+            raise SystemExit(
+                f"select_metric={select_metric!r} not in val metrics "
+                f"{sorted(val_metrics)}"
+            )
+        snapshot = None  # lazily cloned once per epoch if any tracker improves
+        if sel > best_val:
+            best_val = sel
+            best_metrics = dict(val_metrics)
+            snapshot = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
+            best_state = snapshot
+        for m in also_track:
+            mv = val_metrics.get(m)
+            if mv is not None and mv > extra_val[m]:
+                extra_val[m] = mv
+                if snapshot is None:
+                    snapshot = {
+                        k: v.detach().cpu().clone()
+                        for k, v in model.state_dict().items()
+                    }
+                extra_best[m] = (snapshot, dict(val_metrics))
+
+    return best_state, best_metrics, history, extra_best
 
 
 def _train_cached_dual(args: argparse.Namespace) -> None:
@@ -524,12 +773,15 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     train_loader = DataLoader(train_ds, batch_sampler=train_sampler, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_sampler=val_sampler, **loader_kwargs)
 
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        fused=torch.cuda.is_available(),
-    )
+    # Spatial-routed tag indices — the branch that floors (bench/tagger_ceiling)
+    # and the target of both the spatial_ap selection metric and the refit stage.
+    spatial_idx = torch.tensor(routing[1], dtype=torch.long, device=device)
+    spatial_names = spatial_param_names(model)
+    select_metric = getattr(args, "select_metric", "macro_f1")
+    if select_metric not in ("macro_f1", "spatial_ap"):
+        raise SystemExit(f"unknown --select_metric {select_metric!r}")
+
+    opt = _build_optimizer(model, args, spatial_names=spatial_names)
     sched = build_warmup_cosine_scheduler(
         opt,
         warmup_steps=int(getattr(args, "warmup_steps", 0)),
@@ -537,148 +789,141 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         eta_min=args.lr * 0.05,
     )
 
-    best_f1 = -1.0
-    best_state: Dict[str, torch.Tensor] = {}
-    history: List[Dict[str, float]] = []
+    logger.info(
+        "joint stage: %d epochs, selecting best checkpoint on val %s",
+        args.epochs,
+        select_metric,
+    )
+    # Always track the legacy macro_f1-best checkpoint too (the v2 selection
+    # criterion) so a single run compares on both axes without a second train.
+    also = tuple({"macro_f1"} - {select_metric})
+    best_state, best_metrics, history, extra_best = _run_train_stage(
+        model=model,
+        opt=opt,
+        sched=sched,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=args.epochs,
+        device=device,
+        router=router,
+        ce=ce,
+        ce_people=ce_people,
+        args=args,
+        spatial_idx=spatial_idx,
+        select_metric=select_metric,
+        stage="joint",
+        also_track=also,
+    )
+    if not best_state:
+        raise SystemExit("no epochs ran — empty training set?")
 
-    from tqdm import tqdm as _tqdm
+    # Persist the joint best-macro_f1 checkpoint as a reference sibling — same
+    # recipe/seed as v2, selected by v2's criterion, so it doubles as a v2
+    # reproduction and the honest "old metric" baseline for the comparison.
+    macro_ref = extra_best.get("macro_f1")
+    if macro_ref is not None:
+        macro_state, macro_metrics = macro_ref
+        from safetensors.torch import save_file as _st_save
 
-    postfix_every = max(1, int(getattr(args, "postfix_every", 10)))
-
-    for epoch in range(args.epochs):
-        train_sampler.set_epoch(epoch)
-        model.train()
-        ep_loss = torch.zeros((), device=device)
-        ep_tag_loss = torch.zeros((), device=device)
-        ep_rate_loss = torch.zeros((), device=device)
-        ep_people_loss = torch.zeros((), device=device)
-        n_batches = 0
-        bar = _tqdm(
-            train_loader,
-            desc=f"ep {epoch + 1}/{args.epochs}",
-            leave=False,
-            unit="step",
+        _st_save(macro_state, str(out_dir / "model.macro_f1.safetensors"))
+        logger.info(
+            "saved joint best-macro_f1 reference ckpt: macro_f1=%.4f spatial_ap=%.4f "
+            "→ model.macro_f1.safetensors",
+            macro_metrics.get("macro_f1", float("nan")),
+            macro_metrics.get("spatial_ap", float("nan")),
         )
-        for step, batch in enumerate(bar):
-            tokens, tokens_aux, mh_cpu, rate_cpu, people_cpu, _bucket = batch
-            tokens = tokens.to(device, non_blocking=True)
-            tokens_aux = tokens_aux.to(device, non_blocking=True)
-            mh = mh_cpu.to(device, non_blocking=True)
-            rate = rate_cpu.to(device, non_blocking=True)
-            people = people_cpu.to(device, non_blocking=True)
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                tag_logits, rating_logits, people_logits = model(tokens, tokens_aux)
-                l_tag, _per_group = compute_grouped_loss(
-                    tag_logits,
-                    mh,
-                    router,
-                    label_smooth=args.label_smooth,
-                    inactive_neg_weight=args.inactive_neg_weight,
-                    ce_maxsup=args.ce_maxsup,
-                )
-                l_rate = ce(rating_logits, rate)
-                # MaxSup extends to the single-label heads too (they carry no
-                # label smoothing, so this is purely additive regularization).
-                use_maxsup = args.ce_maxsup and args.label_smooth > 0.0
-                if use_maxsup:
-                    l_rate = l_rate + args.label_smooth * maxsup_term(rating_logits)
-                loss = l_tag + args.lambda_rating * l_rate
-                if ce_people is not None and people_logits is not None:
-                    l_people = ce_people(people_logits, people)
-                    if use_maxsup:
-                        l_people = l_people + args.label_smooth * maxsup_term(
-                            people_logits
-                        )
-                    loss = loss + args.lambda_people * l_people
-                else:
-                    l_people = loss.new_zeros(())
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            sched.step()
-            ep_loss += loss.detach()
-            ep_tag_loss += l_tag.detach()
-            ep_rate_loss += l_rate.detach()
-            ep_people_loss += l_people.detach()
-            n_batches += 1
-            if step % postfix_every == 0:
-                postfix = {
-                    "loss": f"{loss.item():.4f}",
-                    "tag": f"{l_tag.item():.4f}",
-                    "rate": f"{l_rate.item():.4f}",
-                }
-                if ce_people is not None and people_logits is not None:
-                    postfix["ppl"] = f"{l_people.item():.4f}"
-                bar.set_postfix(**postfix)
-        denom = max(n_batches, 1)
-        avg_loss = (ep_loss / denom).item()
-        avg_tag = (ep_tag_loss / denom).item()
-        avg_rate = (ep_rate_loss / denom).item()
-        avg_people = (ep_people_loss / denom).item()
-        val_metrics = _eval_via_token_loader(
-            model,
-            val_loader,
+
+    # ── Spatial-only refit stage (option c of the headroom proposal) ──
+    # Freeze the core / rating / people params (disjoint from the spatial branch)
+    # and refit pool_spatial + trunk_spatial + tag_head_spatial from the joint
+    # best_state on the SAME grouped objective. Because the frozen heads share no
+    # weights with the spatial branch, this reproduces the isolated-branch ceiling
+    # while guaranteeing the near-solved identity/core slices cannot regress.
+    refit_epochs = int(getattr(args, "spatial_refit_epochs", 0) or 0)
+    if refit_epochs > 0:
+        logger.info(
+            "spatial refit stage: %d epochs, freezing %d non-spatial params, "
+            "selecting on val spatial_ap (joint best spatial_ap=%.4f)",
+            refit_epochs,
+            sum(1 for n, _ in model.named_parameters() if n not in spatial_names),
+            best_metrics.get("spatial_ap", float("nan")),
+        )
+        model.load_state_dict(best_state)
+        for name, p in model.named_parameters():
+            p.requires_grad_(name in spatial_names)
+        refit_lr = getattr(args, "spatial_refit_lr", None) or args.lr
+        refit_opt = torch.optim.AdamW(
+            [p for n, p in model.named_parameters() if n in spatial_names],
+            lr=refit_lr,
+            weight_decay=(
+                args.wd_spatial
+                if getattr(args, "wd_spatial", None) is not None
+                else args.weight_decay
+            ),
+            fused=torch.cuda.is_available(),
+        )
+        refit_sched = build_warmup_cosine_scheduler(
+            refit_opt,
+            warmup_steps=int(getattr(args, "warmup_steps", 0)),
+            total_steps=max(refit_epochs * len(train_loader), 1),
+            eta_min=refit_lr * 0.05,
+        )
+        refit_state, refit_metrics, refit_history, _ = _run_train_stage(
+            model=model,
+            opt=refit_opt,
+            sched=refit_sched,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=refit_epochs,
             device=device,
             router=router,
             ce=ce,
             ce_people=ce_people,
-            lambda_rating=args.lambda_rating,
-            lambda_people=args.lambda_people,
+            args=args,
+            spatial_idx=spatial_idx,
+            select_metric="spatial_ap",
+            stage="refit",
+            start_epoch=args.epochs,
         )
-        people_acc = val_metrics.get("people_acc", float("nan"))
-        people_loss = val_metrics.get("val_people_loss", float("nan"))
-        logger.info(
-            "epoch %2d/%d  loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
-            "val_loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
-            "val_f1=%.4f  val_p=%.4f  val_r=%.4f  rate_acc=%.4f  people_acc=%.4f  lr=%.2e",
-            epoch + 1,
-            args.epochs,
-            avg_loss,
-            avg_tag,
-            avg_rate,
-            avg_people,
-            val_metrics["val_loss"],
-            val_metrics["val_tag_loss"],
-            val_metrics["val_rate_loss"],
-            people_loss,
-            val_metrics["macro_f1"],
-            val_metrics["macro_precision"],
-            val_metrics["macro_recall"],
-            val_metrics["rating_acc"],
-            people_acc,
-            sched.get_last_lr()[0],
-        )
-        history.append(
-            {
-                "epoch": epoch + 1,
-                "loss": avg_loss,
-                "tag_loss": avg_tag,
-                "rate_loss": avg_rate,
-                "people_loss": avg_people,
-                **val_metrics,
-            }
-        )
-        if val_metrics["macro_f1"] > best_f1:
-            best_f1 = val_metrics["macro_f1"]
-            best_state = {
-                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
-            }
+        history = history + refit_history
+        # Only accept the refit if it actually improved spatial_ap over the joint
+        # best — otherwise the frozen-core joint checkpoint already dominates.
+        joint_ap = best_metrics.get("spatial_ap", -1.0)
+        refit_ap = refit_metrics.get("spatial_ap", -1.0)
+        if refit_state and refit_ap >= joint_ap:
+            logger.info(
+                "refit accepted: spatial_ap %.4f → %.4f (+%.4f)",
+                joint_ap,
+                refit_ap,
+                refit_ap - joint_ap,
+            )
+            best_state, best_metrics = refit_state, refit_metrics
+        else:
+            logger.info(
+                "refit rejected: spatial_ap %.4f (joint) ≥ %.4f (refit) — keeping joint",
+                joint_ap,
+                refit_ap,
+            )
+        # Leave the module in a fully-trainable state for any downstream reuse.
+        for p in model.parameters():
+            p.requires_grad_(True)
 
-    if not best_state:
-        raise SystemExit("no epochs ran — empty training set?")
-
+    best_f1 = best_metrics.get("macro_f1", -1.0)
+    best_ap = best_metrics.get("spatial_ap", float("nan"))
     ckpt_path = out_dir / "model.safetensors"
     cfg_path = out_dir / "config.json"
     history_path = out_dir / "train_history.json"
     st_save(best_state, str(ckpt_path))
     with open(cfg_path, "w") as f:
-        json.dump(_save_cfg_dict(args, cfg, train_ds.d_in, best_f1), f, indent=2)
+        json.dump(
+            _save_cfg_dict(args, cfg, train_ds.d_in, best_f1, best_ap), f, indent=2
+        )
     with open(history_path, "w") as f:
         json.dump(history, f, indent=2)
     plot_path = out_dir / "train_history.png"
     save_history_plot(history, plot_path)
     logger.info("wrote %s / %s / %s / %s", ckpt_path, cfg_path, history_path, plot_path)
-    print(f"  best val macro_f1: {best_f1:.4f}")
+    print(f"  best val macro_f1: {best_f1:.4f}  spatial_ap: {best_ap:.4f}")
 
 
 def cmd_train_cached(args: argparse.Namespace) -> None:
