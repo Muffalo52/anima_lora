@@ -11,9 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-## Test candidates: flow shift to 2
-
-output_name = "anima_turbo_T750"
+output_name = "anima_superturbo_A"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -58,28 +56,14 @@ attn_mode = "flash"
 # drive per-step head selection — use AnimaTurboPerStepExpertLoader).
 per_step_expert = false
 
-# OrthoInit (use_ortho_init) per stack: seed each adapted Linear with a trainable
-# top-r SVD basis of W0 + a zero-init lambda (dW=0 at init, so the start-zero
-# invariant holds), giving a W0-aligned warm start with full LoRA expressivity.
-# Distills to a plain LoRA at save, so the turbo output stays mergeable. The
-# benefit lands on the STUDENT (fixes "ortho feels too weak"); the fake/critic is
-# a fast-refit score net, so leave it off unless A/B'ing. student_ortho_init is
-# incompatible with per_step_expert (StepExpertLoRAModule has no ortho-init path).
-
-# student_ortho_init = true
-# fake_ortho_init = false
-# fake_down_init = "weight_svd"   # same SVD-Down lever on the fake/critic
-                                  # (default "kaiming"; off under fake_ortho_init)
-
-# SVD-Down (down_init="weight_svd") — the wide-tangent ALTERNATIVE to OrthoInit
-# for the student. OrthoInit cold-starts the student (~25x smaller step-1 dW than
-# plain LoRA; the defect this distiller exposed — docs/proposal/svd_down_lora_init.md);
-# SVD-Down keeps plain LoRA's full first-step tangent but seeds lora_down from W0's
-# top-r right singular vectors (scale-matched, so it is NOT a larger step). Distills
-# to a plain mergeable LoRA exactly like the default. To A/B it, set
-# student_ortho_init = false above and uncomment the next line (they are mutually
-# exclusive — weight_svd needs the plain LoRAModule; also off under per_step_expert).
+# SVD-Down (down_init="weight_svd") — an alternative cold start for the student:
+# keeps plain LoRA's full first-step tangent but seeds lora_down from W0's top-r
+# right singular vectors (scale-matched, so it is NOT a larger step; see
+# docs/proposal/svd_down_lora_init.md). Distills to a plain mergeable LoRA exactly
+# like the default. Needs the plain LoRAModule, so it is off under per_step_expert,
+# and it is moot under the warm start below (which overwrites the seed anyway).
 # student_down_init = "weight_svd"
+# fake_down_init = "weight_svd"   # same lever on the fake/critic
 
 # Warm start — seed the stack's ΔW from a plain LoRA checkpoint, SVD-truncated
 # to the stack's rank (networks/methods/turbo_dmd.py::warm_start_plain_lora).
@@ -87,7 +71,7 @@ per_step_expert = false
 # scripts/extract_delta_lora.py; eval + rationale: memory
 # project_official_turbo_v10_eval — official is polished but mode-collapsed, so
 # start there and let the DP-DMD diversity objective re-expand the modes).
-# Incompatible with per_step_expert / ortho_init / down_init="weight_svd" —
+# Incompatible with per_step_expert / down_init="weight_svd" —
 # set student_down_init = "kaiming" when enabling. fake_init_weights (same
 # lever on the critic) usually points at the same file: at init the student IS
 # the warm-start distribution, so a matched critic starts calibrated.
@@ -98,7 +82,7 @@ fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
 
 # DMD schedule.
 [dmd]
-student_steps = 4               # N — student rolls N Euler steps; inference matches (--infer_steps 4)
+student_steps = 2               # N — student rolls N Euler steps; inference matches (--infer_steps 4)
 teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
@@ -109,7 +93,7 @@ grad_step = "random"
 student_lr = 1e-5
 fake_lr = 2e-5
 fake_steps_per_student_step = 4
-fake_warmup_steps = 50
+fake_warmup_steps = 200
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
 

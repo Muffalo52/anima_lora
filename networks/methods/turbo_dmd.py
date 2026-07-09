@@ -304,8 +304,6 @@ class TurboDMDNetwork:
         use_custom_down_autograd: bool = False,
         channel_scaling_alpha: float = 0.0,
         student_step_expert_K: int = 0,
-        student_ortho_init: bool = False,
-        fake_ortho_init: bool = False,
         student_down_init: str = "kaiming",
         fake_down_init: str = "kaiming",
         gan_feature_indices: set[int] | None = None,
@@ -329,63 +327,31 @@ class TurboDMDNetwork:
         # plain single-head LoRA. 0/1 = the shipped single-head student.
         self.student_step_expert_K = int(student_step_expert_K)
 
-        # OrthoInit (use_ortho_init): trainable top-r SVD seed of W0 + lambda
-        # (lambda=0 -> dW=0 at init, so the start-zero invariant below holds).
-        # A W0-aligned warm start with FULL LoRA expressivity that distills to a
-        # standard LoRA at save, so the turbo output stays a plain mergeable LoRA.
-        # Non-MoE only: the resolver raises if it ever meets use_moe_style, and it
-        # is NOT compatible with the per-step-expert student (StepExpertLoRAModule
-        # is not ortho-init-aware), so guard that combo here.
-        self.student_ortho_init = bool(student_ortho_init)
-        self.fake_ortho_init = bool(fake_ortho_init)
-        if self.student_ortho_init and self.student_step_expert_K > 1:
-            raise ValueError(
-                "student_ortho_init=True is incompatible with the per-step-expert "
-                "student (step_expert_K>1): StepExpertLoRAModule has no OrthoInit "
-                "path. Disable per_step_expert or student_ortho_init."
-            )
-
         # SVD-Down init (down_init="weight_svd"): seed the plain-LoRA student's
-        # lora_down from W0's top-r right singular vectors (scale-matched), the
-        # wide-tangent alternative to OrthoInit's cold start (the defect this
-        # student exposed — _archive/proposals/svd_down_lora_init.md). It targets the
-        # plain LoRAModule only, so it is mutually exclusive with both ortho_init
-        # (different module class → down_init silently inert) and per-step-expert.
+        # lora_down from W0's top-r right singular vectors (scale-matched) —
+        # _archive/proposals/svd_down_lora_init.md. It targets the plain LoRAModule
+        # only, so it is mutually exclusive with the per-step-expert student.
         self.student_down_init = str(student_down_init)
         if self.student_down_init not in ("kaiming", "weight_svd"):
             raise ValueError(
                 f"student_down_init={self.student_down_init!r}: "
                 "expected 'kaiming' or 'weight_svd'."
             )
-        if self.student_down_init == "weight_svd":
-            if self.student_ortho_init:
-                raise ValueError(
-                    "student_down_init='weight_svd' and student_ortho_init=True are "
-                    "mutually exclusive: ortho_init swaps the module class, leaving "
-                    "down_init inert. Pick one (SVD-Down replaces the OrthoInit start)."
-                )
-            if self.student_step_expert_K > 1:
-                raise ValueError(
-                    "student_down_init='weight_svd' is incompatible with the "
-                    "per-step-expert student (step_expert_K>1): StepExpertLoRAModule "
-                    "is not a plain LoRAModule. Disable per_step_expert."
-                )
-        # Same lever on the fake/critic. It is always a plain single-head LoRA
-        # (no per-step-expert), so the only conflict is fake_ortho_init.
+        if self.student_down_init == "weight_svd" and self.student_step_expert_K > 1:
+            raise ValueError(
+                "student_down_init='weight_svd' is incompatible with the "
+                "per-step-expert student (step_expert_K>1): StepExpertLoRAModule "
+                "is not a plain LoRAModule. Disable per_step_expert."
+            )
+        # Same lever on the fake/critic. It is always a plain single-head LoRA.
         self.fake_down_init = str(fake_down_init)
         if self.fake_down_init not in ("kaiming", "weight_svd"):
             raise ValueError(
                 f"fake_down_init={self.fake_down_init!r}: "
                 "expected 'kaiming' or 'weight_svd'."
             )
-        if self.fake_down_init == "weight_svd" and self.fake_ortho_init:
-            raise ValueError(
-                "fake_down_init='weight_svd' and fake_ortho_init=True are mutually "
-                "exclusive: ortho_init swaps the module class, leaving down_init inert."
-            )
 
-        # Plain LoRA on both (LoRANetworkCfg defaults: no MoE/T-LoRA), optionally
-        # OrthoInit-seeded per stack.
+        # Plain LoRA on both (LoRANetworkCfg defaults: no MoE/T-LoRA).
         # alpha = rank by default (scale 1.0) per the LoRA-family convention.
         # use_custom_down_autograd is forwarded for config compat but a deprecated
         # no-op in the factory (fp32-bottleneck path removed 2026-06-10).
@@ -394,8 +360,6 @@ class TurboDMDNetwork:
         _student_kwargs: dict = {}
         if self.student_step_expert_K > 1:
             _student_kwargs["step_expert_K"] = self.student_step_expert_K
-        if self.student_ortho_init:
-            _student_kwargs["use_ortho_init"] = True
         if self.student_down_init != "kaiming":
             _student_kwargs["down_init"] = self.student_down_init
         self.student: LoRANetwork = create_network(
@@ -412,8 +376,6 @@ class TurboDMDNetwork:
             **_student_kwargs,
         )
         _fake_kwargs: dict = {}
-        if self.fake_ortho_init:
-            _fake_kwargs["use_ortho_init"] = True
         if self.fake_down_init != "kaiming":
             _fake_kwargs["down_init"] = self.fake_down_init
         self.fake: LoRANetwork = create_network(
@@ -445,11 +407,9 @@ class TurboDMDNetwork:
 
         logger.info(
             f"TurboDMDNetwork: student rank={self.student_rank} "
-            f"({len(self.student.unet_loras)} modules"
-            f"{', ortho_init' if self.student_ortho_init else ''}), "
+            f"({len(self.student.unet_loras)} modules), "
             f"fake rank={self.fake_rank} "
-            f"({len(self.fake.unet_loras)} modules"
-            f"{', ortho_init' if self.fake_ortho_init else ''})"
+            f"({len(self.fake.unet_loras)} modules)"
         )
 
         # Start in teacher view. LoRAModule defaults enabled=True, and diff-only
