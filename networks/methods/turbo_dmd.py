@@ -172,13 +172,16 @@ def load_step_expert_student(
 
 def _plain_lora_module_delta(
     weights_sd: dict[str, torch.Tensor], lora_name: str
-) -> torch.Tensor | None:
-    """Reconstruct one runtime module's ΔW from a defused plain-LoRA file.
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """One runtime module's ΔW from a defused plain-LoRA file, kept factored.
 
     Checkpoints store attention LoRAs per-component (q/k/v split — see
     ``defuse_standard_qkv``); the runtime module is the fused Linear, whose ΔW
     is the components' deltas concatenated along the output dim in spec order.
-    Returns fp32 ``[out, in]``, or None when any component is absent.
+    Returns fp32 factors ``(A [out, k], B [k, in])`` with ``ΔW = A @ B`` and
+    ``k = Σ component ranks`` (block-diagonal A over the components) — never
+    the materialized ``[out, in]`` matrix, so the downstream SVD stays a
+    small-core problem. None when any component is absent.
     """
     spec = match_fused_spec(lora_name)
     if spec is None:
@@ -186,7 +189,7 @@ def _plain_lora_module_delta(
     else:
         base = lora_name.removesuffix(spec.fused_frag)
         prefixes = [base + spec.component_frag(c) for c in spec.component_letters]
-    parts = []
+    ups, downs = [], []
     for p in prefixes:
         down = weights_sd.get(f"{p}.lora_down.weight")
         up = weights_sd.get(f"{p}.lora_up.weight")
@@ -195,28 +198,36 @@ def _plain_lora_module_delta(
         rank = down.shape[0]
         alpha = weights_sd.get(f"{p}.alpha")
         scale = (float(alpha) / rank) if alpha is not None else 1.0
-        parts.append(scale * (up.float() @ down.float()))
-    return torch.cat(parts, dim=0)
+        ups.append(scale * up.float())
+        downs.append(down.float())
+    if len(ups) == 1:
+        return ups[0], downs[0]
+    return torch.block_diag(*ups), torch.cat(downs, dim=0)
 
 
 @torch.no_grad()
-def _warm_start_module(module, delta: torch.Tensor) -> float:
-    """SVD-truncate ``delta`` into a plain LoRAModule's down/up; return captured
-    energy fraction. Folds the module's fixed ``scale`` (= alpha/rank, cached at
-    construction) so the applied delta equals the truncated ΔW exactly.
+def _warm_start_module(module, A: torch.Tensor, B: torch.Tensor) -> float:
+    """SVD-truncate ``ΔW = A @ B`` into a plain LoRAModule's down/up; return
+    captured energy fraction. Works in the k-dim factor space (QR of each
+    factor + SVD of the k×k core — k ≤ Σ component ranks) instead of the full
+    ``[out, in]`` matrix; a 196-module warm start is seconds, not minutes.
+    Folds the module's fixed ``scale`` (= alpha/rank, cached at construction)
+    so the applied delta equals the truncated ΔW exactly.
     """
     dev = module.lora_down.weight.device
-    U, S, Vh = torch.linalg.svd(delta.to(dev), full_matrices=False)
-    r = module.lora_dim
+    QA, RA = torch.linalg.qr(A.to(dev))
+    QB, RB = torch.linalg.qr(B.to(dev).T)
+    Uc, S, Vhc = torch.linalg.svd(RA @ RB.T)
+    r = min(module.lora_dim, S.shape[0])
     e = S.pow(2)
     energy = (e[:r].sum() / e.sum().clamp(min=1e-30)).item()
     sq = (S[:r] / module.scale).sqrt()
-    module.lora_up.weight.copy_(
-        (U[:, :r] * sq.unsqueeze(0)).to(module.lora_up.weight.dtype)
-    )
-    module.lora_down.weight.copy_(
-        (sq.unsqueeze(1) * Vh[:r]).to(module.lora_down.weight.dtype)
-    )
+    up = torch.zeros_like(module.lora_up.weight, dtype=torch.float32)
+    down = torch.zeros_like(module.lora_down.weight, dtype=torch.float32)
+    up[:, :r] = QA @ Uc[:, :r] * sq.unsqueeze(0)
+    down[:r] = sq.unsqueeze(1) * (Vhc[:r] @ QB.T)
+    module.lora_up.weight.copy_(up.to(module.lora_up.weight.dtype))
+    module.lora_down.weight.copy_(down.to(module.lora_down.weight.dtype))
     return energy
 
 
@@ -240,6 +251,10 @@ def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -
             f"{weights_path}: MoE/step-expert layout — warm start needs a "
             "plain single-head LoRA checkpoint."
         )
+    logger.info(
+        f"{label}: warm-starting {len(network.unet_loras)} modules from "
+        f"{weights_path}..."
+    )
     warmed, missing, energies = 0, [], []
     for module in network.unet_loras:
         if not hasattr(module, "lora_down") or module.lora_down.weight.dim() != 2:
@@ -247,11 +262,11 @@ def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -
                 f"warm start supports plain Linear LoRA modules only — "
                 f"{module.lora_name} is {type(module).__name__}."
             )
-        delta = _plain_lora_module_delta(weights_sd, module.lora_name)
-        if delta is None:
+        factors = _plain_lora_module_delta(weights_sd, module.lora_name)
+        if factors is None:
             missing.append(module.lora_name)
             continue
-        energies.append(_warm_start_module(module, delta))
+        energies.append(_warm_start_module(module, *factors))
         warmed += 1
     if not warmed:
         raise RuntimeError(

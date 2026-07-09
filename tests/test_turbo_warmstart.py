@@ -39,9 +39,9 @@ def test_module_delta_refuses_qkv_split_exactly():
     assert f"{name}.lora_up.weight" not in sd
     assert "lora_unet_blocks_0_self_attn_q_proj.lora_up.weight" in sd
 
-    delta = _plain_lora_module_delta(sd, name)
+    A, B = _plain_lora_module_delta(sd, name)
     expected = (alpha / RANK) * up @ down
-    assert torch.allclose(delta, expected, atol=1e-5)
+    assert torch.allclose(A @ B, expected, atol=1e-5)
 
 
 def test_module_delta_missing_component_returns_none():
@@ -58,17 +58,30 @@ def test_warm_start_module_applies_exact_truncated_delta():
     module = LoRAModule("lora_unet_blocks_0_mlp_layer1", org, lora_dim=RANK, alpha=2.5)
 
     # Rank-RANK delta must round-trip exactly despite the non-1 module scale.
-    target = torch.randn(OUT, RANK) @ torch.randn(RANK, IN)
-    energy = _warm_start_module(module, target)
+    fa, fb = torch.randn(OUT, RANK), torch.randn(RANK, IN)
+    energy = _warm_start_module(module, fa, fb)
     applied = module.scale * module.lora_up.weight @ module.lora_down.weight
-    assert torch.allclose(applied, target, atol=1e-4)
+    assert torch.allclose(applied, fa @ fb, atol=1e-4)
     assert energy > 0.9999
 
-    # Full-rank delta: applied == best rank-RANK approximation (SVD truncation).
+    # Full-rank delta (factored as ΔW @ I): applied == best rank-RANK
+    # approximation (SVD truncation).
     full = torch.randn(OUT, IN)
-    energy = _warm_start_module(module, full)
+    energy = _warm_start_module(module, full, torch.eye(IN))
     U, S, Vh = torch.linalg.svd(full, full_matrices=False)
     best = U[:, :RANK] @ torch.diag(S[:RANK]) @ Vh[:RANK]
     applied = module.scale * module.lora_up.weight @ module.lora_down.weight
     assert torch.allclose(applied, best, atol=1e-4)
     assert 0.0 < energy < 1.0
+
+
+def test_warm_start_module_file_rank_below_module_rank():
+    # File rank 2 < module rank 4: top-2 filled, remaining rank stays zero.
+    torch.manual_seed(2)
+    org = torch.nn.Linear(IN, OUT, bias=False)
+    module = LoRAModule("lora_unet_blocks_0_mlp_layer1", org, lora_dim=RANK, alpha=2.5)
+    fa, fb = torch.randn(OUT, 2), torch.randn(2, IN)
+    energy = _warm_start_module(module, fa, fb)
+    applied = module.scale * module.lora_up.weight @ module.lora_down.weight
+    assert torch.allclose(applied, fa @ fb, atol=1e-4)
+    assert energy > 0.9999
