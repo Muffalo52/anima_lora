@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass
 
 from library.config.io import toml_get as _flatten
@@ -461,6 +462,13 @@ class TurboConfig:
     # Same lever on the fake/critic (always plain single-head LoRA → only
     # conflicts with fake_ortho_init).
     fake_down_init: str
+    # Warm start: initialize the stack's ΔW from a plain LoRA checkpoint
+    # (e.g. an official-release delta extracted by
+    # scripts/extract_delta_lora.py), SVD-truncated to the stack's rank.
+    # Empty = default init. Incompatible with per_step_expert / ortho_init /
+    # down_init="weight_svd" (those parameterize or seed what this overwrites).
+    student_init_weights: str
+    fake_init_weights: str
 
     # Masked loss
     use_masked_loss: bool
@@ -498,7 +506,6 @@ class TurboConfig:
     f_ratio_ema_rate: float
     f_bin_num: int
     f_ratio_normalization: bool
-
 
     # Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1)
     softrank_weight: float
@@ -686,6 +693,26 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             "network.per_step_expert=true: the per-step-expert student "
             "(StepExpertLoRAModule) has no OrthoInit path. Disable one of them."
         )
+
+    student_init_weights = str(_flatten(cfg, "network.student_init_weights", ""))
+    fake_init_weights = str(_flatten(cfg, "network.fake_init_weights", ""))
+    for name, path, conflicts in (
+        (
+            "student",
+            student_init_weights,
+            per_step_expert or student_ortho_init or student_down_init != "kaiming",
+        ),
+        ("fake", fake_init_weights, fake_ortho_init or fake_down_init != "kaiming"),
+    ):
+        if path and conflicts:
+            raise ValueError(
+                f"network.{name}_init_weights is incompatible with "
+                f"per_step_expert / {name}_ortho_init / {name}_down_init="
+                "'weight_svd' — the warm start overwrites what those "
+                "parameterize or seed."
+            )
+        if path and not os.path.exists(path):
+            raise ValueError(f"network.{name}_init_weights: {path!r} not found.")
 
     k_anchor = int(_pick(args.k_anchor, cfg, "dpdmd.k_anchor", 5))
     teacher_anchor_steps = int(
@@ -1000,6 +1027,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         fake_ortho_init=fake_ortho_init,
         student_down_init=student_down_init,
         fake_down_init=fake_down_init,
+        student_init_weights=student_init_weights,
+        fake_init_weights=fake_init_weights,
         use_masked_loss=use_masked_loss,
         mask_dir=mask_dir,
         k_anchor=k_anchor,

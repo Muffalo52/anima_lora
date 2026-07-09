@@ -13,12 +13,12 @@
 
 ## Test candidates: flow shift to 2
 
-output_name = "anima_turbo_S"
+output_name = "anima_turbo_T750"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 7200
+iterations = 750
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -79,7 +79,22 @@ per_step_expert = false
 # to a plain mergeable LoRA exactly like the default. To A/B it, set
 # student_ortho_init = false above and uncomment the next line (they are mutually
 # exclusive — weight_svd needs the plain LoRAModule; also off under per_step_expert).
-student_down_init = "weight_svd"
+# student_down_init = "weight_svd"
+
+# Warm start — seed the stack's ΔW from a plain LoRA checkpoint, SVD-truncated
+# to the stack's rank (networks/methods/turbo_dmd.py::warm_start_plain_lora).
+# Built for the official anima_turboV10 delta (extract with
+# scripts/extract_delta_lora.py; eval + rationale: memory
+# project_official_turbo_v10_eval — official is polished but mode-collapsed, so
+# start there and let the DP-DMD diversity objective re-expand the modes).
+# Incompatible with per_step_expert / ortho_init / down_init="weight_svd" —
+# set student_down_init = "kaiming" when enabling. fake_init_weights (same
+# lever on the critic) usually points at the same file: at init the student IS
+# the warm-start distribution, so a matched critic starts calibrated.
+# The _asvd file is the activation-whitened extraction (--act_scales; ASVD-style
+# functional truncation) — same rank/size, strictly better capture (≡ plain r128).
+student_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
+fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
 
 # DMD schedule.
 [dmd]
@@ -204,7 +219,7 @@ warmup_ratio = 1.0              # fill this fraction of the pool before firing (
 
 # Logging / checkpoints.
 [io]
-save_every = 1200
+save_every = 750
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 1200
+validate_every_n_steps = 750

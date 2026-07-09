@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from networks.attn_fuse import match_fused_spec
 from networks.lora_anima.factory import create_network
 from networks.lora_anima.network import LoRANetwork
 
@@ -167,6 +168,106 @@ def load_step_expert_student(
         f"({len(network.unet_loras)} modules, K={K} heads, rank={rank})"
     )
     return network
+
+
+def _plain_lora_module_delta(
+    weights_sd: dict[str, torch.Tensor], lora_name: str
+) -> torch.Tensor | None:
+    """Reconstruct one runtime module's ΔW from a defused plain-LoRA file.
+
+    Checkpoints store attention LoRAs per-component (q/k/v split — see
+    ``defuse_standard_qkv``); the runtime module is the fused Linear, whose ΔW
+    is the components' deltas concatenated along the output dim in spec order.
+    Returns fp32 ``[out, in]``, or None when any component is absent.
+    """
+    spec = match_fused_spec(lora_name)
+    if spec is None:
+        prefixes = [lora_name]
+    else:
+        base = lora_name.removesuffix(spec.fused_frag)
+        prefixes = [base + spec.component_frag(c) for c in spec.component_letters]
+    parts = []
+    for p in prefixes:
+        down = weights_sd.get(f"{p}.lora_down.weight")
+        up = weights_sd.get(f"{p}.lora_up.weight")
+        if down is None or up is None:
+            return None
+        rank = down.shape[0]
+        alpha = weights_sd.get(f"{p}.alpha")
+        scale = (float(alpha) / rank) if alpha is not None else 1.0
+        parts.append(scale * (up.float() @ down.float()))
+    return torch.cat(parts, dim=0)
+
+
+@torch.no_grad()
+def _warm_start_module(module, delta: torch.Tensor) -> float:
+    """SVD-truncate ``delta`` into a plain LoRAModule's down/up; return captured
+    energy fraction. Folds the module's fixed ``scale`` (= alpha/rank, cached at
+    construction) so the applied delta equals the truncated ΔW exactly.
+    """
+    dev = module.lora_down.weight.device
+    U, S, Vh = torch.linalg.svd(delta.to(dev), full_matrices=False)
+    r = module.lora_dim
+    e = S.pow(2)
+    energy = (e[:r].sum() / e.sum().clamp(min=1e-30)).item()
+    sq = (S[:r] / module.scale).sqrt()
+    module.lora_up.weight.copy_(
+        (U[:, :r] * sq.unsqueeze(0)).to(module.lora_up.weight.dtype)
+    )
+    module.lora_down.weight.copy_(
+        (sq.unsqueeze(1) * Vh[:r]).to(module.lora_down.weight.dtype)
+    )
+    return energy
+
+
+def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -> None:
+    """Initialize a plain-LoRA network's ΔW from a standard LoRA checkpoint.
+
+    Per runtime module: reconstruct the file's exact ΔW (re-fusing defused
+    q/k/v components), SVD-truncate to the module's rank, write down/up. File
+    rank may differ from the network's — truncation/zero-pad-by-SVD handles
+    both directions. Modules absent from the file keep their constructed init.
+
+    Intended for the DP-DMD student/fake warm start from an extracted
+    full-model delta (``scripts/extract_delta_lora.py``); accepts any plain
+    LoRA file. Must run before ``compile_dit_blocks`` traces the forwards.
+    """
+    from safetensors.torch import load_file
+
+    weights_sd = load_file(weights_path)
+    if any(".lora_ups." in k or ".lora_up_weight" in k for k in weights_sd):
+        raise RuntimeError(
+            f"{weights_path}: MoE/step-expert layout — warm start needs a "
+            "plain single-head LoRA checkpoint."
+        )
+    warmed, missing, energies = 0, [], []
+    for module in network.unet_loras:
+        if not hasattr(module, "lora_down") or module.lora_down.weight.dim() != 2:
+            raise RuntimeError(
+                f"warm start supports plain Linear LoRA modules only — "
+                f"{module.lora_name} is {type(module).__name__}."
+            )
+        delta = _plain_lora_module_delta(weights_sd, module.lora_name)
+        if delta is None:
+            missing.append(module.lora_name)
+            continue
+        energies.append(_warm_start_module(module, delta))
+        warmed += 1
+    if not warmed:
+        raise RuntimeError(
+            f"{weights_path}: no module matched the {label} network — wrong "
+            "architecture or non-standard key layout?"
+        )
+    logger.info(
+        f"{label}: warm-started {warmed}/{len(network.unet_loras)} modules from "
+        f"{weights_path} (ΔW energy kept: mean "
+        f"{sum(energies) / len(energies):.3f}, min {min(energies):.3f})"
+        + (
+            f"; {len(missing)} kept default init (first: {missing[:3]})"
+            if missing
+            else ""
+        )
+    )
 
 
 class TurboDMDNetwork:

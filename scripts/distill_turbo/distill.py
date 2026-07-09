@@ -48,6 +48,7 @@ from networks.methods.turbo_dmd import (
     TurboDMDNetwork,
     gan_loss_discriminator,
     gan_loss_generator,
+    warm_start_plain_lora,
 )
 
 from .config import (
@@ -353,6 +354,15 @@ def main():
     turbo.freeze_dit()
     turbo.student.to(device=device, dtype=dtype)
     turbo.fake.to(device=device, dtype=dtype)
+
+    # Warm start (network.student_init_weights / fake_init_weights): seed the
+    # stack's ΔW from a plain LoRA file (e.g. an official-release delta from
+    # scripts/extract_delta_lora.py). After .to() so the SVD runs on-device,
+    # before compile so traced forwards see the final tensors.
+    if cfg.student_init_weights:
+        warm_start_plain_lora(turbo.student, cfg.student_init_weights, "student")
+    if cfg.fake_init_weights:
+        warm_start_plain_lora(turbo.fake, cfg.fake_init_weights, "fake")
     # Disc stays fp32 (LayerNorm/Linear) for GAN-loss stability — its forward
     # casts the bf16 teacher features to float.
     if turbo.disc is not None:
@@ -1259,6 +1269,11 @@ def main():
                 "ss_turbo_gan_weight_gen": str(cfg.gan_loss_weight_gen),
                 "ss_turbo_f_div": cfg.f_div,
             }
+            if cfg.student_init_weights:
+                # Provenance only — the warm start distills to a normal LoRA.
+                metadata["ss_turbo_student_init_weights"] = os.path.basename(
+                    cfg.student_init_weights
+                )
             if cfg.per_step_expert:
                 # Drives loader detection (CLI + ComfyUI build StepExpertLoRAModule
                 # and keep it live instead of merging). step_expert_K == the head
