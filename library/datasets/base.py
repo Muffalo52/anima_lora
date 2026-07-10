@@ -756,10 +756,14 @@ class BaseDataset(torch.utils.data.Dataset):
             if info.latents_npz is not None:  # fine tuning dataset: pre-set path
                 continue
             subset = self.image_to_subset[info.image_key]
+            # latent_cache_dir (when set) redirects only the target-latent
+            # cache — TE/PE still resolve via text_cache_dir/cache_dir. Lets
+            # colorize read prep-corrected (white-balanced) target latents.
             npz_path = caching_strategy.get_latents_npz_path(
                 info.absolute_path,
                 info.image_size,
-                cache_dir=getattr(subset, "cache_dir", None),
+                cache_dir=getattr(subset, "latent_cache_dir", None)
+                or getattr(subset, "cache_dir", None),
                 image_dir=getattr(subset, "image_dir", None),
             )
             if not caching_strategy.is_disk_cached_latents_expected(
@@ -872,10 +876,13 @@ class BaseDataset(torch.utils.data.Dataset):
                     continue
 
                 if caching_strategy.cache_to_disk:
+                    # latent_cache_dir redirects only the target-latent cache
+                    # (see is_latents_cache_complete).
                     info.latents_npz = caching_strategy.get_latents_npz_path(
                         info.absolute_path,
                         info.image_size,
-                        cache_dir=getattr(subset, "cache_dir", None),
+                        cache_dir=getattr(subset, "latent_cache_dir", None)
+                        or getattr(subset, "cache_dir", None),
                         image_dir=getattr(subset, "image_dir", None),
                     )
 
@@ -891,6 +898,18 @@ class BaseDataset(torch.utils.data.Dataset):
                     )
                     if cache_available:
                         continue
+
+                    # latent_cache_dir is prep-populated with *corrected*
+                    # targets (e.g. white-balanced colorize targets); a latent
+                    # missing here gets encoded from the ORIGINAL image, which
+                    # silently skips the correction. Warn loudly, once per stem.
+                    if getattr(subset, "latent_cache_dir", None):
+                        logger.warning(
+                            f"latent_cache_dir is set but {info.latents_npz} is "
+                            "missing — encoding from the ORIGINAL (uncorrected) "
+                            "image. Re-run the prep step that populates "
+                            f"{subset.latent_cache_dir!r} to fix this."
+                        )
 
                 condition = Condition(
                     info.bucket_reso,
@@ -1332,9 +1351,7 @@ class BaseDataset(torch.utils.data.Dataset):
             )
         from library.datasets.identity_pairs import IdentityPairSampler
 
-        registered = {
-            self._caption_key(info) for info in self.image_data.values()
-        }
+        registered = {self._caption_key(info) for info in self.image_data.values()}
         self.contrastive_neg_sampler = IdentityPairSampler(
             index_path,
             min_level="artist",

@@ -6,7 +6,7 @@ Status: **queued / not started** · drafted 2026-07-09
 Lift the 1-step x4 RSD student by first lifting its teacher: domain-finetune the
 released x4 ResShift teacher on our HR art pool, then re-distill the x4 student from
 the finetuned teacher. Mirrors what the x2 line already did (`make sr-train` +
-`configs/realsr_x2_art.yaml`), one scale up.
+`sr/configs/realsr_x2_art.yaml`), one scale up.
 
 ## Why (evidence, 2026-07-09, 30-img frozen eval)
 The current 1-step student has **nearly saturated the teacher** — so the student can't
@@ -30,7 +30,7 @@ improve without a better teacher.
 - Train on the HR art pool (`sr/data/rsd_hr_cap2048` / `hr_pool`), realesrgan-style
   degradation, at **sf=4**.
 - Wiring gap: `make sr-train` + `sr/train_x2/train.py` are **x2-only** (hardcoded
-  `configs/realsr_x2_art.yaml`, sf=2). Need an **x4 analog**: an `realsr_x4_art.yaml`
+  `sr/configs/realsr_x2_art.yaml`, sf=2). Need an **x4 analog**: an `realsr_x4_art.yaml`
   (= released x4 config, sf=4, trainer/degradation sections kept) + an x4 training
   entry (mirror train_x2, or parametrize it by `--sf`/`--config`).
 - Open Q: keep 15-step (v2) vs 4-step (v3) teacher schedule for the finetune target.
@@ -65,7 +65,21 @@ improve without a better teacher.
 
 # Queued: EasyControl colorize — fix yellowish/sepia tone drift
 
-Status: **queued / not started** · drafted 2026-07-09
+Status: **in progress — data-side fix IMPLEMENTED 2026-07-10, retrain pending** ·
+drafted 2026-07-09
+
+> 2026-07-10: plan items 1–2 shipped. New subset knob `latent_cache_dir`
+> (target-latent-only cache redirect; TE stays on `text_cache_dir`, REPA PE on
+> `cache_dir`) + prep.py stage 3 "Target": white-balance every paired target
+> (`easycontrol_adapters/colorization/wb.py` — bright-region white-point
+> neutralization, gain clamp 1.35, gray-world fallback) and VAE-encode into
+> `post_image_dataset/easycontrol/colorize/target/`; targets with mean HSV
+> sat < 0.10 (~14%, the sepia-core tail) are dropped by deleting their cond
+> latents. Knobs in `[preprocess]` of `configs/easycontrol/colorize.toml`.
+> Items 3–4 (tone-tag dropout exemption, artist-tag palette steering) NOT done —
+> deferred until the WB retrain is judged. Remaining: re-run
+> `make easycontrol-preprocess EASYADAPTER=colorize` → retrain → re-measure
+> white-point vs the old clean checkpoint's +0.022 baseline.
 
 ## Symptom
 Colorize adapter (`anima_colorize`, retrained on the full corpus after
@@ -153,4 +167,4 @@ explanation) but not a substitute for the data-side fix.
 
 
 
-# Queued: warm-start from official turbo-extracted lora for faster distillation
+# Queued: warm-start from official turbo-extracted lora for faster distillation (nfe=2 4k, nfe=4 4k)

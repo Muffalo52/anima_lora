@@ -343,11 +343,18 @@ def _easy_train_extra(adapter: str, extra) -> list[str]:
         )
 
     # Resolve subset paths against the current `name` slug so a `name` change
-    # reroutes training. ``text_cache_dir`` rides the slug too (colorize redirects
-    # the TE cache; near_twins leaves it unset).
+    # reroutes training. ``text_cache_dir``/``latent_cache_dir`` ride the slug too
+    # (colorize redirects the TE + white-balanced target-latent caches;
+    # near_twins leaves them unset).
     for ds in blueprint.get("datasets", []):
         for s in ds.get("subsets", []):
-            for key in ("image_dir", "cache_dir", "cond_cache_dir", "text_cache_dir"):
+            for key in (
+                "image_dir",
+                "cache_dir",
+                "cond_cache_dir",
+                "text_cache_dir",
+                "latent_cache_dir",
+            ):
                 if key in s:
                     s[key] = _resolve_blueprint_path(s[key], name)
 
@@ -622,8 +629,9 @@ def _colorize_prep_paths(base: str) -> list[str]:
     """Slug-derived prep.py path flags so ``name`` reroutes colorize's trees.
 
     ``--src`` stays the shared color corpus (``post_image_dataset/resized`` — the
-    colorize *targets*); only the synthetic staging tree + cond/text caches ride
-    the slug, matching the blueprint's ``cond_cache_dir`` / ``text_cache_dir``.
+    colorize *targets*); only the synthetic staging tree + cond/text/target caches
+    ride the slug, matching the blueprint's ``cond_cache_dir`` / ``text_cache_dir``
+    / ``latent_cache_dir`` (the white-balanced target-latent cache).
     Injected before the descriptor knob tables so a ``[staging]``/``[preprocess]``
     key (or user ``extra``) still wins via argparse last-flag precedence."""
     return [
@@ -633,6 +641,8 @@ def _colorize_prep_paths(base: str) -> list[str]:
         f"{base}/cond",
         "--text_cache_dir",
         f"{base}/text",
+        "--target_cache_dir",
+        f"{base}/target",
     ]
 
 
@@ -649,6 +659,7 @@ def _colorize_stage(adapter: str, cfg: dict, base: str, extra) -> None:
             PY,
             "easycontrol_adapters/colorization/prep.py",
             "--skip_encode",
+            "--skip_target",
             "--skip_text",
             *_colorize_prep_paths(base),
             *knobs,
@@ -760,9 +771,11 @@ def cmd_easycontrol_preprocess(extra):
     ``EASYADAPTER=<adapter>`` instead runs the adapter's descriptor-driven
     preprocess (every knob from the ``[preprocess]`` table of
     ``configs/easycontrol/<adapter>.toml``):
-      • ``colorize`` caches the synthetic-manga *condition* latents + color-only
-        text over the already-staged tree (mangafy is the separate staging step);
-        the color target latents + TE are reused from the LoRA cache.
+      • ``colorize`` caches the synthetic-manga *condition* latents, the
+        white-balanced *target* latents ({base}/target, dropping sepia-core
+        targets by deleting their conds), and the color-only text over the
+        already-staged tree (mangafy is the separate staging step); target
+        TE/PE are reused from the LoRA cache.
       • ``near_twins`` resizes + VAE/TE-caches the mined pair tree and symlinks the
         ``cond/`` reference latents.
     """

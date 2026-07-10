@@ -321,6 +321,7 @@ class DreamBoothSubset(BaseSubset):
         cache_dir: Optional[str] = None,
         cond_cache_dir: Optional[str] = None,
         text_cache_dir: Optional[str] = None,
+        latent_cache_dir: Optional[str] = None,
         recursive: bool = False,
         path_pattern: Optional[str] = None,
         repeat_by_folder_name: bool = False,
@@ -386,6 +387,12 @@ class DreamBoothSubset(BaseSubset):
         # cache_dir). Read-only at train time; the prep step populates it with
         # re-encoded captions. None → TE caches come from cache_dir.
         self.text_cache_dir = text_cache_dir
+        # Optional redirect for the *target VAE latent* cache only (TE/PE stay
+        # in text_cache_dir/cache_dir). A prep step populates it with re-encoded
+        # targets (e.g. white-balanced colorize targets); any latent still
+        # missing at train time is encoded from the ORIGINAL image into this dir
+        # (with a warning — see new_cache_latents). None → latents from cache_dir.
+        self.latent_cache_dir = latent_cache_dir
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, DreamBoothSubset):

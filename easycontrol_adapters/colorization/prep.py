@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Mangafy + cache condition latents (and color-only text) for the colorization
-EasyControl task.
+"""Mangafy + cache condition latents (and white-balanced targets + color-only
+text) for the colorization EasyControl task.
 
-Three idempotent stages:
+Four idempotent stages:
 
 1. **Mangafy** — walk every color image under ``--src`` (the existing resized
    training images), screen each to a synthetic B&W manga page, and write the
@@ -18,7 +18,19 @@ Three idempotent stages:
    format as the target latent cache), at the image's **native size** so each
    cond latent shape matches its target latent exactly. Skips cached resolutions.
 
-3. **Text** — re-encode the *target* captions filtered to **color tags** (plus
+3. **Target** — white-balance each color *target* (the corpus is corpus-wide
+   warm/desaturated — see ``wb.py``; rendered colorize output otherwise lands on
+   the corpus-mean sepia tone) and VAE-encode the corrected image into
+   ``--target_cache_dir``, the colorize-specific target-latent cache the
+   training subset reads via ``latent_cache_dir`` (TE/PE stay on the shared
+   caches). Targets whose mean HSV saturation is below ``--target_drop_sat``
+   are effectively monochrome (white-balancing them yields flat gray, a bad
+   colorize target): they are **dropped** — their cond latents are deleted so
+   the train-time loader pairs them out. Scoped to the stems present in
+   ``--staging`` (the paired colorize set). Skips cached resolutions; pass
+   ``--overwrite`` after changing the WB knobs.
+
+4. **Text** — re-encode the *target* captions filtered to **color tags** (plus
    the **copyright/series tag** by default, ``--text_keep_copyright``, and
    optionally **comic/panel-format tags** via ``--text_keep_comic``;
    :func:`color_caption.filter_to_colors_and_protected`) into ``--text_cache_dir``, mirroring
@@ -36,12 +48,12 @@ The cond cache is paired with the color target at train time by the loader's
     python easycontrol_adapters/colorization/prep.py            # full dataset (all 3 stages)
     python easycontrol_adapters/colorization/prep.py --limit 8  # quick QA batch
 
-Via the task runner the three stages are split across two targets (knobs come
+Via the task runner the four stages are split across two targets (knobs come
 from the ``[staging]`` / ``[preprocess]`` tables of ``configs/easycontrol/
 colorize.toml``)::
 
     make easycontrol-staging    EASYADAPTER=colorize   # stage 1 (mangafy)
-    make easycontrol-preprocess EASYADAPTER=colorize   # stages 2-3 (encode + text)
+    make easycontrol-preprocess EASYADAPTER=colorize   # stages 2-4 (encode + target + text)
 """
 
 from __future__ import annotations
@@ -364,15 +376,7 @@ def stage_mangafy(
     return len(images), written
 
 
-def stage_encode(
-    staging: Path,
-    cond_cache_dir: Path,
-    *,
-    vae_path: str,
-    batch_size: int,
-    chunk_size: int,
-    recursive: bool,
-):
+def _load_encode_vae(vae_path: str, chunk_size: int):
     from library.models import qwen_vae
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -387,7 +391,26 @@ def stage_encode(
     vae.to(device, dtype=torch.bfloat16)
     vae.requires_grad_(False)
     vae.eval()
+    return vae
 
+
+def _free_vae(vae) -> None:
+    vae.to("cpu")
+    del vae
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def stage_encode(
+    staging: Path,
+    cond_cache_dir: Path,
+    *,
+    vae_path: str,
+    batch_size: int,
+    chunk_size: int,
+    recursive: bool,
+):
+    vae = _load_encode_vae(vae_path, chunk_size)
     stats = cache_latents(
         staging,
         vae,
@@ -396,12 +419,103 @@ def stage_encode(
         batch_size=batch_size,
         progress=tqdm_progress("Caching cond latents"),
     )
-
-    vae.to("cpu")
-    del vae
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _free_vae(vae)
     return stats
+
+
+def stage_target(
+    src: Path,
+    staging: Path,
+    cond_cache_dir: Path,
+    target_cache_dir: Path,
+    *,
+    vae_path: str,
+    batch_size: int,
+    chunk_size: int,
+    recursive: bool,
+    drop_sat: float,
+    wb_strength: float,
+    wb_max_gain: float,
+    workers: int,
+    overwrite: bool,
+):
+    """White-balance + VAE-encode the color targets into ``target_cache_dir``.
+
+    Scoped to the stems the mangafy stage staged (the paired colorize set). A
+    fast thumbnail pre-pass measures each target's mean HSV saturation: stems
+    below ``drop_sat`` are effectively monochrome/sepia-core — a bad colorize
+    target either raw (it IS the tone drift) or white-balanced (flat gray) — so
+    their cond latents are **deleted** from ``cond_cache_dir``, which pairs
+    them out of training (the loader keeps only cond-paired targets). Deletion
+    re-applies on every run, so an inline re-stage (mangafy → encode → target)
+    always converges to the same pair set. The survivors are encoded with
+    :func:`wb.apply_whitebalance` applied, at native size, same
+    ``{stem}_{WxH}_anima.npz`` naming as the shared cache.
+    """
+    import functools
+
+    from wb import apply_whitebalance, mean_saturation
+
+    from library.io.cache import discover_latents_by_stem
+
+    staged_stems = {p.stem for p in walk_images(staging, recursive=recursive)}
+    if not staged_stems:
+        raise SystemExit(
+            f"Staging tree {staging} is empty — run the mangafy staging step first."
+        )
+    targets = [
+        p for p in walk_images(src, recursive=recursive) if p.stem in staged_stems
+    ]
+
+    # Thumbnail saturation pre-pass (the statistic is scale-stable; decoding
+    # small keeps this a ~seconds pass over thousands of targets).
+    def _sat(p: Path) -> tuple[str, float]:
+        img = Image.open(p).convert("RGB")
+        img.thumbnail((256, 256), Image.Resampling.BILINEAR)
+        return p.stem, mean_saturation(np.asarray(img))
+
+    progress = tqdm_progress("Target saturation scan")
+    progress(0, total=len(targets))
+    sats: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=max(2, workers)) as ex:
+        for stem, sat in ex.map(_sat, targets):
+            sats[stem] = sat
+            progress(1)
+
+    dropped = {stem for stem, sat in sats.items() if sat < drop_sat}
+    kept = frozenset(sats.keys() - dropped)
+    print(
+        f"Sepia-core drop (mean sat < {drop_sat}): {len(dropped)}/{len(sats)} "
+        f"targets dropped, {len(kept)} kept"
+    )
+
+    # Pair the drops out of training: the loader keeps only targets with a
+    # cached cond latent, so deleting the cond npz is the exclusion mechanism.
+    removed = 0
+    if dropped:
+        by_stem = discover_latents_by_stem(cond_cache_dir)
+        for stem in dropped:
+            for f in by_stem.get(stem, []):
+                f.path.unlink(missing_ok=True)
+                removed += 1
+        print(f"Removed {removed} cond latent file(s) for dropped stems")
+
+    vae = _load_encode_vae(vae_path, chunk_size)
+    stats = cache_latents(
+        src,
+        vae,
+        cache_dir=target_cache_dir,
+        recursive=recursive,
+        keep_stems=kept,
+        image_transform=functools.partial(
+            apply_whitebalance, max_gain=wb_max_gain, strength=wb_strength
+        ),
+        batch_size=batch_size,
+        overwrite=overwrite,
+        progress=tqdm_progress("Caching WB target latents"),
+    )
+    _free_vae(vae)
+    return stats, len(dropped)
 
 
 def stage_text(
@@ -585,6 +699,12 @@ def main() -> None:
     parser.add_argument(
         "--cond_cache_dir", default="post_image_dataset/easycontrol/colorize/cond"
     )
+    parser.add_argument(
+        "--target_cache_dir",
+        default="post_image_dataset/easycontrol/colorize/target",
+        help="white-balanced target-latent cache; the colorize dataset's "
+        "latent_cache_dir (TE/PE stay on the shared caches)",
+    )
     parser.add_argument("--vae", default="models/vae/qwen_image_vae.safetensors")
     parser.add_argument(
         "--engine",
@@ -606,7 +726,10 @@ def main() -> None:
         "--recursive", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument(
-        "--overwrite", action="store_true", help="re-mangafy staged PNGs that exist"
+        "--overwrite",
+        action="store_true",
+        help="re-mangafy staged PNGs that exist; also re-encodes cached "
+        "white-balanced target latents (use after changing the WB knobs)",
     )
     parser.add_argument("--limit", type=int, default=None, help="cap #images (QA)")
     parser.add_argument(
@@ -655,7 +778,34 @@ def main() -> None:
     )
     parser.add_argument("--skip_encode", action="store_true")
     parser.add_argument(
+        "--skip_target",
+        action="store_true",
+        help="skip the white-balanced target-latent stage",
+    )
+    parser.add_argument(
         "--skip_text", action="store_true", help="skip color-only TE stage"
+    )
+    # ── white-balanced target stage ──────────────────────────────────────────
+    parser.add_argument(
+        "--target_drop_sat",
+        type=float,
+        default=0.10,
+        help="drop targets whose mean HSV saturation is below this (effectively "
+        "monochrome/sepia-core — white-balancing them yields flat gray); their "
+        "cond latents are deleted so the loader pairs them out",
+    )
+    parser.add_argument(
+        "--target_wb_strength",
+        type=float,
+        default=1.0,
+        help="white-balance strength (gains ** strength; <1 = partial correction)",
+    )
+    parser.add_argument(
+        "--target_wb_max_gain",
+        type=float,
+        default=1.35,
+        help="per-channel white-balance gain clamp (larger casts are treated as "
+        "an intentional palette and only partially corrected)",
     )
     # ── color-only text stage ────────────────────────────────────────────────
     parser.add_argument(
@@ -772,6 +922,28 @@ def main() -> None:
         print(
             f"\nCond latent caching complete: {stats.written} cached, "
             f"{stats.skipped} skipped (already existed)"
+        )
+
+    if not args.skip_target:
+        tgt_stats, n_dropped = stage_target(
+            src,
+            staging,
+            cond_cache_dir,
+            Path(args.target_cache_dir),
+            vae_path=args.vae,
+            batch_size=args.batch_size,
+            chunk_size=args.chunk_size,
+            recursive=args.recursive,
+            drop_sat=args.target_drop_sat,
+            wb_strength=args.target_wb_strength,
+            wb_max_gain=args.target_wb_max_gain,
+            workers=args.workers,
+            overwrite=args.overwrite,
+        )
+        print(
+            f"\nWB target latent caching complete: {tgt_stats.written} cached, "
+            f"{tgt_stats.skipped} skipped (already existed), "
+            f"{n_dropped} sepia-core targets dropped"
         )
 
     if not args.skip_text:

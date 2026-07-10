@@ -16,6 +16,7 @@ import os
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -102,6 +103,7 @@ def _decode_batch(
     cache_dir: Path | None,
     data_dir: Path,
     overwrite: bool = False,
+    image_transform: "Callable[[np.ndarray], np.ndarray] | None" = None,
 ) -> tuple[
     list[Path],
     list[tuple[Path, str]],
@@ -132,6 +134,8 @@ def _decode_batch(
         except Exception as e:
             failed.append((p, f"{type(e).__name__}: {e}"))
             continue
+        if image_transform is not None:
+            img_np = image_transform(img_np)
         tensors.append(IMAGE_TRANSFORMS(img_np))
         kept.append((p, (w, h)))
     img_batch = torch.stack(tensors, dim=0) if tensors else None
@@ -163,6 +167,8 @@ def cache_latents(
     cache_dir: Path | None = None,
     recursive: bool = False,
     path_pattern: str | None = None,
+    keep_stems: "set[str] | frozenset[str] | None" = None,
+    image_transform: "Callable[[np.ndarray], np.ndarray] | None" = None,
     batch_size: int = 4,
     progress: ProgressFn | None = None,
     io_workers: int | None = None,
@@ -180,8 +186,17 @@ def cache_latents(
     per-batch disk decode + image transform and the npz read-modify-write are
     CPU/IO, so they're farmed to thread pools that overlap the GPU — the GPU no
     longer idles between batches. ``io_workers`` sizes those pools (default
-    ``min(8, cpu_count)``). Output is byte-identical to the serial path."""
+    ``min(8, cpu_count)``). Output is byte-identical to the serial path.
+
+    ``keep_stems`` (when given) restricts the walk to images whose stem is in
+    the set — used by cond≠target tasks to encode only the paired subset.
+    ``image_transform`` (uint8 RGB (H,W,3) → same) is applied to each decoded
+    image before VAE encoding — e.g. colorize's target white-balance. NB the
+    per-resolution skip still keys on the *unmodified* cache name, so changing
+    the transform requires ``overwrite`` (or a fresh ``cache_dir``)."""
     image_files = walk_images(data_dir, recursive=recursive, pattern=path_pattern)
+    if keep_stems is not None:
+        image_files = [p for p in image_files if p.stem in keep_stems]
     reso_groups = group_by_shape(image_files)
     stats = PreprocessStats(seen=len(image_files))
 
@@ -207,7 +222,9 @@ def cache_latents(
             return False
         w, h, bp = b
         decode_q.append(
-            decode_ex.submit(_decode_batch, bp, w, h, cache_dir, data_dir, overwrite)
+            decode_ex.submit(
+                _decode_batch, bp, w, h, cache_dir, data_dir, overwrite, image_transform
+            )
         )
         return True
 

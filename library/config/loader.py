@@ -106,6 +106,11 @@ class DreamBoothSubsetParams(BaseSubsetParams):
     # instead of cache_dir — lets a task swap in re-encoded captions (e.g.
     # color-only captions for colorization) without re-caching the latents.
     text_cache_dir: Optional[str] = None
+    # Optional redirect for the *target VAE latent* cache only (TE/PE still come
+    # from text_cache_dir/cache_dir). When set, target latents are read from
+    # here instead of cache_dir — lets a task swap in re-encoded targets (e.g.
+    # white-balanced colorize targets) without forking the shared TE/PE caches.
+    latent_cache_dir: Optional[str] = None
 
 
 @dataclass
@@ -203,6 +208,7 @@ class ConfigSanitizer:
         "cache_dir": str,
         "cond_cache_dir": str,
         "text_cache_dir": str,
+        "latent_cache_dir": str,
         "mask_dir": str,
         "recursive": bool,
     }
