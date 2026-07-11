@@ -11,30 +11,19 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_superturbo_A"
+# output_name = "anima_superturbo_A"
+output_name = "anima_turbo_T_LR"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 750
+iterations = 4000
 batch_size = 1
 seed = 42
 use_masked_loss = true
 
 channel_scaling_alpha = 0.0 # channel scaling alpha harmed training
-
-# Dynamo per-_forward graph budget. The loop traces the compiled block under
-# grad_mode × token-family × num_threads combos that land at the default 8 and
-# spill to eager; 64 gives ample headroom. Logged at startup.
-dynamo_recompile_limit = 64
 compile_dynamic_seq = true
-
-# torch.compile partitioner saved-activation fraction (same lever as base.toml's
-# main-training knob). <1.0 makes the partitioner recompute cheap intermediates
-# in backward rather than save them — reclaims VRAM at ~equal step time, useful
-# when use_custom_down_autograd is off and torch_compile is on. Only applies when
-# torch_compile is on AND grad_ckpt is off (the two repartition the same joint
-# graph and conflict → CheckpointError). 1.0 = off (default; no behavior change).
 activation_memory_budget = 0.99
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
@@ -82,20 +71,23 @@ fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
 
 # DMD schedule.
 [dmd]
-student_steps = 2               # N — student rolls N Euler steps; inference matches (--infer_steps 4)
-teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
+# student_steps = 2
+student_steps = 4
+teacher_cfg = 4
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
 grad_step = "random"
 
 # Optimization.
 [optim]
-student_lr = 1e-5
-fake_lr = 2e-5
+# student_lr = 5e-5 # warm start can make start from safe basin
+# fake_lr = 5e-5
+student_lr = 2e-5
+fake_lr = 3e-5
 fake_steps_per_student_step = 4
 fake_warmup_steps = 200
 weight_decay = 0.0
-grad_clip = 1.0                 # student grad-norm cap
+grad_clip = 1.0
 
 # DP-DMD diversity anchor. Step 1 of the N-step student rollout is supervised
 # toward a teacher K-step CFG anchor (the diverse landing point) then detached;
@@ -104,7 +96,7 @@ grad_clip = 1.0                 # student grad-norm cap
 [dpdmd]
 k_anchor = 6                    # teacher steps rolled to the diversity anchor (their K)
 teacher_anchor_steps = 12        # teacher σ-grid the K is counted against
-div_weight = 0.05               # λ on the first-step diversity MSE
+div_weight = 0.1               # λ on the first-step diversity MSE
 detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 
 # τ sampling distribution for the fake/critic update (+ fake warmup).
@@ -203,7 +195,7 @@ warmup_ratio = 1.0              # fill this fraction of the pool before firing (
 
 # Logging / checkpoints.
 [io]
-save_every = 750
+save_every = 1000
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 750
+validate_every_n_steps = 1000

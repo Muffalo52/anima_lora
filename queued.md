@@ -65,106 +65,11 @@ improve without a better teacher.
 
 # Queued: EasyControl colorize — fix yellowish/sepia tone drift
 
-Status: **in progress — data-side fix IMPLEMENTED 2026-07-10, retrain pending** ·
-drafted 2026-07-09
-
-> 2026-07-10: plan items 1–2 shipped. New subset knob `latent_cache_dir`
-> (target-latent-only cache redirect; TE stays on `text_cache_dir`, REPA PE on
-> `cache_dir`) + prep.py stage 3 "Target": white-balance every paired target
-> (`easycontrol_adapters/colorization/wb.py` — bright-region white-point
-> neutralization, gain clamp 1.35, gray-world fallback) and VAE-encode into
-> `post_image_dataset/easycontrol/colorize/target/`; targets with mean HSV
-> sat < 0.10 (~14%, the sepia-core tail) are dropped by deleting their cond
-> latents. Knobs in `[preprocess]` of `configs/easycontrol/colorize.toml`.
-> Items 3–4 (tone-tag dropout exemption, artist-tag palette steering) NOT done —
-> deferred until the WB retrain is judged. Remaining: re-run
-> `make easycontrol-preprocess EASYADAPTER=colorize` → retrain → re-measure
-> white-point vs the old clean checkpoint's +0.022 baseline.
-
-## Symptom
-Colorize adapter (`anima_colorize`, retrained on the full corpus after
-`only_data_includes` was widened from a comic-page tag set to `[]`) renders
-uniformly sepia/warm-cream at inference — both on manga-page conds AND on
-clean illustration conds (e.g. chicke_iii refs), with empty prompt (the
-workflow's default mode).
-
-## Root cause (measured, not guessed — see `scratchpad/colorize_target_stats.py`
-and `colorize_target_stats.json` from this session)
-The colorize training TARGET pool (`post_image_dataset/resized`, paired via the
-staged cond tree `post_image_dataset/easycontrol/colorize/staging/`, 2,951
-pairs) is corpus-wide warm/desaturated — tag-based filtering can't see this
-because the tagger doesn't emit tone tags for this corpus (only 1/2951 image
-tagged `monochrome`, 0 tagged `sepia`):
-
-| Metric | Value |
-|---|---|
-| Median per-image mean HSV saturation | **0.182** |
-| Targets with mean sat < 0.35 | **94.4%** (mirrors the sanitize-adapter wash-out finding, 94% < 0.35 sat) |
-| Bright-pixel white-point R−B (warm cast) | mean **+0.089**, 84.7% of images > +0.02 |
-| Sepia-like (sat<0.20 & warm-dominant) | **33.0%** of targets (n=974; artist clusters `coro_fae`, `sincos`, `ama_mitsuki`, `oldsickkim`) |
-
-Even the corpus's biggest/cleanest illustration artists skew warm (sincos
-n=334 sat=0.151/91% warm; ama_mitsuki n=106 sat=0.116/90% warm). The rendered
-outputs land almost exactly on the training-target white-point (measured
-+0.11…+0.16 vs. corpus p75 +0.137), vs. the old comic-only checkpoint's clean
-+0.022 — i.e. this is the adapter faithfully reproducing its target
-distribution's mean tone, reinforced by `caption_dropout_rate = 0.8` collapsing
-most gradient into one shared unconditional colorization mode. Cond content
-(manga page vs. illustration) doesn't gate tone — text does (color tags only,
-and only 20% of the time), so illustrations get the same corpus-mean pull.
-
-**Filtering is not viable** — the low-sat tail is 33-94% of the data depending
-on threshold; dropping it guts the dataset. Fix must be **correction**, not
-exclusion.
-
-## Plan
-1. **White-balance the targets at prep time.** Add a target-encode stage to
-   `easycontrol_adapters/colorization/prep.py` that neutralizes each target's
-   white-point (scale channels so bright-region R≈G≈B; gray-world clamp for
-   images without a clear bright/paper region) and VAE-encodes the corrected
-   image into a **colorize-specific target latent cache** (new subset-level
-   cache dir, same pattern as `cond_cache_dir`/`text_cache_dir`) — targets
-   currently ride the shared `post_image_dataset/lora` cache, which is why they
-   can't be touched today without affecting every other method.
-2. **Handle the true-sepia tail separately** (mean sat ≲ 0.10–0.15, ~13-34% of
-   the set): white-balancing a near-mono image just yields flat gray, a bad
-   colorize target. Either drop these specifically (small, targeted — not the
-   blanket 94% cut) or keep them but inject a computed `muted color`/`sepia`
-   caption tag for the borderline band.
-3. **If (2) uses tag-binding**: note `caption_dropout_rate = 0.8` drops the
-   *whole* caption, so a tagged muted image still trains empty-prompt mode 80%
-   of the time — tone tags only separate modes if given a lower dropout rate or
-   exempted from caption_dropout_rate, mirroring how `text_keep_comic` /
-   `text_keep_copyright` are protected-prefix + dropout-immune.
-4. **Optional palette-steering feature**: keep the **artist tag** in the
-   protected/dropout-immune prefix alongside copyright — lets `chicke_iii` (or
-   any artist) in the prompt pull toward that artist's palette instead of the
-   corpus-mean tone. Separate from the white-balance fix, additive.
-5. **Re-run staging + preprocess + train** (`make easycontrol-staging` →
-   `easycontrol-preprocess` → `easycontrol EASYADAPTER=colorize`) once the
-   target cache change lands; re-render the same comfy colorize test prompts
-   and re-measure white-point/saturation the same way to confirm convergence
-   (compare against old clean checkpoint's +0.022 white-point baseline).
-
-## Inference-side mitigation (cheap, try first, don't expect much)
-`workflows/colorize.json` currently has an empty negative prompt (only
-`quality_neg` set). Add `sepia, muted color, limited palette` to the negative
-and/or `colorful` to positive — but since these tokens never appear in the
-colorize text channel's training vocab (color-tag-only filter), only the base
-model's CFG prior can act on them, so expect a weak effect at best. Useful as
-a diagnostic probe (if it measurably helps, corroborates the corpus-mean
-explanation) but not a substitute for the data-side fix.
-
-## Assets (this session)
-- `scratchpad/colorize_target_stats.py` — color-statistics script (HSV sat,
-  bright-pixel white-point R−B, warm-fraction) over the staged colorize pair
-  set; walks `post_image_dataset/easycontrol/colorize/staging/` and pairs
-  against `post_image_dataset/resized/`.
-- `scratchpad/colorize_target_stats.json` — per-image stats dump for all 2,951
-  pairs (re-slice by artist/band as needed).
 
 ---
 
 
 
-# Queued: warm-start from official turbo-extracted lora for faster distillation (nfe=2 4k, nfe=4 4k)
+# Queued: warm-start from official turbo-extracted lora for faster distillation (nfe=2 4k)
+
+# Queued: warm-start from official turbo-extracted lora for faster distillation (nfe=4 4k Revised LR)
