@@ -93,12 +93,23 @@ def main():
                     help="HR source dir (default image_dataset; pass the prep_rsd_cache "
                          "4096-capped cache for faster decode at the right 1024->4096 scale)")
     ap.add_argument("--num_workers", type=int, default=6, help="DataLoader workers")
-    ap.add_argument("--version", choices=["x4", "x2"], default="x4",
-                    help="teacher family: x4 = released 15-step v2; x2 = our sr-train finetune")
+    ap.add_argument("--version", choices=list(M.VERSIONS), default="x4",
+                    help="teacher family: x4 = released 15-step v2; x2 / x4ft = our sr-train "
+                         "finetunes (x4ft = the art-finetuned x4 teacher, same 15-step schedule)")
+    ap.add_argument("--cond_lq", choices=["pixel", "latent"], default=None,
+                    help="what to feed the UNet's `lq` conditioning input (default: the "
+                         "version's — pixel for x4/x4ft, latent for the legacy x2 line). The "
+                         "teacher, student and fake critic all use it, so it also lands in the "
+                         "student ckpt meta for infer.py. See rsd_models.make_cond_lq: feeding "
+                         "the VQ latent to a released teacher wrecks its x0 prediction "
+                         "(img-MSE 0.004 -> 1.50 at t=14) and was the pre-2026-07-11 default.")
     ap.add_argument("--config", default=None, help="override the version's ResShift config yaml")
-    ap.add_argument("--teacher", default="output/sr/x2_lpips_30k/resshift_x2_final.pth", help="override the version's teacher checkpoint")
+    ap.add_argument("--teacher", default="",
+                    help="override the version's teacher checkpoint (empty = the version's "
+                         "default — do NOT hardcode one here: a non-empty default wins over "
+                         "--version and silently distills the wrong teacher)")
     ap.add_argument("--save_dir", default=None,
-                    help="default: output/sr/rsd (x4) or output/sr/rsd_x2 (x2)")
+                    help="default: output/sr/rsd (x4) or output/sr/rsd_<version>")
     ap.add_argument("--log_every", type=int, default=40)
     ap.add_argument("--save_every", type=int, default=4500)
     ap.add_argument("--max_steps", type=int, default=0, help="smoke cap on gen updates (0=off)")
@@ -111,8 +122,9 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     cfg = M.load_configs(config_path)
     sf_scale = cfg.diffusion.params.scale_factor
+    cond_mode = args.cond_lq or M.cond_mode_for(args.version)
     print(f"version={args.version} sf={cfg.diffusion.params.sf} teacher={teacher_ckpt.name} "
-          f"config={config_path.name}")
+          f"config={config_path.name} cond_lq={cond_mode}")
 
     print("building nets...")
     gen_kw = dict(noise_mode=args.noise_mode, noise_channels=args.noise_channels)
@@ -132,7 +144,7 @@ def main():
     ema = make_ema(student)
     # provenance for inference (rebuilds the matching noise-injection arch) + A/B tracking
     ckpt_meta = {"noise_mode": student.noise_mode, "noise_channels": student.noise_channels,
-                 "sid_denom": args.sid_denom}
+                 "sid_denom": args.sid_denom, "cond_lq": cond_mode}
 
     import lpips
     lp = lpips.LPIPS(net="vgg").to(dev).eval()
@@ -194,18 +206,19 @@ def main():
             opt_f.zero_grad(set_to_none=True)
             gt, lq = next_batch(); B = gt.shape[0]
             z0, z_y = encode(gt, lq)
+            c_y = M.make_cond_lq(lq, z_y, cond_mode)   # `lq` conditioning != residual base z_y
             t_n = rand_t(B, nodes); eps = make_eps(student, z0)
             with torch.no_grad(), autocast():
                 z_tn = diff.q_sample(z0, z_y, t_n)
-                z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)
+                z0_hat = predict_x0(diff, student, z_tn, c_y, t_n, eps)
             t = rand_t(B, T)
             z_t = diff.q_sample(z0_hat, z_y, t)
             with autocast():
-                x0_fake = predict_x0(diff, fake, z_t, z_y, t, eps)
+                x0_fake = predict_x0(diff, fake, z_t, c_y, t, eps)
                 L_fake = F.mse_loss(x0_fake.float(), z0_hat.float())
                 # real + fake GAN features in ONE 2B encoder pass (was two serial passes)
                 feats = fake.encode_features(
-                    torch.cat([z0, z0_hat.detach().float()]), z_y.repeat(2, 1, 1, 1),
+                    torch.cat([z0, z0_hat.detach().float()]), c_y.repeat(2, 1, 1, 1),
                     eps=eps.repeat(2, 1, 1, 1))
                 d_real, d_fake = disc(feats).chunk(2)
                 L_gan_d = (F.softplus(-d_real) + F.softplus(d_fake)).mean()
@@ -218,6 +231,7 @@ def main():
         for _ in range(args.grad_accum):
             gt, lq = next_batch(); B = gt.shape[0]
             z0, z_y = encode(gt, lq)
+            c_y = M.make_cond_lq(lq, z_y, cond_mode)
             t_n = rand_t(B, nodes); eps = make_eps(student, z0)
             z_tn = diff.q_sample(z0, z_y, t_n)
             # single-step LPIPS path from z_T ~ N(z_y, kappa^2), stacked into the SAME
@@ -227,14 +241,14 @@ def main():
             tT = torch.full((B,), T - 1, device=dev, dtype=torch.long)
             with autocast():
                 out = predict_x0(diff, student, torch.cat([z_tn, z_TT]),
-                                 z_y.repeat(2, 1, 1, 1), torch.cat([t_n, tT]),
+                                 c_y.repeat(2, 1, 1, 1), torch.cat([t_n, tT]),
                                  torch.cat([eps, make_eps(student, z_y)]))
             z0_hat, z0_single = out[:B], out[B:]
             t = rand_t(B, T)
             z_t = diff.q_sample(z0_hat.detach().float(), z_y, t)
             with torch.no_grad(), autocast():
-                x0_teacher = predict_x0(diff, teacher, z_t, z_y, t)
-                x0_fakep = predict_x0(diff, fake, z_t, z_y, t, eps)
+                x0_teacher = predict_x0(diff, teacher, z_t, c_y, t)
+                x0_fakep = predict_x0(diff, fake, z_t, c_y, t, eps)
                 # DMD/SiD per-sample normalization (App C, "loss normalization … SiD"):
                 # divide the (fake−teacher) push by a TEACHER-derived magnitude — NOT by the
                 # (fake−teacher) diff's own norm (self-normalizing flattens the
@@ -259,13 +273,13 @@ def main():
             # LPIPS/dc color-minimum at the anti-tint and injects a color drift (the 1-step
             # student can't compound it like the x2 rollout does, but the residual is real —
             # ~-0.03 blue). decode(z0) coincides with the latent objective's zero. See the
-            # matching fix + full derivation in sr/train_x2/train.py.
+            # matching fix + full derivation in sr/train_sr/train.py.
             with torch.no_grad():
                 gt_img = vqgan.decode(z0.to(vdt), force_not_quantize=True).float().clamp(-1, 1)
             with autocast():
                 L_lpips = lp(x0_img, gt_img).mean()
                 L_dc = dc_loss(x0_img, gt_img.float())
-                L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, z_y, eps=eps))).mean()
+                L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, c_y, eps=eps))).mean()
             loss = (L_theta + args.lambda_lpips * L_lpips + args.lambda_dc * L_dc
                     + args.lambda_gan * L_gan_g) / args.grad_accum
             loss.backward()

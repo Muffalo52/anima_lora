@@ -37,6 +37,10 @@ def main():
     ap.add_argument("--scale", type=int, default=4)
     ap.add_argument("--version", default="v3")
     ap.add_argument("--chop_size", type=int, default=256)
+    ap.add_argument("--ckpt", default=None,
+                    help="explicit checkpoint for a local --version (x2/x4ft/x4s4) — e.g. score "
+                         "a make-sr-train checkpoint against the same frozen set the released "
+                         "teachers are scored on. Ignored for the released v1/v2/v3.")
     ap.add_argument("--skip_infer", action="store_true",
                     help="reuse existing results/ (just rescore + montage)")
     args = ap.parse_args()
@@ -56,6 +60,8 @@ def main():
             "-i", str(lr_dir), "-o", str(res_dir),
             "--version", args.version, "--chop_size", str(args.chop_size),
         ]
+        if args.ckpt:
+            cmd += ["--ckpt", args.ckpt]
         print("RUN:", " ".join(cmd))
         subprocess.run(cmd, check=True)
 

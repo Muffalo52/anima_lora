@@ -56,7 +56,8 @@ def main():
         lq = torch.rand(B, 3, 256, 256, device=dev) * 2 - 1
         z0 = vqgan.encode(gt) * cfg.diffusion.params.scale_factor
         z_y = vqgan.encode(lq) * cfg.diffusion.params.scale_factor
-        return z0, z_y
+        # c_y = the `lq` conditioning map (pixel convention); z_y stays the residual base
+        return z0, z_y, M.make_cond_lq(lq, z_y, "pixel")
 
     def report(tag):
         torch.cuda.synchronize()
@@ -65,19 +66,19 @@ def main():
 
     # ---- one FAKE-critic update ----
     print("fake-critic update...")
-    z0, z_y = sample_latents()
+    z0, z_y, c_y = sample_latents()
     t_n = torch.tensor([N_NODES[0]] * B, device=dev).long()
     eps = make_eps(student, z0)
     with torch.no_grad():
         z_tn = diff.q_sample(z0, z_y, t_n)
-        z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)  # student output (frozen here)
+        z0_hat = predict_x0(diff, student, z_tn, c_y, t_n, eps)  # student output (frozen here)
     t = torch.randint(0, T, (B,), device=dev).long()
     z_t = diff.q_sample(z0_hat, z_y, t)
-    x0_fake = predict_x0(diff, fake, z_t, z_y, t, eps)
+    x0_fake = predict_x0(diff, fake, z_t, c_y, t, eps)
     L_fake = F.mse_loss(x0_fake, z0_hat)
     # GAN-D: real=z0, fake=z0_hat features off fake critic bottleneck
-    d_real = disc(fake.encode_features(z0, z_y, eps=eps))
-    d_fake = disc(fake.encode_features(z0_hat.detach(), z_y, eps=eps))
+    d_real = disc(fake.encode_features(z0, c_y, eps=eps))
+    d_fake = disc(fake.encode_features(z0_hat.detach(), c_y, eps=eps))
     L_gan_d = (F.softplus(-d_real) + F.softplus(d_fake)).mean()
     (L_fake + 3e-3 * L_gan_d).backward()
     opt_f.step(); opt_f.zero_grad(set_to_none=True)
@@ -85,28 +86,28 @@ def main():
 
     # ---- one GENERATOR update ----
     print("generator update...")
-    z0, z_y = sample_latents()
+    z0, z_y, c_y = sample_latents()
     t_n = torch.tensor([N_NODES[0]] * B, device=dev).long()
     eps = make_eps(student, z0)
     z_tn = diff.q_sample(z0, z_y, t_n)
-    z0_hat = predict_x0(diff, student, z_tn, z_y, t_n, eps)        # grad
+    z0_hat = predict_x0(diff, student, z_tn, c_y, t_n, eps)        # grad
     t = torch.randint(0, T, (B,), device=dev).long()
     z_t = diff.q_sample(z0_hat.detach(), z_y, t)
     with torch.no_grad():                                          # DMD: teacher & fake no-grad
-        x0_teacher = predict_x0(diff, teacher, z_t, z_y, t)
-        x0_fakep = predict_x0(diff, fake, z_t, z_y, t, eps)
+        x0_teacher = predict_x0(diff, teacher, z_t, c_y, t)
+        x0_fakep = predict_x0(diff, fake, z_t, c_y, t, eps)
         grad = (x0_fakep - x0_teacher)
         grad = grad / (grad.abs().mean(dim=[1, 2, 3], keepdim=True) + 1e-8)
     L_theta = 0.5 * F.mse_loss(z0_hat, (z0_hat - grad).detach())
     # LPIPS single-step path from t=T-1
     z_TT = z_y + diff.kappa * torch.randn_like(z_y)
     tT = torch.tensor([T - 1] * B, device=dev).long()
-    z0_single = predict_x0(diff, student, z_TT, z_y, tT, make_eps(student, z_y))
+    z0_single = predict_x0(diff, student, z_TT, c_y, tT, make_eps(student, z_y))
     x0_img = vqgan.decode(z0_single, force_not_quantize=True).clamp(-1, 1)
     gt_img = torch.rand(B, 3, 256, 256, device=dev) * 2 - 1
     L_lpips = lp(x0_img, gt_img).mean()
     # GAN-G through fake bottleneck
-    L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, z_y, eps=eps))).mean()
+    L_gan_g = F.softplus(-disc(fake.encode_features(z0_hat, c_y, eps=eps))).mean()
     (L_theta + 2.0 * L_lpips + 3e-3 * L_gan_g).backward()
     opt_g.step(); opt_g.zero_grad(set_to_none=True)
     report("after generator update")

@@ -1,25 +1,38 @@
-"""ResShift ×2 finetune loop (art SR sidecar).
+"""ResShift domain-finetune loop (art SR sidecar) — ×2 and ×4.
 
 The upstream ResShift trainer + basicsr data pipeline are NOT vendored (sr/resshift/
 is config/ldm/models/utils only), so this is our own loop — same shape as
 distill_rsd/train.py but far simpler: ONE model, ONE optimizer, the canonical
 residual-shift latent MSE objective (predict_type=xstart).
 
+`--version` (default x2) picks the (config, warm-start ckpt, output dir) triple — see
+VERSIONS below. The three scales share every line of this loop; the config only moves
+`sf` (and, for x4s4, the noise schedule to match the v3 weights).
+
+  x2    sf=2, 15-step schedule, warm-start = released x4 v2 (strict load — the x2
+        config IS the x4 config with sf flipped; the schedule is sf-independent).
+  x4    sf=4, 15-step, warm-start = released x4 v2. Domain-finetune of the teacher the
+        shipped 1-step RSD student was distilled from — the student has ~saturated it
+        (68.0 vs 68.4 MUSIQ), so lifting the teacher is the only way up. Feeds
+        `sr-rsd-train --version x4ft`.
+  x4s4  sf=4, **4-step** v3 schedule, warm-start = released x4 v3. v3 scores higher on
+        our art eval (68.4) and is 4x cheaper to roll out, but the distiller needs an
+        explicit `--config sr/configs/realsr_x4_s4_art.yaml` to use it.
+
 What it does:
-  - builds UNetModelSwin from configs/realsr_x2_art.yaml (sf=2, lq_size=64)
-  - WARM-STARTS from the released x4 v2 checkpoint — the x2 config is the x4 config
-    with only sf changed, so the arch is identical and this is a strict load. The
-    model already knows ResShift denoising; finetuning just adapts it to the easier
-    2x gap on our art domain.
-  - ArtSRDataset over the HR pool: gt = 256² HR crop, lq = bicubic ÷2 + light JPEG/
+  - builds UNetModelSwin from the version's config (lq_size=64 throughout)
+  - WARM-STARTS from a released ResShift checkpoint (strict load — see warm_start).
+    The model already knows ResShift denoising; finetuning adapts it to our art domain
+    (and, at x2, to the easier 2x gap).
+  - ArtSRDataset over the HR pool: gt = 256² HR crop, lq = bicubic ÷sf + light JPEG/
     blur, upsampled back to 256² (our LR-to-HR-size convention -> z_y at 64 = z0).
     Text-fidelity knobs ON by default (both no-op gracefully if the box json is
     missing): --text_crop_prob 0.25 biases crops onto CTD text boxes
     (sr/scripts/detect_text_boxes.py) and --scale_jitter_prob 0.25 degrades at a
-    random scale in [2, --scale_jitter_max 4] so tiny glyphs appear with GT
-    supervision instead of being hallucinated at inference.
+    random scale in [sf, --scale_jitter_max] (auto = 2·sf) so tiny glyphs appear with
+    GT supervision instead of being hallucinated at inference.
   - per step: t ~ U[0,T), z_t = q_sample(z0, z_y, t), pred = model(scale_input(z_t),
-    t, lq=z_y), loss = MSE(pred, z0) + decoded-image LPIPS (--lambda_lpips, default ON
+    t, lq=c_y), loss = MSE(pred, z0) + decoded-image LPIPS (--lambda_lpips, default ON
     since 2026-07-06: the latent-MSE-only teacher was confirmed as the student quality
     ceiling — edge detail regresses to the mean) + low-freq DC color anchor
     (--lambda_dc, ported from distill_rsd: LPIPS opens the color null-space that pure
@@ -33,7 +46,7 @@ What it does:
     grad-ckpt OFF (recompute costs ~25%), bf16 ON, --compile to trade warmup for VRAM.
 
 Run in the root venv:  make sr-train ARGS="--iters 30000 [--bs 8 --compile] [--no-amp]"
-or:                    make sr-train ARGS="--iters 30000 --bs 8"
+or ×4:                 make sr-train VERSION=x4 ARGS="--iters 30000 --bs 8 --compile"
 """
 import argparse
 import json
@@ -58,8 +71,18 @@ from data import ArtSRDataset  # noqa: E402
 from rsd_models import predict_x0  # noqa: E402
 from models.unet import UNetModelSwin  # noqa: E402  (vendored ResShift, on sys.path via rsd_models)
 
-CONFIG = SR / "configs" / "realsr_x2_art.yaml"
-X4_V2 = M.WEIGHTS / "resshift_realsrx4_s15_v2.pth"
+# version -> (config, warm-start checkpoint, output subdir under output/sr/, cond_lq mode)
+# cond_lq: "pixel" = the released conditioning convention (LR pixels at latent resolution),
+# so the warm-start prior actually transfers. "latent" only for x2, whose already-shipped
+# teacher + 1-step student were both trained under it — see rsd_models.make_cond_lq.
+VERSIONS = {
+    "x2":   (SR / "configs" / "realsr_x2_art.yaml",
+             M.WEIGHTS / "resshift_realsrx4_s15_v2.pth", "x2_lpips_30k", "latent"),
+    "x4":   (SR / "configs" / "realsr_x4_art.yaml",
+             M.WEIGHTS / "resshift_realsrx4_s15_v2.pth", "x4_art", "pixel"),
+    "x4s4": (SR / "configs" / "realsr_x4_s4_art.yaml",
+             M.WEIGHTS / "resshift_realsrx4_s4_v3.pth", "x4_s4_art", "pixel"),
+}
 
 
 def dc_loss(a, b, k=32):
@@ -75,12 +98,13 @@ def dc_loss(a, b, k=32):
 
 
 def warm_start(model, ckpt_path):
-    """Load the x4 v2 weights into the x2 model, shape-tolerant.
+    """Load a released ResShift checkpoint into the model, shape-tolerant.
 
-    The x2 config differs from x4 only in `sf` (a diffusion-schedule arg, not a weight),
-    so EVERY tensor should match. We still filter by shape and report, so a future
-    config tweak that does change a shape degrades to a partial warm-start with a loud
-    warning instead of a crash.
+    All three version configs differ from the released ones only in `sf` and the noise
+    schedule (diffusion args, not weights), so EVERY tensor should match — each pairing
+    in VERSIONS is a strict load. We still filter by shape and report, so a future config
+    tweak that does change a shape degrades to a partial warm-start with a loud warning
+    instead of a crash.
     """
     sd = torch.load(ckpt_path, map_location="cpu")
     sd = sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
@@ -101,20 +125,22 @@ def warm_start(model, ckpt_path):
 
 
 @torch.no_grad()
-def sample_sr(diff, model, z_y, vqgan):
+def sample_sr(diff, model, z_y, c_y, vqgan):
     """Latent-space ResShift reverse sampling, decoded to pixels in [-1,1].
 
     NOT diff.p_sample_loop: that one takes y as a PIXEL LR and re-encodes it with an
     internal x{sf} bicubic upsample (encode_first_stage up_sample=True). We already
     hold z_y as a LATENT (the same z_y training uses), so feeding it to p_sample_loop
-    would upsample-then-encode the latent (64->128->32) and break the lq concat. Here
+    would upsample-then-encode the latent (64->128->32) and break the residual base. Here
     we drive p_sample on latents directly — identical math, our encoding convention.
+
+    z_y = residual-shift base (latent); c_y = the `lq` conditioning map (make_cond_lq).
     """
     z = diff.prior_sample(z_y)
     for i in reversed(range(diff.num_timesteps)):
         t = torch.full((z_y.shape[0],), i, device=z_y.device, dtype=torch.long)
         # clip_denoised=False — these are VQ latents (range ~±3.4), not bounded to [-1,1]
-        z = diff.p_sample(model, z, z_y, t, clip_denoised=False, model_kwargs={"lq": z_y})["sample"]
+        z = diff.p_sample(model, z, z_y, t, clip_denoised=False, model_kwargs={"lq": c_y})["sample"]
     return diff.decode_first_stage(z.float(), first_stage_model=vqgan).clamp(-1, 1)
 
 
@@ -166,9 +192,20 @@ def main():
                          "cards)")
     ap.add_argument("--no_grad_ckpt", dest="grad_ckpt", action="store_false",
                     help=argparse.SUPPRESS)  # legacy spelling (pre-2026-07 runs)
-    ap.add_argument("--init", default=str(X4_V2),
-                    help="warm-start checkpoint (default: released x4 v2 teacher)")
-    ap.add_argument("--config", default=str(CONFIG))
+    ap.add_argument("--version", choices=list(VERSIONS), default="x2",
+                    help="scale/schedule family — picks config + warm-start ckpt + output "
+                         "dir (see VERSIONS). x2 = 2x finetune; x4 = 15-step x4 teacher "
+                         "finetune (feeds sr-rsd-train --version x4ft); x4s4 = 4-step v3.")
+    ap.add_argument("--cond_lq", choices=["pixel", "latent"], default=None,
+                    help="what to feed the UNet's `lq` conditioning input (default: the "
+                         "version's — pixel for x4/x4s4, latent for the legacy x2 line). "
+                         "pixel = LR pixels at latent resolution, the convention the released "
+                         "weights were trained with; latent = the VQ latent, which is "
+                         "off-manifold for them. See rsd_models.make_cond_lq.")
+    ap.add_argument("--init", default=None,
+                    help="warm-start checkpoint (default: the version's released teacher)")
+    ap.add_argument("--config", default=None,
+                    help="ResShift config yaml (default: the version's art config)")
     ap.add_argument("--src", default=None,
                     help="HR pool dir (default: sr/data/hr_pool if present, else image_dataset)")
     ap.add_argument("--text_boxes", default=str(SR / "data" / "text_boxes.json"),
@@ -182,10 +219,12 @@ def main():
                     help="fraction of samples degraded at a random scale in "
                          "[sf, scale_jitter_max] instead of exactly sf — puts sub-native "
                          "text/detail sizes in-distribution WITH GT supervision. 0 = off")
-    ap.add_argument("--scale_jitter_max", type=float, default=4.0,
-                    help="upper degradation scale for --scale_jitter_prob draws")
+    ap.add_argument("--scale_jitter_max", type=float, default=0.0,
+                    help="upper degradation scale for --scale_jitter_prob draws "
+                         "(0 = auto: 2·sf, i.e. 4 at x2 and 8 at x4)")
     ap.add_argument("--num_workers", type=int, default=6)
-    ap.add_argument("--save_dir", default=str(M.REPO / "output" / "sr" / "x2_lpips_30k"))
+    ap.add_argument("--save_dir", default=None,
+                    help="default: output/sr/<version's subdir>")
     ap.add_argument("--log_every", type=int, default=50)
     ap.add_argument("--save_every", type=int, default=5000)
     ap.add_argument("--sample_every", type=int, default=2500,
@@ -194,11 +233,17 @@ def main():
     args = ap.parse_args()
 
     dev = M.DEVICE
-    save_dir = Path(args.save_dir)
+    cfg_path, init_ckpt, out_sub, default_cond = VERSIONS[args.version]
+    config = args.config or str(cfg_path)
+    init = args.init or str(init_ckpt)
+    cond_mode = args.cond_lq or default_cond
+    save_dir = Path(args.save_dir) if args.save_dir else M.REPO / "output" / "sr" / out_sub
     (save_dir / "samples").mkdir(parents=True, exist_ok=True)
-    cfg = M.load_configs(args.config)
+    cfg = M.load_configs(config)
     sf = cfg.diffusion.params.sf
     sf_scale = cfg.diffusion.params.scale_factor
+    # 0 = auto: match the dataset's own default (2·sf) rather than the x2-era literal 4
+    jitter_max = args.scale_jitter_max or 2 * sf
 
     # default --src to the filtered HR pool when it exists
     src = args.src
@@ -207,9 +252,9 @@ def main():
         src = str(pool) if pool.is_dir() else None
         print(f"[sr-train] --src defaulting to {src or 'image_dataset (no hr_pool — run build_hr_pool)'}")
 
-    print("building model (warm-start from x4 v2)...")
+    print(f"building model ({args.version}: warm-start from {Path(init).name})...")
     model = M._build_unet(cfg, UNetModelSwin)
-    warm_start(model, args.init)
+    warm_start(model, init)
     if args.grad_ckpt:
         n = M.enable_grad_checkpointing(model)
         print(f"  grad-checkpointing on {n} Swin layers")
@@ -254,7 +299,7 @@ def main():
                      length=args.iters * args.bs * args.grad_accum + 1000,
                      text_boxes=args.text_boxes, text_crop_prob=args.text_crop_prob,
                      scale_jitter_prob=args.scale_jitter_prob,
-                     scale_jitter_max=args.scale_jitter_max),
+                     scale_jitter_max=jitter_max),
         batch_size=args.bs, num_workers=args.num_workers, drop_last=True,
         pin_memory=True, persistent_workers=args.num_workers > 0)
     it = iter(loader)
@@ -291,19 +336,20 @@ def main():
         return args.lr * f
 
     log_path = save_dir / "progress.jsonl"
-    snap = {"method": "resshift_x2", "config": args.config, "sf": sf, "init": args.init,
+    snap = {"method": f"resshift_{args.version}", "version": args.version, "config": config,
+            "sf": sf, "init": init, "cond_lq": cond_mode,
             "iters": args.iters, "bs": args.bs, "lr": args.lr, "lambda_lpips": args.lambda_lpips,
             "lambda_dc": args.lambda_dc,
             "amp": args.amp, "compile": args.compile, "grad_ckpt": args.grad_ckpt,
             "text_boxes": args.text_boxes, "text_crop_prob": args.text_crop_prob,
             "scale_jitter_prob": args.scale_jitter_prob,
-            "scale_jitter_max": args.scale_jitter_max}
+            "scale_jitter_max": jitter_max}
     (save_dir / "snapshot.toml").write_text(
         "\n".join(f'{k} = {json.dumps(v)}' for k, v in snap.items()) + "\n")
 
     t0 = time.time()
-    print(f"training: iters={args.iters} bs={args.bs}x{args.grad_accum} sf={sf} T={T} "
-          f"amp={args.amp} compile={args.compile} grad_ckpt={args.grad_ckpt} "
+    print(f"training: version={args.version} cond_lq={cond_mode} iters={args.iters} "
+          f"bs={args.bs}x{args.grad_accum} sf={sf} T={T} amp={args.amp} compile={args.compile} grad_ckpt={args.grad_ckpt} "
           f"lpips={args.lambda_lpips} dc={args.lambda_dc} src={src}")
 
     for step in range(args.iters):
@@ -313,11 +359,12 @@ def main():
         for _ in range(args.grad_accum):
             gt, lq = next_batch(); B = gt.shape[0]
             z0, z_y = encode(gt, lq)
+            c_y = M.make_cond_lq(lq, z_y, cond_mode)   # `lq` conditioning != residual base
             t = torch.randint(0, T, (B,), device=dev)
             noise = torch.randn_like(z0)
             z_t = diff.q_sample(z0, z_y, t, noise=noise)
             with autocast():
-                pred = predict_x0(diff, model, z_t, z_y, t)        # predict_type=xstart -> pred IS z0
+                pred = predict_x0(diff, model, z_t, c_y, t)   # xstart -> pred IS z0
                 L_mse = F.mse_loss(pred.float(), z0.float())
             L = L_mse
             if lp is not None or args.lambda_dc > 0:
@@ -362,18 +409,18 @@ def main():
         if args.sample_every and step % args.sample_every == 0:
             gt, lq = next_batch()
             _, z_y = encode(gt, lq)
-            sr = sample_sr(diff, ema, z_y, vqgan)
+            sr = sample_sr(diff, ema, z_y, M.make_cond_lq(lq, z_y, cond_mode), vqgan)
             save_montage(save_dir / "samples" / f"step_{step:06d}.png", lq, sr, gt)
 
         if step > 0 and step % args.save_every == 0:
             torch.save({"ema": ema.state_dict(), "model": model.state_dict(), "step": step},
-                       save_dir / f"resshift_x2_{step}.pth")
+                       save_dir / f"resshift_{args.version}_{step}.pth")
         if args.max_steps and step + 1 >= args.max_steps:
             print(f"max_steps {args.max_steps} hit — stopping (smoke).")
             break
 
     torch.save({"ema": ema.state_dict(), "model": model.state_dict(), "step": args.iters},
-               save_dir / "resshift_x2_final.pth")
+               save_dir / f"resshift_{args.version}_final.pth")
     print(f"done. saved to {save_dir}")
 
 

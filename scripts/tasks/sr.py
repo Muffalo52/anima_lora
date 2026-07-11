@@ -61,7 +61,13 @@ def cmd_sr_build_hr_pool(extra):
 
 
 def cmd_sr_train(extra):
-    """ResShift ×2 finetune: warm-start the released x4 v2, train on our HR pool.
+    """ResShift domain-finetune on our HR pool, warm-started from a released teacher.
+
+    VERSION picks the scale/schedule family (default x2):
+      x2   — 2x finetune off the released x4 v2 (the shipped x2 line).
+      x4   — 15-step x4 teacher finetune; its checkpoint feeds `sr-rsd-train --version x4ft`.
+      x4s4 — 4-step (v3-schedule) x4 finetune; distilling it needs an explicit --config.
+    Output lands in output/sr/{x2_lpips_30k,x4_art,x4_s4_art}.
 
     Defaults --src to sr/data/hr_pool when it exists (build it with `make sr-build-hr-pool`);
     otherwise train.py falls back to image_dataset. Pass ARGS=\"--iters … --bs … --amp\".
@@ -69,8 +75,12 @@ def cmd_sr_train(extra):
     Routes through the daemon like every other GPU target (attach by default;
     ``--queue`` detaches, ``--inline`` runs the child directly for debugging).
     """
-    mode, extra = _resolve_run_mode(list(extra))
-    run_command("sr-train", [str(SR / "train_x2" / "train.py"), *extra], mode=mode)
+    argv = list(extra)
+    version = os.environ.get("VERSION", "")
+    if version and not any(a == "--version" or a.startswith("--version=") for a in argv):
+        argv = ["--version", version, *argv]
+    mode, argv = _resolve_run_mode(argv)
+    run_command("sr-train", [str(SR / "train_sr" / "train.py"), *argv], mode=mode)
 
 
 def cmd_sr_rsd_train(extra):
@@ -81,8 +91,9 @@ def cmd_sr_rsd_train(extra):
     detail at bounded decode cost (NOT the downsized rsd_hr_1024). Falls back to
     train.py's own image_dataset default if the cache is absent.
 
-    VERSION=x2 distills our sr-train x2 finetune (sr/weights/resshift_x2_final.pth) instead
-    of the released x4 teacher; output lands in output/sr/rsd_x2. VERSION=x4 is the default.
+    VERSION picks the teacher: x4 (default) = released 15-step v2; x2 = our sr-train x2
+    finetune (sr/weights/resshift_x2_final.pth); x4ft = our sr-train x4 finetune
+    (output/sr/x4_art/resshift_x4_final.pth). Output lands in output/sr/rsd[_<version>].
     """
     argv = list(extra)
     version = os.environ.get("VERSION", "")
@@ -117,13 +128,14 @@ def cmd_sr_rsd_infer(extra):
 
 
 def cmd_sr_test(extra):
-    """Tiled SR (released x4 or local x2) on a folder/image: make sr-test IN=<path>
-    [OUT=… VERSION=v3|x2 CHOP=512 CKPT=…].
+    """Tiled SR (released x4 or one of our art finetunes) on a folder/image:
+    make sr-test IN=<path> [OUT=… VERSION=v3|v2|x2|x4ft|x4s4 CHOP=512 CKPT=…].
 
     Thin pass-through to the vendored, basicsr-free sr/scripts/sr_infer.py. Output is
     rsd-infer-style: per-image PNGs + infer_summary.json (MUSIQ) + contact_sheet.png.
-    OUT unset -> script default (output/sr/<version>/infer for x2, sr/data/results for
-    released x4). ARGS="--no_musiq --no_sheet --sheet_max N" to trim the extras.
+    OUT unset -> script default (output/sr/<version>/infer for local versions,
+    sr/data/results for released x4). ARGS="--no_musiq --no_sheet --sheet_max N" to trim
+    the extras.
     """
     in_path = os.environ.get("IN", "")
     if not in_path:
@@ -137,7 +149,7 @@ def cmd_sr_test(extra):
     out = os.environ.get("OUT", "")
     if out:
         cmd += ["-o", out]
-    ckpt = os.environ.get("CKPT", "")  # x2 only: pick a make-sr-train checkpoint
+    ckpt = os.environ.get("CKPT", "")  # local versions only: pick a make-sr-train checkpoint
     if ckpt:
         cmd += ["--ckpt", ckpt]
     cmd += list(extra)

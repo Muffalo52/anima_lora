@@ -43,6 +43,44 @@ make sr-test IN=foo.png [OUT=… VERSION=v3 CHOP=512]   # tiled SR on any image/
 `make sr-setup` is idempotent (`uv sync` is). The vendored VQGAN attention patch lives
 in the source (committed), so there's nothing to re-apply.
 
+## Invariant: `lq` is the LR **pixels**, not the latent
+
+The UNet takes two LR-derived inputs and they are NOT interchangeable:
+
+- **`z_y`** — VQ latent of the bicubic-upsampled LR. The **residual-shift base**
+  (`q_sample` / `prior_sample` / `p_sample`). Always the latent.
+- **`lq`** (`model_kwargs`) — a separate 3-channel map concatenated onto the latent
+  inside the first conv. The released realsr checkpoints were trained with the **LR
+  pixels resampled to latent resolution** ([-1,1]); `lq_size == image_size == 64` makes
+  `feature_extractor = nn.Identity`, so whatever you hand it goes straight into the concat.
+
+Passing `z_y` as `lq` is off-manifold for those weights: the teacher's x0 prediction
+degrades from img-MSE 0.004 to 1.50 (t=14) and 15-step inference comes out **neon green**.
+That bug was live in `sr_infer.py` (2026-06-30 → 2026-07-11) and in the RSD distill loop
+from the start — the shipped x4 student was distilled from a mis-conditioned teacher.
+
+Build the conditioning with **`rsd_models.make_cond_lq(lq_img, z_y, mode)`** and pass it
+as `predict_x0`'s `c_y`. Default mode is `pixel` for every version except the legacy
+**x2** line, whose teacher and 1-step student were both trained under `latent` and are
+therefore self-consistent. Student checkpoints record `cond_lq` in their meta; ckpts
+without it predate the fix and run as `latent`. Override anywhere with `--cond_lq`.
+
+## Finetuning (`make sr-train`)
+
+One loop, `sr/train_sr/train.py`, parametrized by `VERSION`:
+
+```bash
+make sr-train VERSION=x2    ARGS="--iters 30000 --bs 8"   # 2x line (shipped)
+make sr-train VERSION=x4    ARGS="--iters 30000 --bs 8 --compile"   # 15-step x4 teacher
+make sr-train VERSION=x4s4  ARGS="--iters 30000 --bs 8 --compile"   # 4-step (v3) x4 teacher
+```
+
+Each version picks a config + released warm-start ckpt + output dir (see `VERSIONS` in
+the file); the x4 configs are the released x4 config with only the trainer/data sections
+dropped, so the warm-start is a strict 564/564 load. The x4 finetune feeds the distiller
+as `make sr-rsd-train VERSION=x4ft` (an s4 finetune additionally needs
+`--config sr/configs/realsr_x4_s4_art.yaml`).
+
 ## Phase 0 — verdict (2026-06-29): released model transfers well to our art
 
 Ran released **ResShift ×4 v3 (4-step)** on 30 art images (synthetic LR = bicubic

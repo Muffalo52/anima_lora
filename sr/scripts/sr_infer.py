@@ -3,11 +3,11 @@
 A self-contained reimplementation of ResShift's ``inference_resshift.py`` + the core
 of ``sampler.py``, using only the vendored ``sr/resshift`` tree (models / ldm /
 util_image) — no basicsr, no datapipe, no external clone. Handles the released realsr
-x4 versions (v1/v2 = 15-step, v3 = 4-step) AND our locally-trained ``x2`` art model
-(version "x2" — config sr/configs/realsr_x2_art.yaml, checkpoint from output/sr/x2 or
---ckpt). The scale factor is read from the config (NOT hardcoded), so the chop/tiling
-math generalizes. Tiled inference for large images + weight auto-download (torch.hub)
-for the released x4 versions.
+x4 versions (v1/v2 = 15-step, v3 = 4-step) AND our locally-trained art finetunes from
+make sr-train (``x2`` / ``x4ft`` / ``x4s4`` — config + ckpt dir in _LOCAL, override the
+checkpoint with --ckpt). The scale factor is read from the config (NOT hardcoded), so the
+chop/tiling math generalizes. Tiled inference for large images + weight auto-download
+(torch.hub) for the released x4 versions.
 
 Output mirrors distill_rsd/infer.py: per-image SR PNGs + infer_summary.json (per-image
 MUSIQ for SR and the bicubic baseline, means, peak VRAM) + contact_sheet.png of
@@ -47,18 +47,29 @@ _VERSIONS = {
     "v3": ("realsr_swinunet_realesrgan256_journal.yaml", "resshift_realsrx4_s4_v3.pth",
            f"{_REL}/resshift_realsrx4_s4_v3.pth"),
 }
-# our locally-trained art models (no release URL — checkpoint is produced by make sr-train)
+# our locally-trained art models (no release URL — checkpoint is produced by make sr-train).
+# version -> (config, default ckpt dir); the dirs mirror train_sr/train.py's VERSIONS.
 _LOCAL = {
-    "x2": (SR / "configs" / "realsr_x2_art.yaml", SR.parent / "output" / "sr" / "x2"),
+    "x2":   (SR / "configs" / "realsr_x2_art.yaml", SR.parent / "output" / "sr" / "x2"),
+    "x4ft": (SR / "configs" / "realsr_x4_art.yaml", SR.parent / "output" / "sr" / "x4_art"),
+    "x4s4": (SR / "configs" / "realsr_x4_s4_art.yaml", SR.parent / "output" / "sr" / "x4_s4_art"),
 }
+# ckpt file prefix per local version (train_sr writes resshift_<train-version>_<step>.pth)
+_LOCAL_PREFIX = {"x2": "x2", "x4ft": "x4", "x4s4": "x4s4"}
+# `lq` conditioning convention per version (rsd_models.make_cond_lq). The released weights
+# want the LR PIXELS at latent resolution; only the x2 line was trained on the VQ latent.
+# Passing the latent to a released checkpoint yields neon-green output — that regression
+# shipped 2026-06-30..2026-07-11 and is what queued.md misdiagnosed as a bf16 decode bug.
+_COND = {"v1": "pixel", "v2": "pixel", "v3": "pixel",
+         "x2": "latent", "x4ft": "pixel", "x4s4": "pixel"}
 
 
-def _latest_local_ckpt(ckpt_dir):
-    """Newest resshift_x2_*.pth in a make-sr-train output dir (prefer *_final)."""
-    cands = sorted(Path(ckpt_dir).glob("resshift_x2_*.pth"))
+def _latest_local_ckpt(ckpt_dir, prefix):
+    """Newest resshift_<prefix>_*.pth in a make-sr-train output dir (prefer *_final)."""
+    cands = sorted(Path(ckpt_dir).glob(f"resshift_{prefix}_*.pth"))
     if not cands:
         raise SystemExit(
-            f"no resshift_x2_*.pth in {ckpt_dir} — train one first (make sr-train) "
+            f"no resshift_{prefix}_*.pth in {ckpt_dir} — train one first (make sr-train) "
             f"or pass --ckpt <path>.")
     final = [c for c in cands if c.stem.endswith("final")]
     return final[0] if final else cands[-1]
@@ -107,7 +118,7 @@ class ResShiftInfer:
     """Released ResShift x4 sampler built from the vendored tree."""
 
     def __init__(self, version="v3", chop_size=512, chop_stride=-1, chop_bs=1,
-                 use_amp=True, seed=12345, device=M.DEVICE, ckpt_path=None):
+                 use_amp=True, seed=12345, device=M.DEVICE, ckpt_path=None, cond_lq=None):
         self.device = device
         self.use_amp = use_amp
         self.version = version
@@ -119,7 +130,8 @@ class ResShiftInfer:
             # no release URL. Our make-sr-train ckpts are {"ema","model","step"} dicts.
             cfg_path, ckpt_dir = _LOCAL[version]
             cfg = M.load_configs(cfg_path)
-            ckpt = Path(ckpt_path) if ckpt_path else _latest_local_ckpt(ckpt_dir)
+            ckpt = Path(ckpt_path) if ckpt_path \
+                else _latest_local_ckpt(ckpt_dir, _LOCAL_PREFIX[version])
             print(f"[sr_infer] {version}: cfg={Path(cfg_path).name} ckpt={ckpt.name}")
             sd = torch.load(str(ckpt), map_location=device)
             sd = sd.get("ema") or sd.get("model") or sd.get("state_dict") or sd
@@ -146,6 +158,7 @@ class ResShiftInfer:
         self.autoencoder = M.build_autoencoder(cfg, device)
         self.diffusion = M.build_diffusion(cfg)
         self.cond_lq = cfg.model.params.cond_lq
+        self.cond_mode = cond_lq or _COND[version]
         # reflect-pad the LR so the encoded latent is divisible by the Swin alignment at
         # every level. latent = y0_px * sf / 4 (VQ-f4); deepest level downsamples by
         # 2^(#levels-1), each needing size % window == 0 -> latent % (window*2^(L-1)) == 0.
@@ -167,11 +180,11 @@ class ResShiftInfer:
         """y0: 1xCxHxW in [-1,1] RGB -> SR tensor in [-1,1], reflect-padded to offset.
 
         We encode the LR to a LATENT (z_y) and run the reverse loop on latents, rather
-        than diffusion.p_sample_loop. p_sample_loop forwards model_kwargs['lq'] through
-        UN-encoded, so it only works when the pixel y0 and its latent z_y share spatial
-        dims — true at x4 (x4 bicubic-up then /4 VAE is size-preserving) but NOT at x2
-        (/2), where pixel-lq vs latent-x_t mismatch (e.g. 512 vs 256). Encoding here is
-        scale-agnostic. clip_denoised stays False — latents aren't bounded to [-1,1].
+        than diffusion.p_sample_loop: that one leaves model_kwargs['lq'] to the caller and
+        assumes the pixel LR already matches the latent grid — true at x4, false at x2
+        (LR 128 vs latent 64). make_cond_lq resamples the LR to the latent grid, so the
+        conditioning is scale-agnostic AND stays the LR pixels the released weights expect.
+        clip_denoised stays False — latents aren't bounded to [-1,1].
         """
         ori_h, ori_w = y0.shape[2:]
         pad_h = (-ori_h) % self.offset
@@ -180,7 +193,10 @@ class ResShiftInfer:
             y0 = F.pad(y0, (0, pad_w, 0, pad_h), mode="reflect")
         z_y = self.diffusion.encode_first_stage(y0, self.autoencoder, up_sample=True)
         z = self.diffusion.prior_sample(z_y)
-        kw = {"lq": z_y} if self.cond_lq else None
+        # z_y is the residual-shift BASE; the model's `lq` input is a separate conditioning
+        # map — the released weights want the LR pixels there, not the latent (make_cond_lq).
+        y_up = F.interpolate(y0, scale_factor=self.sf, mode="bicubic", align_corners=False)
+        kw = {"lq": M.make_cond_lq(y_up, z_y, self.cond_mode)} if self.cond_lq else None
         for i in reversed(range(self.diffusion.num_timesteps)):
             t = torch.full((z_y.shape[0],), i, device=z_y.device, dtype=torch.long)
             z = self.diffusion.p_sample(self.model, z, z_y, t, clip_denoised=False,
@@ -267,9 +283,13 @@ def main():
                     help="output dir (default: output/sr/<version>/infer for local models, "
                          "sr/data/results for released x4)")
     ap.add_argument("-v", "--version", default="v3", choices=list(_VERSIONS) + list(_LOCAL),
-                    help="released x4: v1/v2/v3 — or locally-trained x2 (make sr-train).")
+                    help="released x4: v1/v2/v3 — or our art finetunes x2/x4ft/x4s4 (make sr-train).")
     ap.add_argument("--ckpt", default=None,
-                    help="explicit checkpoint (x2 only; default = newest in output/sr/x2).")
+                    help="explicit checkpoint (local versions only; default = newest in the "
+                         "version's output/sr dir).")
+    ap.add_argument("--cond_lq", choices=["pixel", "latent"], default=None,
+                    help="override the version's `lq` conditioning convention (default: pixel "
+                         "for released/x4 art models, latent for the legacy x2 line).")
     ap.add_argument("--chop_size", type=int, default=512, choices=[512, 256, 64])
     ap.add_argument("--chop_stride", type=int, default=-1)
     ap.add_argument("--no_amp", action="store_true", help="disable bf16 autocast")
@@ -285,7 +305,7 @@ def main():
         else SR / "data" / "results")
     sampler = ResShiftInfer(version=args.version, chop_size=args.chop_size,
                             chop_stride=args.chop_stride, use_amp=not args.no_amp,
-                            seed=args.seed, ckpt_path=args.ckpt)
+                            seed=args.seed, ckpt_path=args.ckpt, cond_lq=args.cond_lq)
     sampler.run(args.in_path, out_path, musiq=not args.no_musiq,
                 sheet=not args.no_sheet, sheet_max=args.sheet_max)
     print(f"[sr_infer] done -> {out_path}")

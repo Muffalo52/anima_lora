@@ -108,7 +108,7 @@ def roundtrip_ref(vqgan, gt_t, sf_scale, vdt):
 
 @torch.no_grad()
 def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True,
-                 zT_noise=None, eps_noise=None):
+                 zT_noise=None, eps_noise=None, cond_mode="latent"):
     """One tile: reflect-pad to `align` (Swin needs dims % lq_size), encode -> 1-step
     student -> decode -> crop back. In/out 1x3xHxW in [-1,1].
 
@@ -143,15 +143,20 @@ def _sample_tile(cfg, diff, vqgan, student, hr_t, align, device, amp=True,
     eps = (make_eps(student, z_y) if eps_noise is None
            else eps_noise[:, :, :hz, :wz].to(z_y.dtype))
     tT = torch.full((z_y.shape[0],), diff.num_timesteps - 1, device=device, dtype=torch.long)
+    # `lq` conditioning is NOT the residual base z_y — students distilled after 2026-07-11
+    # inherit the released pixel convention (see rsd_models.make_cond_lq). cond_mode comes
+    # from the ckpt meta, so pre-fix students keep their latent conditioning and still run.
+    c_y = M.make_cond_lq(hr_t, z_y, cond_mode)
     with ctx:
-        z0 = predict_x0(diff, student, z_T, z_y, tT, eps)
+        z0 = predict_x0(diff, student, z_T, c_y, tT, eps)
     img = vqgan.decode(z0.to(vdt), force_not_quantize=True).clamp(-1, 1)
     return img[:, :, :h, :w].float()
 
 
 @torch.no_grad()
 def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=None,
-               chop=512, tile_batch=1, amp=True, shared_noise=True, noise_seed=None):
+               chop=512, tile_batch=1, amp=True, shared_noise=True, noise_seed=None,
+               cond_mode="latent"):
     """1-step student SR on an HR-sized (upsampled-LR) tensor 1x3xHxW in [-1,1].
 
     The student is spatially same-resolution (the x4 lives in the residual-shift, not a
@@ -207,24 +212,31 @@ def student_sr(cfg, diff, vqgan, student, lq_img, device, align=256, overlap=Non
                 eps_noise = torch.cat([g_eps[:, :, h0 // f:h0 // f + lt, w0 // f:w0 // f + lt]
                                        for (h0, _, w0, _) in info], dim=0)
             spliter.update(_sample_tile(cfg, diff, vqgan, student, pch, align, device, amp,
-                                        zT_noise=zt_noise, eps_noise=eps_noise), info)
+                                        zT_noise=zt_noise, eps_noise=eps_noise,
+                                        cond_mode=cond_mode), info)
         img = spliter.gather()
     else:
-        img = _sample_tile(cfg, diff, vqgan, student, lq_img, align, device, amp)
+        img = _sample_tile(cfg, diff, vqgan, student, lq_img, align, device, amp,
+                           cond_mode=cond_mode)
     return ((img[0].permute(1, 2, 0).cpu().numpy() + 1) * 127.5).round().clip(0, 255).astype(np.uint8)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", choices=["x4", "x2"], default="x4",
-                    help="scale family: x4 = released teacher schedule; x2 = our sr-train finetune. "
-                         "Selects the config (hence sf) and the default ckpt_dir/out_dir.")
+    ap.add_argument("--version", choices=list(M.VERSIONS), default="x4",
+                    help="scale family: x4 = released teacher schedule; x2 / x4ft = our sr-train "
+                         "finetunes. Selects the config (hence sf) and the default ckpt_dir/out_dir. "
+                         "Must match the version the student was distilled under.")
     ap.add_argument("--config", default=None, help="override the version's ResShift config yaml")
+    ap.add_argument("--cond_lq", choices=["pixel", "latent"], default=None,
+                    help="override the `lq` conditioning mode (default: the ckpt's own "
+                         "cond_lq meta, or latent for pre-2026-07-11 ckpts that lack it). "
+                         "Must match what the student was distilled with.")
     ap.add_argument("--ckpt", default=None,
                     help="rsd_student_*.pth (uses EMA weights); default = most recent in --ckpt_dir")
     ap.add_argument("--ckpt_dir", default=None,
                     help="dir to pick the most recent ckpt from when --ckpt is unset "
-                         "(default: output/sr/rsd for x4, output/sr/rsd_x2 for x2)")
+                         "(default: output/sr/rsd for x4, output/sr/rsd_<version> otherwise)")
     ap.add_argument("--eval", action="store_true",
                     help="reference eval on the Phase-0 set: MUSIQ (no-ref) plus, when --hr_dir "
                          "matches, DC + LPIPS against the ROUNDTRIP-consistent decode(z0) "
@@ -292,7 +304,11 @@ def main():
                                 noise_channels=sd.get("noise_channels"))
     key = args.weights if args.weights in sd else ("ema" if "ema" in sd else None)
     student.load_state_dict(sd[key] if key else sd, strict=True)
-    print(f"weights: {key or 'raw'} | noise_mode: {student.noise_mode}({student.noise_channels}ch)")
+    # ckpts written before the 2026-07-11 cond_lq fix carry no meta -> they were distilled
+    # under latent conditioning and must keep it.
+    cond_mode = args.cond_lq or sd.get("cond_lq", "latent")
+    print(f"weights: {key or 'raw'} | noise_mode: {student.noise_mode}"
+          f"({student.noise_channels}ch) | cond_lq: {cond_mode}")
     student.eval()
     if args.compile:
         # Bump the recompile ceiling: dynamic=True still specializes on a few discrete
@@ -352,7 +368,8 @@ def main():
     pbar = tqdm(lr_paths, desc="student SR", unit="img")
     for lr_path in pbar:
         lq_t, _ = load_lr(lr_path, dev, scale)
-        sr = student_sr(cfg, diff, vqgan, student, lq_t, dev, align=align, overlap=overlap,
+        sr = student_sr(cfg, diff, vqgan, student, lq_t, dev, cond_mode=cond_mode,
+                        align=align, overlap=overlap,
                         chop=args.chop, tile_batch=args.tile_batch, amp=not args.no_bf16,
                         shared_noise=not args.no_shared_noise, noise_seed=args.noise_seed)
         Image.fromarray(sr).save(out_dir / lr_path.name)

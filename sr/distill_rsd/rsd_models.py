@@ -28,11 +28,24 @@ from models.unet import UNetModelSwin  # noqa: E402  (vendored ResShift)
 CONFIG = RESSHIFT / "configs" / "realsr_swinunet_realesrgan256.yaml"
 TEACHER_CKPT = WEIGHTS / "resshift_realsrx4_s15_v2.pth"
 
-# x2 distill: teacher is our own x2 finetune (make sr-train) rather than the released
-# x4 v2. The config differs from x4 only in `sf` (diffusion schedule, not a weight shape),
-# so the same StochasticUNet arch + warm-start machinery applies unchanged.
+# Finetuned teachers (make sr-train). Their art configs differ from the released x4 one
+# only in `sf` / the noise schedule (diffusion args, not weight shapes), so the same
+# StochasticUNet arch + warm-start machinery applies unchanged.
+#   x2   — our x2 finetune, distilled into the x2 student that ships in the ComfyUI node.
+#   x4ft — our x4 finetune (queued.md Stage 1). Same 15-step schedule as the released x4,
+#          so the distiller's math is untouched; only the teacher weights change. This is
+#          the version to pass for Stage 2 — it removes the need to hand-pass --teacher.
 X2_CONFIG = SR / "configs" / "realsr_x2_art.yaml"
 X2_TEACHER_CKPT = WEIGHTS / "resshift_x2_final.pth"
+X4FT_CONFIG = SR / "configs" / "realsr_x4_art.yaml"
+X4FT_TEACHER_CKPT = REPO / "output" / "sr" / "x4_art" / "resshift_x4_final.pth"
+
+# version -> (config, teacher checkpoint, cond_lq mode)
+VERSIONS = {
+    "x4":   (CONFIG, TEACHER_CKPT, "pixel"),
+    "x2":   (X2_CONFIG, X2_TEACHER_CKPT, "latent"),
+    "x4ft": (X4FT_CONFIG, X4FT_TEACHER_CKPT, "pixel"),
+}
 
 DEVICE = "cuda"
 
@@ -40,23 +53,65 @@ DEVICE = "cuda"
 def resolve_version(version="x4", config=None, teacher=None):
     """Map a version tag to (config_path, teacher_ckpt); explicit args override.
 
-    'x4' (default) = released 15-step v2 teacher; 'x2' = our sr-train finetune.
+    'x4' (default) = released 15-step v2 teacher; 'x2' / 'x4ft' = our sr-train finetunes.
+    A 4-step (v3-schedule) x4 finetune has no tag — distill it with
+    `--version x4ft --config sr/configs/realsr_x4_s4_art.yaml --teacher <ckpt>`.
     """
-    if version == "x2":
-        cfg_path, tch = X2_CONFIG, X2_TEACHER_CKPT
-    elif version == "x4":
-        cfg_path, tch = CONFIG, TEACHER_CKPT
-    else:
-        raise ValueError(f"unknown version {version!r} (expected 'x4' or 'x2')")
+    try:
+        cfg_path, tch, _ = VERSIONS[version]
+    except KeyError:
+        raise ValueError(f"unknown version {version!r} (expected one of {list(VERSIONS)})") from None
     return Path(config) if config else cfg_path, Path(teacher) if teacher else tch
 
 
-def predict_x0(diff, model, z_t, z_y, t, eps=None):
+def cond_mode_for(version):
+    """Default `lq` conditioning mode for a version (see make_cond_lq)."""
+    return VERSIONS[version][2]
+
+
+def make_cond_lq(lq_img, z_y, mode="pixel"):
+    """Build the tensor fed to the UNet's `lq` conditioning input.
+
+    ResShift's `lq` input is NOT the residual-shift base — that's `z_y`, the VQ latent of
+    the upsampled LR, and it keeps its own (latent) identity in q_sample/prior everywhere.
+    `lq` is a separate 3-channel map concatenated onto the latent inside the first conv,
+    and the released realsr checkpoints were trained with the **LR PIXELS** there (the
+    lq_size == image_size == 64 config resolves feature_extractor to nn.Identity, so what
+    goes in is the LR image at latent resolution, values in [-1,1]).
+
+    Feeding the VQ latent instead (mode="latent") is off-manifold for those weights: the
+    released teacher's x0 prediction degrades from img-MSE 0.004 to 0.038 (t=0) / 0.51
+    (t=7) / 1.50 (t=14) vs GT, and 15-step inference comes out neon green. That bug shipped
+    in sr_infer + the distill loop between 2026-06-30 and 2026-07-11 and is what the queued
+    "bf16 color bug" actually was (bf16 is innocent — fp32 sampling is equally neon).
+
+    mode="latent" is kept ONLY for the x2 line, whose teacher and 1-step student were both
+    trained from scratch under that convention and are therefore self-consistent (it's why
+    the x2 finetune log shows "neon -> coherent by ~400 steps": it was re-learning the
+    conditioning from the warm-start instead of inheriting it). New finetunes use "pixel"
+    so the released prior actually transfers.
+
+    lq_img: the HR-sized bicubic-upsampled LR in [-1,1] (what ArtSRDataset returns as "lq",
+            and what encode_first_stage(up_sample=True) encodes into z_y).
+    z_y:    the LR latent — only its spatial dims are used here.
+    """
+    if mode == "latent":
+        return z_y
+    if mode != "pixel":
+        raise ValueError(f"cond_lq mode must be 'pixel' or 'latent', got {mode!r}")
+    return torch.nn.functional.interpolate(
+        lq_img.float(), size=z_y.shape[-2:], mode="bicubic", align_corners=False,
+    ).clamp(-1, 1).to(z_y.dtype)
+
+
+def predict_x0(diff, model, z_t, c_y, t, eps=None):
     """ResShift x0 prediction (predict_type=xstart): scale input, forward, output IS x0.
 
-    eps is passed only to the stochastic student/fake nets; the teacher is deterministic.
+    c_y is the `lq` CONDITIONING map — build it with make_cond_lq, do NOT pass the residual
+    base z_y directly (that's the latent-lq bug; see make_cond_lq). eps is passed only to
+    the stochastic student/fake nets; the teacher is deterministic.
     """
-    kw = {"lq": z_y}
+    kw = {"lq": c_y}
     if eps is not None:
         kw["eps"] = eps
     return model(diff._scale_input(z_t, t), t, **kw)
