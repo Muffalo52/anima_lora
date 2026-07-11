@@ -24,7 +24,7 @@ from tqdm import tqdm
 from library.inference.adapters import (
     clear_hydra_sigma,
     set_hydra_sigma,
-    set_xattn_gain,
+    set_xattn_boost_state,
 )
 from library.inference import sampling as inference_utils
 from library.inference.sampler_context import SamplerSideChannels
@@ -251,6 +251,8 @@ def spectrum_denoise(
     # steps with actual forwards anyway.
     xattn_boost = ctx.xattn_boost
     xattn_boost_band = ctx.xattn_boost_band
+    xattn_renorm = ctx.xattn_boost_renorm
+    xattn_renorm_frac = ctx.xattn_boost_renorm_frac
 
     do_cfg = guidance_scale != 1.0
     num_steps = len(timesteps)
@@ -448,7 +450,12 @@ def spectrum_denoise(
                         xattn_boost is not None and float(sigmas[i]) >= xattn_boost_band
                     )
                     if _boost_step:
-                        set_xattn_gain(anima, xattn_boost)
+                        set_xattn_boost_state(
+                            anima,
+                            xattn_boost,
+                            renorm_mode=xattn_renorm,
+                            frac=xattn_renorm_frac,
+                        )
                     with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": pooled_text_pos}
@@ -459,7 +466,7 @@ def spectrum_denoise(
                             model_x, t_exp, embed, padding_mask=padding_mask, **_pos_kw
                         )
                     if _boost_step:
-                        set_xattn_gain(anima, 1.0)  # uncond runs at identity
+                        set_xattn_boost_state(anima, 1.0)  # uncond runs at identity
                     feat = captured["feat"]
                     if cond_fc is None:
                         cond_fc = SpectrumPredictor(
@@ -599,7 +606,7 @@ def spectrum_denoise(
 
     finally:
         if xattn_boost is not None:
-            set_xattn_gain(anima, 1.0)
+            set_xattn_boost_state(anima, 1.0)
         clear_hydra_sigma(anima)
         if pgraft_network is not None and lora_cutoff_step is not None:
             pgraft_network.set_enabled(True)

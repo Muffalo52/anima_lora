@@ -40,10 +40,14 @@ class SamplerSideChannels:
     soft_tokens_neg_seqlens: Optional[torch.Tensor] = None
     # Front-loaded cross-attn residual gain (--xattn_boost): λ for the cond
     # forward at σ ≥ xattn_boost_band, None = off. Runners must reset the
-    # per-block gain to 1.0 before any uncond forward and on loop exit
-    # (library.inference.adapters.set_xattn_gain).
+    # per-block gain to 1.0 before any uncond forward and on loop exit —
+    # use library.inference.adapters.set_xattn_boost_state, which also
+    # carries the renorm mode ('img' default: per-image mean-norm matching;
+    # 'tok' per-token; 'off' raw gain) and partial exponent ρ.
     xattn_boost: Optional[float] = None
     xattn_boost_band: float = 0.85
+    xattn_boost_renorm: str = "img"
+    xattn_boost_renorm_frac: float = 0.5
 
     @classmethod
     def from_args(
@@ -68,6 +72,10 @@ class SamplerSideChannels:
         return cls(
             xattn_boost=_boost if _boost != 1.0 else None,
             xattn_boost_band=float(getattr(args, "xattn_boost_band", 0.85)),
+            xattn_boost_renorm=str(getattr(args, "xattn_boost_renorm", "img")),
+            xattn_boost_renorm_frac=float(
+                getattr(args, "xattn_boost_renorm_frac", 0.5)
+            ),
             pgraft_network=pgraft_network,
             lora_cutoff_step=lora_cutoff_step,
             pooled_text_pos=pooled_text_pos,

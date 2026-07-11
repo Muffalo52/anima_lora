@@ -481,6 +481,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="σ cutoff for --xattn_boost (boost at σ ≥ band). Default 0.85 = "
         "the drive-floor σ; ~10 of 28 shifted-schedule steps.",
     )
+    parser.add_argument(
+        "--xattn_boost_renorm",
+        choices=["off", "tok", "img"],
+        default="img",
+        help="Norm matching for --xattn_boost (inert while boost is off). "
+        "'img' (default — Phase-1'' winner) rescales each block's post-"
+        "cross-attn state so the per-image MEAN token norm stays on the "
+        "gain-1 shell: keeps the boost's content wins, kills the saturation "
+        "burn, preserves relative token-norm peaks (neon/highlights). 'tok' "
+        "matches every token's norm (flattens peaks → grey tone; bench "
+        "reference only). 'off' = raw residual gain (pre-renorm behavior).",
+    )
+    parser.add_argument(
+        "--xattn_boost_renorm_frac",
+        type=float,
+        default=0.5,
+        help="Partial renorm exponent ρ (scale**ρ): 1.0 = full norm match, "
+        "0.0 = raw boost. Default 0.5 (Phase-1'' sweet spot at λ=2).",
+    )
 
     # SMC-CFG: Sliding-Mode Control CFG (α-adaptive variant; arXiv:2603.03281).
     # Drop-in CFG modification: replaces w·e with w·(e + Δe) where

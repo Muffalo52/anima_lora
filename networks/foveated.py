@@ -76,7 +76,7 @@ from library.inference.adapters import (
     set_hydra_content,
     set_hydra_crossattn,
     set_hydra_sigma,
-    set_xattn_gain,
+    set_xattn_boost_state,
 )
 from library.inference.sampler_context import SamplerSideChannels
 
@@ -337,6 +337,8 @@ def foveated_denoise(
     # boost acts on full-grid steps and composes trivially with the merge.
     xattn_boost = ctx.xattn_boost
     xattn_boost_band = ctx.xattn_boost_band
+    xattn_renorm = ctx.xattn_boost_renorm
+    xattn_renorm_frac = ctx.xattn_boost_renorm_frac
 
     h_lat, w_lat = int(latents.shape[-2]), int(latents.shape[-1])
     cell_px = int(anima.patch_spatial) * int(merge_edge)  # latent px per merge cell
@@ -374,12 +376,14 @@ def foveated_denoise(
             xattn_boost is not None and float(sigma_scalar) >= xattn_boost_band
         )
         if _boost_step:
-            set_xattn_gain(anima, xattn_boost)
+            set_xattn_boost_state(
+                anima, xattn_boost, renorm_mode=xattn_renorm, frac=xattn_renorm_frac
+            )
         try:
             v_c = anima(x, t, embed, padding_mask=padding_mask, **_pos_kw, **merge_kw)
         finally:
             if _boost_step:
-                set_xattn_gain(anima, 1.0)  # uncond runs at identity
+                set_xattn_boost_state(anima, 1.0)  # uncond runs at identity
         if not do_cfg:
             return v_c, None
         set_hydra_content(anima, negative_embed)

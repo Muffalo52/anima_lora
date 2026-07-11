@@ -21,7 +21,7 @@ from library.inference.adapters import (
     set_hydra_crossattn,
     set_hydra_sigma,
     set_step_expert_index,
-    set_xattn_gain,
+    set_xattn_boost_state,
 )
 from library.inference import sampling as inference_utils
 from library.inference.cfg_delta_probe import CfgDeltaProbe
@@ -385,6 +385,8 @@ def generate_body_tiled(
     _boost_raw = float(getattr(args, "xattn_boost", 1.0) or 1.0)
     xattn_boost = _boost_raw if _boost_raw != 1.0 else None
     xattn_boost_band = float(getattr(args, "xattn_boost_band", 0.85))
+    xattn_renorm = str(getattr(args, "xattn_boost_renorm", "img"))
+    xattn_renorm_frac = float(getattr(args, "xattn_boost_renorm_frac", 0.5))
 
     try:
         with tqdm(total=len(timesteps), desc="Denoising steps (tiled)") as pbar:
@@ -447,7 +449,12 @@ def generate_body_tiled(
                             embed, soft_tokens_embed_seqlens, timesteps=t_expand
                         )
                     if _boost_step:
-                        set_xattn_gain(anima, xattn_boost)
+                        set_xattn_boost_state(
+                            anima,
+                            xattn_boost,
+                            renorm_mode=xattn_renorm,
+                            frac=xattn_renorm_frac,
+                        )
                     with torch.no_grad():
                         tile_pred = anima(
                             tile_latent,
@@ -458,7 +465,8 @@ def generate_body_tiled(
                             w_offset=w_off,
                         )
                     if _boost_step:
-                        set_xattn_gain(anima, 1.0)  # uncond runs at identity
+                        # uncond runs at identity
+                        set_xattn_boost_state(anima, 1.0)
                     noise_acc[:, :, :, y : y + tile_h, x : x + tile_w] += tile_pred * bw
                     weight_acc[:, :, :, y : y + tile_h, x : x + tile_w] += bw
 
@@ -509,7 +517,7 @@ def generate_body_tiled(
                 pbar.update()
     finally:
         if xattn_boost is not None:
-            set_xattn_gain(anima, 1.0)
+            set_xattn_boost_state(anima, 1.0)
         clear_hydra_sigma(anima)
         clear_hydra_fei(anima)
         # P-GRAFT: restore LoRA for next generation
@@ -873,9 +881,17 @@ def generate_body(
         # into subsequent generations.
         xattn_boost = _side_channels.xattn_boost
         xattn_boost_band = _side_channels.xattn_boost_band
+        xattn_renorm = _side_channels.xattn_boost_renorm
+        xattn_renorm_frac = _side_channels.xattn_boost_renorm_frac
         if xattn_boost is not None:
+            _renorm_desc = (
+                "raw"
+                if xattn_renorm == "off"
+                else f"renorm={xattn_renorm} ρ={xattn_renorm_frac:g}"
+            )
             logger.info(
-                f"xattn boost active: λ={xattn_boost} at σ ≥ {xattn_boost_band}"
+                f"xattn boost active: λ={xattn_boost} at σ ≥ {xattn_boost_band} "
+                f"({_renorm_desc})"
                 + ("" if do_cfg else " (CFG 1.0 — boosting the single forward)")
             )
         # Capability probe (ANIMA_TEXT_KNOCKOUT_SIGMA=<cutoff>): below the cutoff
@@ -950,7 +966,12 @@ def generate_body(
                         xattn_boost is not None and float(sigmas[i]) >= xattn_boost_band
                     )
                     if _boost_step:
-                        set_xattn_gain(anima, xattn_boost)
+                        set_xattn_boost_state(
+                            anima,
+                            xattn_boost,
+                            renorm_mode=xattn_renorm,
+                            frac=xattn_renorm_frac,
+                        )
                     with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": _pooled_text_pos}
@@ -965,7 +986,8 @@ def generate_body(
                             **_pos_kw,
                         )
                     if _boost_step:
-                        set_xattn_gain(anima, 1.0)  # uncond runs at identity
+                        # uncond runs at identity
+                        set_xattn_boost_state(anima, 1.0)
 
                     if do_cfg:
                         set_hydra_content(anima, negative_embed)
@@ -1057,7 +1079,7 @@ def generate_body(
             if cfg_delta_probe is not None:
                 cfg_delta_probe.flush()
             if xattn_boost is not None:
-                set_xattn_gain(anima, 1.0)
+                set_xattn_boost_state(anima, 1.0)
             clear_hydra_sigma(anima)
             clear_hydra_fei(anima)
             # P-GRAFT: restore LoRA for next generation

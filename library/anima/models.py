@@ -324,6 +324,16 @@ class Attention(nn.Module):
         self.output_proj = nn.Linear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
 
+        if not self.is_selfattn:
+            # Inference-side per-key logit bias on the cross-attn QK^T rows
+            # (frontload_text_boost arm (d) — the allocation probe; embedding
+            # -row scaling can't reach allocation because k_norm is scale-
+            # invariant per (token, head)). None = off, exact identity. A
+            # (L_ctx,) float tensor routes this call through SDPA's additive
+            # attn_mask. Non-persistent, set/cleared via
+            # library.inference.adapters.set_xattn_kbias.
+            self.register_buffer("_ctx_k_bias", None, persistent=False)
+
         self._query_dim = query_dim
         self._context_dim = context_dim
         self._inner_dim = inner_dim
@@ -393,6 +403,17 @@ class Attention(nn.Module):
                 target_dtype = v.dtype
                 q = q.to(target_dtype)
                 k = k.to(target_dtype)
+        ctx_k_bias = None if self.is_selfattn else self._ctx_k_bias
+        if ctx_k_bias is not None:
+            # Per-key logit bias needs SDPA's additive float mask; flash/sage
+            # take none, so this call drops to attn_mode="torch" while set.
+            attn_params = attention_dispatch.AttentionParams(
+                attn_mode="torch",
+                attention_mask=ctx_k_bias.to(q.dtype)[None, None, None, :],
+                softmax_scale=(
+                    attn_params.softmax_scale if attn_params is not None else None
+                ),
+            )
         qkv = [q, k, v]
         del q, k, v
         result = attention_dispatch.dispatch_attention(qkv, attn_params=attn_params)
@@ -1080,6 +1101,19 @@ class Block(nn.Module):
         # can retune it per step via fill_() without a recompile — same pattern
         # as the _mod_guidance_* buffers. 1.0 = exact identity.
         self.register_buffer("_xattn_gain", torch.ones(()), persistent=False)
+        # Norm-matched variant of the gain (frontload_text_boost arm g): when
+        # True, the post-cross-attn hidden state is rescaled back toward the
+        # norm it would have had at gain 1.0 — the boost rotates the state
+        # toward the cross-attn residual without leaving the norm shell the
+        # next block was trained on. pertoken=False matches the per-image
+        # MEAN token norm instead (keeps the token-norm distribution — its
+        # peaks carry local contrast; full per-token matching flattens them
+        # to a grey tone). frac ρ applies scale**ρ (partial correction,
+        # ρ=1 full shell, ρ=0 raw boost). Plain Python attrs (static dynamo
+        # guards, one graph variant per combo). False = exact identity.
+        self._xattn_renorm = False
+        self._xattn_renorm_pertoken = True
+        self._xattn_renorm_frac = 1.0
 
     def enable_gradient_checkpointing(self, unsloth_offload: bool = False):
         self.gradient_checkpointing = True
@@ -1192,9 +1226,19 @@ class Block(nn.Module):
             crossattn_emb,
             rope_cos_sin=rope_cos_sin,
         ).unflatten(1, (T, H, W))
-        x_B_T_H_W_D = (
-            result * (gate_cross_attn_B_T_1_1_D * self._xattn_gain) + x_B_T_H_W_D
-        )
+        x_new = result * (gate_cross_attn_B_T_1_1_D * self._xattn_gain) + x_B_T_H_W_D
+        if self._xattn_renorm:
+            plain = result * gate_cross_attn_B_T_1_1_D + x_B_T_H_W_D
+            norm_plain = plain.float().norm(dim=-1, keepdim=True)
+            norm_new = x_new.float().norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            if not self._xattn_renorm_pertoken:
+                norm_plain = norm_plain.mean(dim=(1, 2, 3), keepdim=True)
+                norm_new = norm_new.mean(dim=(1, 2, 3), keepdim=True)
+            scale = norm_plain / norm_new
+            if self._xattn_renorm_frac != 1.0:
+                scale = scale**self._xattn_renorm_frac
+            x_new = x_new * scale.to(x_new.dtype)
+        x_B_T_H_W_D = x_new
 
         normalized_x = _adaln_fn(
             x_B_T_H_W_D, self.layer_norm_mlp, scale_mlp_B_T_1_1_D, shift_mlp_B_T_1_1_D

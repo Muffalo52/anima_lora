@@ -53,7 +53,7 @@ from library.inference.adapters import (
     set_hydra_content,
     set_hydra_crossattn,
     set_hydra_sigma,
-    set_xattn_gain,
+    set_xattn_boost_state,
 )
 from library.inference.sampler_context import SamplerSideChannels
 
@@ -113,6 +113,8 @@ def spd_denoise(
     # SPD's mid-loop σ reshaping.
     xattn_boost = ctx.xattn_boost
     xattn_boost_band = ctx.xattn_boost_band
+    xattn_renorm = ctx.xattn_boost_renorm
+    xattn_renorm_frac = ctx.xattn_boost_renorm_frac
 
     if sampler is not None:
         log.warning(
@@ -169,12 +171,14 @@ def spd_denoise(
             xattn_boost is not None and float(sigma_scalar) >= xattn_boost_band
         )
         if _boost_step:
-            set_xattn_gain(anima, xattn_boost)
+            set_xattn_boost_state(
+                anima, xattn_boost, renorm_mode=xattn_renorm, frac=xattn_renorm_frac
+            )
         try:
             v_c = anima(x, t, embed, padding_mask=pad_mask, **_pos_kw)
         finally:
             if _boost_step:
-                set_xattn_gain(anima, 1.0)  # uncond runs at identity
+                set_xattn_boost_state(anima, 1.0)  # uncond runs at identity
         if not do_cfg:
             return v_c
         set_hydra_content(anima, negative_embed)

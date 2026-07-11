@@ -299,3 +299,49 @@ CFG direction.
 Verdict: `--xattn_boost` is usable on turbo checkpoints as-is; if a span
 surface ever ships for arm (c), turbo is a first-class beneficiary (it
 needs the binding help more than the base model does).
+
+## Phase 1'' — allocation probe, in-D arms, norm matching (2026-07-11/12)
+
+Three sessions of arms beyond (a)-(c); runs `20260711-2307-phase1p-alloc`
+(killed partial, 8 arms), `20260711-2327-phase1pp-ind` (killed at 41/60 rows,
+{baseline, xattn 2, renorm 2, pdg 2, pdg 4}), `20260712-0013-phase1pp-renormI`
+(complete, {baseline, renormI 2, renormI 2@0.5}). Per-prompt+seed sheets
+(`sheet_<id>_s<seed>.png`) replaced the mega contact sheet mid-phase.
+
+**Geometry finding that reframed the phase**: `k_norm` (RMSNorm per
+token×head) is scale-invariant ⇒ arm (c)'s embedding-row scaling never
+touched attention allocation — (c) is architecturally a pure token-selective
+**V/loudness** gain. Allocation needs a QK logit bias.
+
+- **kbias β (arm d)** — sink-preserving logit bias (−β on non-span content
+  rows; span/pad/EOS untouched; `Attention._ctx_k_bias` → SDPA additive
+  mask). Allocation IS a distinct axis: binds theremin heterochromia 5/6
+  cells where baseline/token miss; large layout moves. But β=1.4
+  over-quiets (style flattening, unprompted text posters) and even β=0.7
+  trades tone. **CUT by eyeball verdict; probe stays in the bench.**
+- **token 1.5 / combo** — flat vs Phase-1; cut.
+- **fade (arm f)** — cosine σ-window; deferred, parameterization polish.
+- **pdg α (arm h)** — prompt-delta guidance `v* = v_cfg + α(v(c) − v(c\S))`,
+  fully in-distribution (+1 cond fwd/in-band step). Solid, vivid, no tone
+  damage; did not beat renorm on the binding/content read. Stays a bench
+  upper-bound baseline.
+- **renorm λ (arm g)** — norm-matched xattn boost. Per-TOKEN matching wins
+  content but **greys the tone** (the tokens whose norm spikes under the
+  boost ARE the neon/highlight peaks; clamping each token flattens the
+  norm distribution; sat −31%). **Per-IMAGE mean matching (`renormI`) fixes
+  it**: one shared scale per image, peaks survive (jellyfish neon glows,
+  reg_city stays vivid), OOD energy budget still bounded. `renormI 2@0.5`
+  (ρ=0.5 partial, `scale**ρ`) = the tone sweet spot.
+
+**SHIPPED**: `--xattn_boost_renorm {off,tok,img}` (default `img`) +
+`--xattn_boost_renorm_frac` (default 0.5) — i.e. `xattn_boost 2` now runs
+renormI 2@0.5. Runner entry point `adapters.set_xattn_boost_state`; wired in
+generation inline+tiled, spectrum, spd, foveated. Docs:
+`docs/inference/xattn_boost.md`.
+
+**Method caveats**: (1) the mean-HSV-sat burn detector misleads in the desat
+direction — boosted arms replace flat saturated washes with detailed scenes,
+so the mean drops while peaks brighten; judge tone by eyeball. (2) compiled
+renders are NOT bit-stable across processes (inductor autotune + er_sde
+amplification) — same-seed cross-run comparisons are family-level, not
+pixel-matched; within-run columns are exact.
