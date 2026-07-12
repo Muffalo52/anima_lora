@@ -13,7 +13,8 @@ FSG reframes CFG as a *fixed-point calibration*: at scheduled timesteps it runs
 interval ``Δσ`` to pull ``x_t → x̂_t`` onto the path where the conditional and
 unconditional velocities agree, then the denoise step proceeds from ``x̂_t``.
 Training-free, checkpoint-agnostic, deterministic. See ``docs/inference/fsg.md``
-and ``docs/proposal/foresight_guidance.md``; premise/eyeball probes in ``bench/fsg/``.
+and ``docs/proposal/foresight_guidance.md``; premise/eyeball probes archived in
+``_archive/bench/fsg/``.
 
 Paper: "Towards a Golden Classifier-Free Guidance Path via Foresight Fixed
 Point Iterations" (NeurIPS 2025, arXiv 23177). The paper is ε-prediction + DDIM;

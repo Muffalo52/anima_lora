@@ -8,8 +8,10 @@ conditional and unconditional velocities agree. At scheduled timesteps it runs
 
 - **Paper:** "Towards a Golden Classifier-Free Guidance Path via Foresight Fixed
   Point Iterations" (NeurIPS 2025, arXiv 23177).
-- **Proposal / groundings:** [`../proposal/foresight_guidance.md`](../proposal/foresight_guidance.md).
-- **Benches:** `bench/fsg/probe_golden_path.py` (Phase-0 premise), `bench/fsg/render_compare.py` (Phase-1 eyeball).
+- **Proposal / groundings:** [`../proposal/foresight_guidance.md`](../proposal/foresight_guidance.md)
+  (line **CLOSED 2026-07-12** — feature stays shipped; see its §8 and Status below).
+- **Benches (archived 2026-07-12):** `_archive/bench/fsg/probe_golden_path.py` (Phase-0 premise),
+  `_archive/bench/fsg/render_compare.py` (render A/B + λ/K calibration).
 - **Plugin:** `library/inference/corrections/fsg.py` (`FSGCalibrator`).
 
 ## The operator (flow-matching translation)
@@ -43,21 +45,26 @@ The paper concentrates iterations in the *noisiest* stages. On Anima that is the
 **dead zone**: at σ≈0.94 there is barely any conditional structure, so cond≈uncond
 and iterating amplifies noise (the operator *diverges*, ρ>1). The operator
 contracts and the cond/uncond gap shrinks in **σ∈[0.45, 0.85]** — the full
-working band. The **default is the narrow [0.75, 0.85] sub-band**, though:
-Phase-1 found it carried ~all the visible win (latent drift near-identical to the
-wide band) while firing on far fewer steps — on the 20-step / flow_shift=3
-schedule it gates 4 steps vs 9, so ~36 extra NFE @ K=3 instead of ~81 (~half the
-cost). Widen to `[0.45, 0.85]` for the full band. The Phase-0 probe
-(`bench/fsg/probe_golden_path.py`) is the calibration instrument: calibrate where
-ρ<0.95, spend more K where the gap-drop is largest.
+working band at 20-step Euler. **The band moves down with step count and token
+tier** (proposal §1a): the shipped **default [0.59, 0.75]** is the 28-step
+er_sde / 1024-tier calibration (Plan B) — at 28 steps σ≈0.84 stops contracting.
+A narrow band carries ~all the visible win (latent drift near-identical to the
+wide band) while firing on far fewer steps. The Phase-0 probe
+(`_archive/bench/fsg/probe_golden_path.py`) is the calibration instrument:
+calibrate where ρ<0.95, spend more K where the gap-drop is largest; re-probe if
+`infer_steps` or the token tier changes.
 
 ## Usage
 
 ```bash
-make test FSG=1                                  # defaults: band [0.75,0.85] (narrow), K=3, Δσ=0.1, γ=guidance
-make test FSG=1 FSG_BAND="0.45,0.85"             # full working band (~2× the extra NFE)
+make test FSG=1                                  # defaults: band [0.59,0.75] (28-step er_sde calibration), K=3, Δσ=0.1, γ=guidance
+make test FSG=1 FSG_BAND="0.45,0.85"             # full 20-step working band (~2× the extra NFE)
 make test FSG=1 FSG_GAMMA=4 FSG_D_SIGMA=0.1
 ```
+
+The validated production stack is **fsg on the CFG++ substrate** (`--cfgpp`,
+λ=1.5 default) — see proposal §0; the node's single `fsg` boolean enables exactly
+that stack.
 
 Composes into every `test-*` target like `SPECTRUM=1`/`MOD=1`/`DAVE=1`. Direct CLI:
 
@@ -68,7 +75,7 @@ uv run python inference.py --fsg --fsg_band 0.45 0.85 --fsg_k 3 --fsg_d_sigma 0.
 | Flag | Env lever | Default | Meaning |
 |------|-----------|---------|---------|
 | `--fsg` | `FSG=1` | off | Enable (CFG-only). |
-| `--fsg_band LO HI` | `FSG_BAND="lo,hi"` | `0.75 0.85` | σ-band where calibration fires (narrow default; full band is `0.45 0.85`). |
+| `--fsg_band LO HI` | `FSG_BAND="lo,hi"` | `0.59 0.75` | σ-band where calibration fires (28-step er_sde/1024 calibration; moves with steps + tier). |
 | `--fsg_k` | `FSG_K` | `3` | Fixed-point iterations/step (error ~ρ^K, ρ≈0.93 ⇒ K=3–4). |
 | `--fsg_d_sigma` | `FSG_D_SIGMA` | `0.1` | Forward-backward interval Δσ (calibration stride). |
 | `--fsg_gamma` | `FSG_GAMMA` | `None` | Calibration guidance γ; `None` reuses `--guidance_scale`. |
@@ -76,11 +83,11 @@ uv run python inference.py --fsg --fsg_band 0.45 0.85 --fsg_k 3 --fsg_d_sigma 0.
 ## Cost
 
 Extra forwards = `3·K·M`, M = scheduled steps in-band (`v^c`+`v^u` at σ, `v^u`
-at σ−Δσ per iteration). Baseline 20-step CFG = 40 NFE. On the 20-step /
-flow_shift=3 schedule the narrow default band gates M=4 (≈ +36 NFE @ K=3 → ~76
-total, ~1.9×); the full `[0.45, 0.85]` band gates M=9 (≈ +81 → ~121, ~3.0×).
-**The matched-NFE A/B is the load-bearing experiment** (does FSG-at-N beat a
-plain longer baseline at the same N?) — still owed, see proposal §7–§9.
+at σ−Δσ per iteration). At the production point (28 steps, band [0.59,0.75] ⇒
+M=5, K=3) that's 56 + 45 ≈ **101 forwards, ~1.8× plain CFG**. **The matched-NFE
+A/B (does FSG-at-N beat a plain longer baseline at the same N?) was never run**
+— the line closed 2026-07-12 without it (proposal §8), so do not advertise FSG
+as free quality; it's the reopening gate if the line is ever revived.
 
 ## Composition
 
@@ -107,9 +114,15 @@ targets base/standard checkpoints).
 **Still ignored under `--spd`** (it grows resolution along the trajectory) — a
 warning fires; FSG×SPD is a v2 item.
 
-## Status / open risks
+## Status
 
-Phase-0 (premise) + Phase-1 (eyeball) **passed**; the production plugin is built
-but the Tier-2 rigor pass is **not yet done**: matched-NFE A/B (decisive),
-production er_sde CFG=4 render (the eyeball used deterministic Euler), and a
-saturation-confound check. See proposal §8 (Stage 3) and §9.
+**Line CLOSED 2026-07-12; the feature stays shipped as-is.** The Tier-2 rigor
+pass mostly ran (production er_sde render A/B: fsg/cfg++ beats cfg++ by eyeball;
+saturation confound quantified — Δsat +1.7%p, not a tone bump; CFG++-substrate
+anti-confound read passed; node port verified live). The one exception is the
+**matched-NFE A/B, which was never run**: in practice FSG's ~1.8× NFE loses to
+the 1×-NFE `--xattn_boost` as the everyday quality lever, so the cost proof
+wasn't worth running. Consequently FSG must **not** be advertised as free
+quality; the matched-NFE A/B is the gate for reopening the line (tooling in
+`_archive/bench/fsg/render_compare.py`). CFG++ (`--cfgpp`) is independent of
+this closure and stays shipped/maintained. Full closing note: proposal §8.

@@ -1,18 +1,17 @@
 # Foresight Guidance (FSG) — shipping to the Spectrum ComfyUI node
 
-**Status:** library plugin BUILT + **shipped with the production config** (2026-06-23 Plan
-A/B/C). er_sde/28-step calibration done, eyeball A/B done, saturation confound quantified;
-**library defaults now = the production point** (see §0). **CFG++ is now wired into the
-spectrum runner too** (2026-06-23) — `--cfgpp` threads through `SamplerSideChannels` and the
-spectrum CFG-combine applies the σ-scheduled reweight, so faithful `fsg/cfg++` composes under
-`--spectrum` (previously cfgpp was dropped under spectrum). **Node port DONE** (2026-06-23):
-`fsg.py` + CFG++ ported to `~/ComfyUI-Spectrum-KSampler`, exposed on the Advanced node —
-**pending in-ComfyUI verification** (ported against ComfyUI internals, not yet run live) and
-the still-unrun **Matched-NFE A/B** (the one rigor item; the ship decision rested on the
-cfg++-substrate read instead, see §6). Earlier build-decision content lives in git history.
+**Status: CLOSED 2026-07-12 — feature stays shipped, bench archived (see §8).** Library plugin
+BUILT + **shipped with the production config** (2026-06-23 Plan A/B/C): er_sde/28-step
+calibration done, eyeball A/B done, saturation confound quantified; **library defaults = the
+production point** (see §0). **CFG++ is wired into the spectrum runner too** (2026-06-23) —
+`--cfgpp` threads through `SamplerSideChannels` and the spectrum CFG-combine applies the
+σ-scheduled reweight, so faithful `fsg/cfg++` composes under `--spectrum`. **Node port DONE
+(2026-06-23) and since verified in a live ComfyUI.** The **Matched-NFE A/B was never run**;
+the line closed without it — see §8. Earlier build-decision content lives in git history.
 **Paper:** "Towards a Golden Classifier-Free Guidance Path via Foresight Fixed Point Iterations"
 (NeurIPS 2025, arXiv 23177). **Library plugin:** `library/inference/corrections/fsg.py`
-(`--fsg` / `FSG=1`). **Benches:** `bench/fsg/probe_golden_path.py`, `bench/fsg/render_compare.py`.
+(`--fsg` / `FSG=1`). **Benches (archived):** `_archive/bench/fsg/probe_golden_path.py`,
+`_archive/bench/fsg/render_compare.py`.
 **Docs:** `docs/inference/fsg.md`. **Memory:** [[project_fsg_golden_path_phase0]].
 
 ## 0. The shipped production config (what the node must reproduce)
@@ -204,14 +203,14 @@ Tier-2 status as of 2026-06-23 (library shipped on this basis):
   stronger evidence of a *real* effect, but matched-NFE is still the clean cost-efficiency proof
   and should be run before the node knob is advertised as "free quality."
 
-Shipping order: library shipped (defaults = §0) → port to the node (DONE, §4) → **verify in a
-live ComfyUI** + **run matched-NFE** before publishing/advertising the node. A node that exposes a
-wrong-tier band or an NFE-for-nothing knob is worse than no node — so the node code has landed but
-the knob is not yet advertised as "free quality" pending those two.
+Shipping order: library shipped (defaults = §0) → port to the node (DONE, §4) → verify in a
+live ComfyUI (**DONE** — the node ran live) + run matched-NFE before advertising the knob.
+Matched-NFE never ran; the line closed instead (§8), so the knob must stay un-advertised.
 
 ## 7. Open risks
 
-- **Matched-NFE may erase the win** — still owed; the one decisive cost test not yet run (§6).
+- **Matched-NFE may erase the win** — never run; the line closed without it (§8), so the win's
+  cost-efficiency is unproven, which is exactly why the knob can't be advertised as free quality.
 - **er_sde** — now the validated sampler (the render A/B ran on er_sde, not just Euler), so this
   risk is largely retired; the remaining hedge is matched-NFE.
 - **Payoff-zone overlap** with the already-near-resolved σ band where σ-reshape found no
@@ -223,3 +222,27 @@ the knob is not yet advertised as "free quality" pending those two.
   with prompt sample (§1a); ρ-contraction is the trustworthy signal, not PRESENT/ABSENT.
 - **Hand-mirror drift** — the node's `spectrum.py` diverges from the library by hand; any later
   FSG change in the library must be re-ported until/unless the repo joins `sync_vendor`.
+
+## 8. Closing (2026-07-12) — line closed, feature stays shipped
+
+Every mechanism question this line was opened for is answered (band, substrate, γ-stability,
+K, λ — three confounds ruled out; §1–§6). The line closes on **ergonomics, not science**: FSG
+costs ~1.8× NFE (3·K extra forwards per in-band step) and in practice it goes unused — the
+1×-NFE `--xattn_boost` is the quality lever people actually reach for (different mechanism —
+text-drive loudness vs consistency calibration — but the same "one cheap quality knob" slot).
+Running the matched-NFE A/B to cost-justify an unused knob is sunk-cost work, so it was
+**deliberately not run**.
+
+What this means going forward:
+
+- **Feature stays shipped as-is** — library `--fsg`/`--cfgpp` and the node's `fsg` boolean
+  (live-verified) remain, calibrated to §0. **Do NOT advertise FSG as free quality** anywhere
+  (README, node tooltips, release notes): the cost-efficiency proof does not exist.
+- **Reopening gate:** the matched-NFE A/B — `fsg/cfg++` @28 steps (≈101 fwd) vs plain CFG
+  @~50 steps (≈100 fwd), same prompts/seeds, eyeball + sat/contrast. Tooling is ready in
+  `_archive/bench/fsg/render_compare.py`. Don't re-propose FSG work without running it first.
+- **CFG++ is the durable artifact** and is *independent* of this closure: zero-extra-NFE,
+  σ-scheduled guidance reweight, composes with er_sde/Euler/lcm and `--spectrum`,
+  invariant-tested (`tests/test_fsg_invariant.py`). It stays shipped and maintained.
+- Benches + results archived to `_archive/bench/fsg/`; map entry in
+  `_archive/shelved_benches.md`.
