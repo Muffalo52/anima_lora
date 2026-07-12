@@ -90,6 +90,10 @@ from bench._common import make_run_dir, write_result  # noqa: E402
 from bench.memorization.probe import _Acc, build_training_args  # noqa: E402
 from library.anima import strategy as strategy_anima  # noqa: E402
 from library.anima.strategy import AnimaLatentsCachingStrategy  # noqa: E402
+from library.anima.uncond import (  # noqa: E402
+    default_uncond_path,
+    load_uncond_crossattn,
+)
 from library.runtime.device import clean_memory_on_device, str_to_dtype  # noqa: E402
 from library.training.validation import (  # noqa: E402
     _build_val_crossattn_emb,
@@ -139,13 +143,14 @@ def build_items(
     *,
     sample_ratio,
     artists_shard,
+    path_pattern=None,
     include_val: bool = False,
 ) -> list[tuple]:
     """(info, te_npz, latents_npz) triples from the trainer's own blueprint,
     with train.py's user_config mutations (global sample_ratio injection +
-    artists_shard expansion) replayed so the item set is exactly what a run
-    with those knobs trains on. ``include_val`` folds the validation split
-    back in (for the full non-member pool)."""
+    artists_shard expansion + path_pattern subset filter) replayed so the item
+    set is exactly what a run with those knobs trains on. ``include_val`` folds
+    the validation split back in (for the full non-member pool)."""
     from library.config import loader as config_util  # noqa: PLC0415
     from library.config.io import load_dataset_config_from_base  # noqa: PLC0415
 
@@ -154,8 +159,11 @@ def build_items(
     # BlueprintGenerator falls back to the argparse namespace for subset
     # defaults, so a preset-level `sample_ratio` in targs (e.g. [tenth])
     # would silently override the value this call asked for — pin BOTH the
-    # namespace and the subset-level key to the requested ratio.
+    # namespace and the subset-level key to the requested ratio. Same for
+    # path_pattern: a method-TOML value on the namespace would leak into the
+    # subsets, so pin it to exactly what this call asked for.
     targs.sample_ratio = 1.0 if sample_ratio is None else float(sample_ratio)
+    targs.path_pattern = path_pattern
 
     user_config = load_dataset_config_from_base(
         overrides=vars(targs),
@@ -170,6 +178,10 @@ def build_items(
         for ds in user_config.get("datasets", []):
             for sub in ds.get("subsets", []):
                 sub["sample_ratio"] = sample_ratio
+    if path_pattern:
+        for ds in user_config.get("datasets", []):
+            for sub in ds.get("subsets", []):
+                sub["path_pattern"] = path_pattern
     if artists_shard:
         from library.datasets.artist_shard import apply_artist_shard  # noqa: PLC0415
         from library.env import resolve_under_home  # noqa: PLC0415
@@ -276,11 +288,20 @@ def score_model(
     n_probes,
     delta,
     dtype,
+    null_captions: bool = False,
 ) -> list[dict[float, float]]:
-    """Per-item {sigma: confidence} under one model (adapter=None → base)."""
+    """Per-item {sigma: confidence} under one model (adapter=None → base).
+    ``null_captions`` swaps every item's caption embedding for the T5("")
+    uncond sidecar — the caption-independent uncond-Δ statistic
+    (docs/proposal/memorization_uncond_gap.md)."""
     bundle = build_anima(targs, adapter=adapter, train_mode=False)
     dit = bundle.anima
     device = bundle.device
+    null_emb = (
+        load_uncond_crossattn(str(default_uncond_path()), device=device, dtype=dtype)
+        if null_captions
+        else None
+    )
     lat_strategy = AnimaLatentsCachingStrategy(True, 1, True)
     results: list[dict[float, float]] = []
     try:
@@ -288,8 +309,12 @@ def score_model(
             dit.prepare_block_swap_before_forward()
         for n, it in enumerate(scored):
             z0 = _load_z0(lat_strategy, it["lat_npz"], it["bucket_reso"], device, dtype)
-            sd = _load_safetensors(it["te_npz"])
-            emb = _build_val_crossattn_emb(dit, sd, shim)
+            if null_emb is not None:
+                sd = None
+                emb = null_emb
+            else:
+                sd = _load_safetensors(it["te_npz"])
+                emb = _build_val_crossattn_emb(dit, sd, shim)
             results.append(
                 confidence(
                     dit,
@@ -380,6 +405,21 @@ def main() -> None:
         help="The RUN's artists_shard ('none' to force off; default: snapshot, "
         "else merged config).",
     )
+    ap.add_argument(
+        "--path_pattern",
+        default=None,
+        help="The RUN's path_pattern ('none' to force off; default: snapshot, "
+        "else merged config). Filters the member pool only — holdout groups "
+        "always come from the full unfiltered pool.",
+    )
+    ap.add_argument(
+        "--null_captions",
+        action="store_true",
+        help="Score every item with the T5('') uncond sidecar instead of its "
+        "own caption (uncond-Δ: caption-independent memorization statistic — "
+        "docs/proposal/memorization_uncond_gap.md). Same paired forwards, "
+        "same probe noise; only the crossattn embedding changes.",
+    )
     ap.add_argument("--num_members", type=int, default=48)
     ap.add_argument("--num_holdout", type=int, default=48, help="per holdout group.")
     ap.add_argument("--sigmas", type=float, nargs="+", default=DEFAULT_SIGMAS)
@@ -416,6 +456,14 @@ def main() -> None:
         run_shard = snap.get("artists_shard")
     else:
         run_shard = getattr(targs, "artists_shard", None)
+    if args.path_pattern is not None:
+        run_pp = None if args.path_pattern.lower() == "none" else args.path_pattern
+    elif snap:
+        run_pp = snap.get("path_pattern")
+    else:
+        run_pp = getattr(targs, "path_pattern", None)
+    if run_pp in ("*", ""):
+        run_pp = None  # matches everything — same as unset
 
     from library.runtime.accelerator import prepare_accelerator  # noqa: PLC0415
 
@@ -425,12 +473,16 @@ def main() -> None:
     # ── membership reconstruction ──────────────────────────────────────────
     print(
         f"members: replaying blueprint with sample_ratio={run_sr} "
-        f"artists_shard={run_shard}",
+        f"artists_shard={run_shard} path_pattern={run_pp}",
         flush=True,
     )
     te_strategy = setup_strategies(targs)
     member_items = build_items(
-        targs, te_strategy, sample_ratio=run_sr, artists_shard=run_shard
+        targs,
+        te_strategy,
+        sample_ratio=run_sr,
+        artists_shard=run_shard,
+        path_pattern=run_pp,
     )
     full_items = build_items(
         targs, te_strategy, sample_ratio=1.0, artists_shard=None, include_val=True
@@ -490,6 +542,8 @@ def main() -> None:
     )
 
     # ── the two paired passes ─────────────────────────────────────────────
+    if args.null_captions:
+        print("captions: T5('') uncond sidecar (uncond-Δ mode)", flush=True)
     print("base pass …", flush=True)
     base_scores = score_model(
         None,
@@ -500,6 +554,7 @@ def main() -> None:
         n_probes=args.n_probes,
         delta=args.delta,
         dtype=dtype,
+        null_captions=args.null_captions,
     )
     print("adapter pass …", flush=True)
     lora_scores = score_model(
@@ -511,6 +566,7 @@ def main() -> None:
         n_probes=args.n_probes,
         delta=args.delta,
         dtype=dtype,
+        null_captions=args.null_captions,
     )
 
     # ── stats ─────────────────────────────────────────────────────────────
@@ -533,6 +589,7 @@ def main() -> None:
         "n_cross_artist": int(d_cross.size),
         "sigmas": list(args.sigmas),
         "n_probes": args.n_probes,
+        "null_captions": bool(args.null_captions),
         "run_sample_ratio": run_sr,
         "run_artists_shard": run_shard,
         "delta_member_mean": round(float(d_mem.mean()), 5),
@@ -628,6 +685,11 @@ def main() -> None:
 
     M = ["# Loss-gap memorization probe (calibrated MIA statistic)\n"]
     M.append(f"- adapter: `{args.adapter}`")
+    if args.null_captions:
+        M.append(
+            "- captions: **T5('') uncond sidecar** — this is the uncond-Δ "
+            "(caption-independent) statistic, not the caption-Δ."
+        )
     M.append(
         f"- members {d_mem.size} / same-artist {d_same.size} / "
         f"cross-artist {d_cross.size} · sigmas {args.sigmas} · K={args.n_probes}"
