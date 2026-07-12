@@ -1,6 +1,8 @@
 # paired_gram_eval — replace CMMD with paired per-item PE-Core token-Gram scoring
 
-Status: **Phase 0 RUN 2026-07-06 — FAILED (gate 3).** PGS does not clear the
+Status: **CLOSED 2026-07-12 — Phase 0 FAILED (gate 3), bench archived to
+`_archive/bench/paired_eval/`; see the closing section at the bottom.**
+Phase 0 run 2026-07-06: PGS does not clear the
 known-difference gate: plain-r16 vs base reads TIE with base ≥ plain, reversing
 the CMMD-vindicated ranking (CMMD at this CFG-4 set: plain 0.182 < base 0.279).
 The whitened-Gram remedy did not fix it. Gates 1/4/5 pass, gate 2 is a
@@ -171,3 +173,31 @@ local:
   distribution + per-stem offsets ⇒ pooled MMD fails to separate at n=24
   while the paired test succeeds (regression-pins cause #2).
 - Decision rule: seed-trio fixture ⇒ TIE; plain-vs-base fixture ⇒ WIN.
+
+## Closing (2026-07-12) — line archived without pursuing CSD
+
+Archived together with `seed_floor` and `seed_lottery` (the whole
+eval-instrument cluster): `bench/paired_eval/` → `_archive/bench/paired_eval/`
+(phase0 + cross_artist / whiten / pooled_gram / fm_holdout probes + results).
+The Phase-0 verdict stands as the scientific output:
+
+- **The token-Gram is the wrong feature** — content/palette-dominated (~0.14
+  gap) vs style-weak (~0.025 artist gap), pooled *or* paired; it reverses the
+  CMMD-vindicated plain<base ranking, and whitening doesn't fix it.
+- **Pooled gist at CFG-4 (= CMMD at the right protocol) was right** on the one
+  known difference — so the cheap protocol fix ("render at 28-step/CFG-4,
+  raise n") remains the first thing to try if a ranking metric is ever needed
+  again, before any new feature.
+- **Holdout FM confidence is anti-correlated** with the vindicated ranking
+  (Spearman −0.40) — not a covariate on the style/quality axis.
+- `gram_of` / `paired_gram_score` stay in `library/training/cmmd.py` only
+  because the archived probes import them; nothing live calls them.
+
+**Why closed rather than escalated to CSD:** the consumer this instrument was
+being built for — seed/recipe ranking for soup and banked single-run A/Bs —
+lost its motivation. Soup's live axis moved to memorization
+(`bench/memorization` — e.g. adapter-interference × memorization-amplification
+correlation), which has its own working instruments (loss-gap MIA, xerox
+probe) and doesn't need a paired style metric. **Reopening gate:** a concrete
+decision that needs sub-noise-floor model ranking; the designated next step is
+still CSD as the paired feature, re-run through these exact five gates.

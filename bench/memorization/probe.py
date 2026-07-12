@@ -56,7 +56,7 @@ Artifacts
 
 This is Phase 0: a diagnostic, no training-loop wiring. It reuses the trainer's
 own config chain / dataset split / PE encoder (same machinery as
-``bench/seed_lottery/probe.py`` and ``library/training/validation.py``), so the
+``_archive/bench/seed_lottery/probe.py`` and ``library/training/validation.py``), so the
 items and caches are exactly the ones the run saw — no re-preprocess needed.
 
 Usage
@@ -112,11 +112,13 @@ GEN_SEED_BASE = 7_000_000
 
 
 # ---------------------------------------------------------------------------
-# Trainer-faithful args + train-split items (mirrors bench/seed_lottery).
+# Trainer-faithful args + train-split items (mirrors _archive/bench/seed_lottery).
 # ---------------------------------------------------------------------------
 
 
-def build_training_args(method: str, preset: str, overrides: dict) -> argparse.Namespace:
+def build_training_args(
+    method: str, preset: str, overrides: dict
+) -> argparse.Namespace:
     """The exact args namespace a real run would build, then probe overrides."""
     parser = train_mod.setup_parser()
     train_mod._config_schema.populate_schema(
@@ -153,8 +155,8 @@ def build_training_args(method: str, preset: str, overrides: dict) -> argparse.N
 def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
     """The *training* split items (info, te_npz, pe_sidecar) — memorization is
     about the images the model actually trained on. Same blueprint path as the
-    trainer; we take the train group (seed_lottery takes the val group). TE +
-    PE caches must already exist (no live encoding).
+    trainer; we take the train group (the archived seed_lottery probe took the
+    val group). TE + PE caches must already exist (no live encoding).
 
     ``pe_encoder`` selects which cached PE sidecar to use as the reference
     feature: ``pe_spatial`` (``{stem}_anima_pe_spatial.safetensors`` — what
@@ -216,7 +218,8 @@ def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
 
 
 # ---------------------------------------------------------------------------
-# Minimal Accelerator shim for the sampler (device + autocast), as seed_lottery.
+# Minimal Accelerator shim for the sampler (device + autocast), as the archived
+# seed_lottery probe.
 # ---------------------------------------------------------------------------
 
 
@@ -317,7 +320,9 @@ def generate_gen_pool(
                 bucket_groups.setdefault(key, []).append(idx)
             pooled: list[torch.Tensor | None] = [None] * len(pixel_images)
             for indices in bucket_groups.values():
-                batch = torch.stack([pixel_images[i] for i in indices], dim=0).to(device)
+                batch = torch.stack([pixel_images[i] for i in indices], dim=0).to(
+                    device
+                )
                 feats_list = encode_pe_from_imageminus1to1(
                     pe_bundle, batch, same_bucket=True
                 )
@@ -389,7 +394,7 @@ def compute_metrics(
             }
         )
 
-    contrast = (s_self - s_other)
+    contrast = s_self - s_other
     metrics = {
         "n_gen": M,
         "n_ref": N,
@@ -454,15 +459,21 @@ def save_contact_sheet(
 
         order = sorted(
             range(len(rows)),
-            key=lambda m: (rows[m]["self_lock"], rows[m]["s_self"] - rows[m]["s_other"]),
+            key=lambda m: (
+                rows[m]["self_lock"],
+                rows[m]["s_self"] - rows[m]["s_other"],
+            ),
             reverse=True,
         )[:top]
         cells: list[torch.Tensor] = []
         for m in order:
             gi = gen_idx[m]
-            gen = ((gen_pixels[m].float().clamp(-1, 1) + 1) / 2)
+            gen = (gen_pixels[m].float().clamp(-1, 1) + 1) / 2
             gen = torch.nn.functional.interpolate(
-                gen.unsqueeze(0), size=(tile, tile), mode="bilinear", align_corners=False
+                gen.unsqueeze(0),
+                size=(tile, tile),
+                mode="bilinear",
+                align_corners=False,
             ).squeeze(0)
             src_img = _load_image_tensor(items[gi][0].absolute_path, tile)
             other_idx = sim_argmax_other(m)
@@ -526,7 +537,10 @@ def main():
     )
     ap.add_argument("--dtype", type=str, default="bf16")
     ap.add_argument(
-        "--compile", dest="compile", action="store_true", default=True,
+        "--compile",
+        dest="compile",
+        action="store_true",
+        default=True,
         help="torch.compile DiT blocks with dynamic-seq (default on).",
     )
     ap.add_argument("--no-compile", dest="compile", action="store_false")
@@ -537,7 +551,10 @@ def main():
     targs = build_training_args(
         args_cli.method,
         args_cli.preset,
-        {"validation_sample_steps": args_cli.sample_steps, "validation_cfg_scale": args_cli.cfg},
+        {
+            "validation_sample_steps": args_cli.sample_steps,
+            "validation_cfg_scale": args_cli.cfg,
+        },
     )
     acc = prepare_accelerator(targs)
     shim = _Acc(acc.device, dtype)
@@ -572,7 +589,10 @@ def main():
     g = torch.Generator().manual_seed(args_cli.seed)
     perm = torch.randperm(N, generator=g).tolist()
     gen_idx = sorted(perm[: min(args_cli.num_items, N)])
-    print(f"Generating from {len(gen_idx)} training captions (held-out seeds).", flush=True)
+    print(
+        f"Generating from {len(gen_idx)} training captions (held-out seeds).",
+        flush=True,
+    )
 
     pe_bundle = load_pe_encoder(acc.device, name=args_cli.pe_encoder)
     pe_bundle.encoder.inner.to("cpu")
@@ -616,13 +636,24 @@ def main():
     # Optional absolute anchor: same contrast with the base model (no adapter).
     if args_cli.with_base:
         base_pool, _ = generate_gen_pool(
-            adapter=None, args=targs, acc=shim, vae=vae, pe_bundle=pe_bundle,
-            items=items, gen_idx=gen_idx, sample_steps=args_cli.sample_steps,
-            cfg_scale=args_cli.cfg, flow_shift=flow_shift, compile_budget=compile_budget,
+            adapter=None,
+            args=targs,
+            acc=shim,
+            vae=vae,
+            pe_bundle=pe_bundle,
+            items=items,
+            gen_idx=gen_idx,
+            sample_steps=args_cli.sample_steps,
+            cfg_scale=args_cli.cfg,
+            flow_shift=flow_shift,
+            compile_budget=compile_budget,
         )
         base_metrics, _, _ = compute_metrics(
-            base_pool.to(acc.device), ref_pool, gen_idx,
-            k=args_cli.k, self_margin=args_cli.self_margin,
+            base_pool.to(acc.device),
+            ref_pool,
+            gen_idx,
+            k=args_cli.k,
+            self_margin=args_cli.self_margin,
         )
         metrics["base_contrast_mean"] = base_metrics["contrast_mean"]
         metrics["base_self_lock_frac"] = base_metrics["self_lock_frac"]
@@ -652,20 +683,34 @@ def main():
     artifacts = ["per_item.csv"]
     sheet = run_dir / "memorized.png"
     if save_contact_sheet(
-        path=sheet, gen_pixels=gen_pixels, items=items, gen_idx=gen_idx,
-        rows=rows, sim_argmax_other=lambda m: nearest_other[m],
+        path=sheet,
+        gen_pixels=gen_pixels,
+        items=items,
+        gen_idx=gen_idx,
+        rows=rows,
+        sim_argmax_other=lambda m: nearest_other[m],
     ):
         artifacts.append("memorized.png")
 
     write_result(
-        run_dir, script=__file__, args=args_cli, metrics=metrics,
-        label=args_cli.label, artifacts=artifacts, device=acc.device,
+        run_dir,
+        script=__file__,
+        args=args_cli,
+        metrics=metrics,
+        label=args_cli.label,
+        artifacts=artifacts,
+        device=acc.device,
     )
 
     print("\n=== Memorization probe ===", flush=True)
     for key in (
-        "verdict", "contrast_mean", "self_lock_frac", "mem_frac_paper",
-        "s_self_mean", "s_other_mean", "real_real_nn_mean",
+        "verdict",
+        "contrast_mean",
+        "self_lock_frac",
+        "mem_frac_paper",
+        "s_self_mean",
+        "s_other_mean",
+        "real_real_nn_mean",
     ):
         print(f"  {key:18s} {metrics[key]}", flush=True)
     if args_cli.with_base:

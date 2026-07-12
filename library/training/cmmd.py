@@ -69,9 +69,15 @@ def gram_of(feats: torch.Tensor, *, drop_cls: bool = True) -> torch.Tensor:
 
     The Gram is token-count-free by construction (``[D, D]`` regardless of T),
     so gen/ref buckets with different patch grids are directly comparable — the
-    property CMMD's pooled feature lacked. Invariances (see ``paired_gram_eval``
-    Tier-1.5 tests): token permutation ⇒ identical Gram; global feature scale ⇒
-    identical Gram (Frobenius normalization divides it out).
+    property CMMD's pooled feature lacked. Invariances: token permutation ⇒
+    identical Gram; global feature scale ⇒ identical Gram (Frobenius
+    normalization divides it out).
+
+    NB: the paired-Gram eval line FAILED its Phase-0 known-difference gate
+    (content-dominated, style-weak — reverses the CMMD-vindicated plain<base
+    ranking) and was archived; kept only because the archived probes
+    (``_archive/bench/paired_eval/``) import these helpers. Do not build a val
+    metric on the token-Gram — see ``docs/proposal/paired_gram_eval.md``.
     """
     feats = feats.to(torch.float32)
     if drop_cls and feats.shape[0] > 1:

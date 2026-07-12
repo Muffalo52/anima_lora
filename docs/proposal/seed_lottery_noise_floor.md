@@ -1,8 +1,9 @@
 # Seed-lottery noise floor — a robust A/B framework for Anima
 
-Status: **proposal, nothing built.** Motivated by *The FID Lottery: Quantifying
-Hidden Randomness in Generative-Model Evaluation* (Dufour, Efros, Pérez,
-arXiv:2606.20536) — paper PDF in repo root `2606.20536v1.pdf`.
+Status: **CLOSED 2026-07-12 — blocked on the instrument; probe archived unrun**
+(see the closing section at the bottom). Motivated by *The FID Lottery:
+Quantifying Hidden Randomness in Generative-Model Evaluation* (Dufour, Efros,
+Pérez, arXiv:2606.20536) — paper PDF in repo root `2606.20536v1.pdf`.
 
 ## The problem this fixes
 
@@ -195,3 +196,39 @@ kind of plausible-but-unproven premise this project has been burned by before.
 - Should the floor verdict gate `make test-unit` / CI for new methods (Tier
   1.5/2 in CONTRIBUTING already require a bench + invariant test)? Natural home,
   but only after the floor number is trusted on more than one pipeline.
+
+## Closing (2026-07-12) — the gate question was answered before Phase 0 ran
+
+The Phase-0 probe (`_archive/bench/seed_lottery/probe.py`) was built but never
+run: `bench/seed_floor` (now `_archive/bench/seed_floor/report.md`) answered
+the gate question for free — using the ready-made uncond-soup seed trio instead
+of training new checkpoints — and answered it **negatively at the instrument
+level**. At the eval size we can afford (24 prompts / 96 refs), paired-holdout
+CMMD cannot separate between-seed spread from its own sampling noise: several
+checkpoints (plain, s1002, the real-vs-real floor itself) cluster within ~1.1×
+of each other, the cfg-1 "s1002 = 1.02 disaster draw" flipped to *best* at
+cfg-4, and median-heuristic bandwidth changed nothing (on L2-normalized
+features MMD ordering is bandwidth-invariant — the fragility is sample size,
+not σ). Running this probe as designed would have measured noise with a noise
+generator.
+
+The paired-eval line (`paired_gram_eval.md`) — the designated instrument fix —
+then failed its own Phase 0 (token-Gram is content-dominated) and was archived
+the same day. So the framework is closed **blocked-on-instrument**, not
+refuted: the question (which banked single-run A/Bs are real?) stands, and the
+durable output is a guard, not a floor number:
+
+- **Never gate an A/B on a paired-holdout CMMD scalar at n≈24/96;** treat any
+  gap under ~2× the real-vs-real floor as unresolved.
+- **cfg-1 CMMD misranks within a family across seeds**, not just across
+  adapter families (the reft GOTCHA generalizes). Rendered comparisons that
+  must rank models use 28-step / CFG-4.
+- CMMD stays fine as the *coarse within-run* val signal
+  ([[project_cmmd_val_signal]]) — the fragility is seed-level resolution at
+  small n, not the metric wholesale.
+
+**Reopening gate:** a per-item paired metric that clears a plain-vs-base
+known-difference gate (CSD was the named next candidate), or an eval budget in
+the hundreds of prompts/refs. Given that soup's value proposition moved to the
+memorization axis (interference × amplification — `bench/memorization` is the
+live bench there), neither is currently scheduled.
