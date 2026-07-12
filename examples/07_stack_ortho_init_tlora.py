@@ -32,7 +32,7 @@ Caveats this script is deliberately demonstrating around:
   - **T-LoRA is training-only.** Inference runs full rank at every `t`; never call
     `set_timestep_mask` in a sampling loop (`docs/methods/timestep_mask.md`).
   - **The schedule barely moves learned effective rank on Anima**
-    (`bench/timestep_mask/`). This shows the *mechanism*; don't expect the
+    (`_archive/bench/timestep_mask/`). This shows the *mechanism*; don't expect the
     schedule to be a big quality lever — question `network_dim` before tuning
     `alpha_rank_scale`.
   - **OrthoInit distills to a standard LoRA at save** (sqrt-split λ → down/up), so
