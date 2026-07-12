@@ -12,12 +12,12 @@
 # student during distillation).
 
 # output_name = "anima_superturbo_A"
-output_name = "anima_turbo_T_LR"
+output_name = "anima_turbo_T2"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 4000
+iterations = 8000
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -82,8 +82,8 @@ grad_step = "random"
 [optim]
 # student_lr = 5e-5 # warm start can make start from safe basin
 # fake_lr = 5e-5
-student_lr = 2e-5
-fake_lr = 3e-5
+student_lr = 5e-5
+fake_lr = 5e-5
 fake_steps_per_student_step = 4
 fake_warmup_steps = 200
 weight_decay = 0.0
@@ -96,14 +96,14 @@ grad_clip = 1.0
 [dpdmd]
 k_anchor = 6                    # teacher steps rolled to the diversity anchor (their K)
 teacher_anchor_steps = 12        # teacher σ-grid the K is counted against
-div_weight = 0.1               # λ on the first-step diversity MSE
+div_weight = 0.05               # λ on the first-step diversity MSE
 detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 
 # τ sampling distribution for the fake/critic update (+ fake warmup).
 [sampling]
 t_distribution = "uniform"      # "uniform" or "sigmoid"
 sigmoid_scale = 1.0
-flow_shift = 2.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
+flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
 
 # Mean-variance regularization (lever B / paper Eq. 7; proposal §3.B, run S2).
 #
