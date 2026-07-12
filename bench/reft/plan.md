@@ -131,4 +131,4 @@ Drives training via the existing trainer (matched configs built on the fly, `--m
 - `networks/lora_modules/reft.py` — the module (`forward` is the whole story).
 - `docs/methods/reft.md`, `docs/structure/reft.md` — current (about-to-be-re-scoped) docs.
 - memories: `cmmd_val_signal`, `fm_val_loss_uninformative`, `mod_guidance_sigma_film` (the global-tone-lever prior), `sigma_signal_resolves_by_045`, `turbo_per_step_expert`.
-- `bench/sigma_reshape/README.md`, `bench/mod_guidance/text_jacobian.py` — format + mechanistic-probe precedents.
+- `bench/sigma_reshape/README.md`, `_archive/bench/mod_guidance/text_jacobian.py` — format + mechanistic-probe precedents.

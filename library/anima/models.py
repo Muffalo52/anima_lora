@@ -1424,7 +1424,7 @@ class Anima(nn.Module):
         # text push scales per σ (the plain head is σ-flat, ‖ΔS‖/‖ΔT‖ collapses at
         # high σ). Sibling of pooled_text_proj (not folded in) to keep the [...]
         # indexing valid. Gated by enable_pooled_text_sigma_film — off ⇒ bit-exact
-        # to the plain head; zero-init ⇒ identity FiLM. See bench/mod_guidance.
+        # to the plain head; zero-init ⇒ identity FiLM. See _archive/bench/mod_guidance.
         self.pooled_text_sigma_film = nn.Linear(model_channels, 2 * model_channels)
         self.enable_pooled_text_sigma_film = False
 

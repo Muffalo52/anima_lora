@@ -6,10 +6,10 @@ Two independent probes converge on one verdict: the distilled `pooled_text_proj`
 AdaLN modulation head is a **global tone / contrast / finishing operator**, not a
 content editor and not a "quality" lever.
 
-1. **Image-space channel attribution** (`bench/mod_guidance/channel_attribution.py`)
+1. **Image-space channel attribution** (`_archive/bench/mod_guidance/channel_attribution.py`)
    demotes the original "quality axis" framing to a *content-magnitude* axis and shows
    the pooled channel behaves like a grade/polish knob conditional on a good base.
-2. **Text-Jacobian** (`bench/mod_guidance/text_jacobian.py`) explains *why*
+2. **Text-Jacobian** (`_archive/bench/mod_guidance/text_jacobian.py`) explains *why*
    architecturally: the head matches the teacher pointwise but its text-*derivative* is
    orthogonal to the teacher's, and a DC/AC decomposition proves that ceiling is
    intrinsic — AdaLN can only write DC, the teacher's text response is ~99% AC.
@@ -17,6 +17,19 @@ content editor and not a "quality" lever.
 Both the layer/σ *schedule* axes were also probed and killed; the shipped hand-set
 `8–26` full-dose is validated. Details below, then the demoted geometry record kept as
 a frozen mechanism map.
+
+> **Bench ARCHIVED 2026-07-12** — every question this bench asked got a terminal
+> answer, so `_archive/bench/mod_guidance/` moved to `_archive/bench/mod_guidance/` (scripts +
+> all `results/`). The shipped *feature* is unaffected (`docs/inference/mod-guidance.md`,
+> `scripts/distill_mod/`). If the pooled head is ever re-distilled (base-DiT change),
+> resurrect `text_jacobian.py` + `channel_attribution.py` from the archive as the
+> acceptance probes. A last one-shot geometry probe (`pool_decouple_probe.py`, run
+> 2026-07-12, `_archive/bench/mod_guidance/results/20260712-1206-pool-decouple/`)
+> confirmed: pooling choice is a non-issue (max-over-pad == max-over-real, cos 1.000;
+> mean tracks max at ~0.9), max-pool saturation is mild (axis cos 0.94 at 12 tags), and
+> the mod-neg wording rotates the tiny quality-tag steering delta (cos down to −0.38 at
+> ‖δ‖≈0.02) — the "quality words barely drive the pooled axis" verdict restated, not a
+> reopening.
 
 ---
 
@@ -92,7 +105,7 @@ upstream signal (adaptive steering `w` on base quality), not proj retraining.
 > `_archive/gad/gad.md` → "GAD for mod-guidance" (archived 2026-06-12);
 > see [[project_mod_guidance_sigma_film]].
 
-`bench/mod_guidance/text_jacobian.py` (generation-free) perturbs the text from sample A
+`_archive/bench/mod_guidance/text_jacobian.py` (generation-free) perturbs the text from sample A
 toward B on held-out `(latent, σ, noise)` and compares pathway output deltas: teacher
 `ΔT = v(crossattn_B) − v(crossattn_A)` vs student `ΔS = v(pooled_B) − v(pooled_A)`. On
 `pooled_text_proj-0602`, matched to its synth training distribution, n=96 pairs/σ
@@ -164,8 +177,11 @@ the geometry scripts were never committed. Mechanism refs: `library/anima/models
 
 ## Reproduce
 
+Paths are post-archive — the scripts live under `_archive/bench/mod_guidance/` now
+(copy them back under `bench/` to run; they import `bench/_common.py`).
+
 ```bash
-# Image-space channel attribution (the live tool — swap / order / intensity / origin)
+# Image-space channel attribution (swap / order / intensity / origin)
 uv run python bench/mod_guidance/channel_attribution.py \
     --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
     --experiment all --dataset_samples 6 \

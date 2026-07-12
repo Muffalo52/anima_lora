@@ -54,7 +54,7 @@ The `bench/<method>/` convention from Tier 2 below requires every method bench t
 
 | Subdir | Status | What it has | What's needed |
 |---|---|---|---|
-| `bench/dave/`, `bench/mod_guidance/`, `bench/memorization/` | Has README | per-method probe ladder + `results/` | Use these as the shape template |
+| `bench/dave/`, `bench/memorization/` | Has README | per-method probe ladder + `results/` | Use these as the shape template |
 
 Each missing README is a self-contained Tier 1 PR. Use `_archive/spd/bench/README.md` as the model (the SPD bench is retired, but its README remains the shape to copy): headline, what each script does, a copy-pasteable run command, the headline number(s) and what "good" looks like, links to representative `results/<timestamp>/` runs, and an "Observed on Anima" section.
 
@@ -155,7 +155,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
 
    Hand-rolled methods without prior art are not categorically rejected, but the bar is higher: in the absence of a paper, the bench results have to carry the argument alone, and reviewers will be skeptical. If you are confident, propose the method in an issue first.
 
-2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/dave/`, `bench/mod_guidance/`, `bench/memorization/`):
+2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/dave/`, `bench/memorization/`):
 
    ```
    bench/<method_name>/

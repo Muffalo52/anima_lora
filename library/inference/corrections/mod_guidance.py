@@ -110,7 +110,7 @@ def setup_mod_guidance(
         logger.warning(
             "pooled_text_proj was trained with σ-FiLM, but inference steering bakes "
             "a single σ-flat delta — the timestep conditioning is ignored. "
-            "Use bench/mod_guidance/text_jacobian.py to evaluate the σ-FiLM head."
+            "Use _archive/bench/mod_guidance/text_jacobian.py to evaluate the σ-FiLM head."
         )
     with torch.no_grad():
         pos_pooled = pos_crossattn.max(dim=1).values  # (1, 1024)
