@@ -1,6 +1,12 @@
 # Tagger spatial-head headroom — the floor is the head, not the features
 
-Status: **Phase 0 + 0.5 RUN 2026-07-08 — VERDICT `HEAD_HEADROOM`, cause =
+Status: **CLOSED 2026-07-12** — Phase 1 shipped + v3 promoted 2026-07-08; the
+owed ceiling-probe re-run on the shipped v3 came back **`MIXED`** (deployed ≈
+same-arch isolated oracle; floor median lift +0.022, control gap ≈0), i.e. the
+refit captured the head-side headroom this line was about. Bench instruments
+archived to `_archive/bench/tagger_ceiling/`; `bench/tagger_eval` stays live as
+the regression scorer. Residual open lever = the un-run `label_embed` tail arm
+(see Closing). Original Phase 0/0.5 verdict: **`HEAD_HEADROOM`, cause =
 MULTITASK STARVATION.** The deployed spatial branch floors on localized-semantic
 tags (`tagger_eval`: pose ~0.18, expression ~0.15, gesture ~0.11) at 0.260 mean
 AP over 1207 supported spatial tags. The factor ablation is unambiguous: taking
@@ -13,8 +19,8 @@ MAPHead+trunk is fine) — it is a **selection + recipe** problem (the two trunk
 are disjoint, so it is *not* shared-gradient interference; see the Phase-1
 mechanism note). Fix is training-side and cheap, and is **SHIPPED** (Phase 1
 below): `--select_metric spatial_ap`, an optional spatial-only refit stage, and a
-spatial optimizer param-group. Instruments: `bench/tagger_ceiling/{run_bench.py,
-ablate.py}`, `tests/test_tagger_ceiling.py`, `tests/test_tagger_spatial_headroom.py`.
+spatial optimizer param-group. Instruments: `_archive/bench/tagger_ceiling/{run_bench.py,
+ablate.py}`, `_archive/bench/tagger_ceiling/test_tagger_ceiling.py`, `tests/test_tagger_spatial_headroom.py`.
 
 ## Where this comes from
 
@@ -28,7 +34,7 @@ could not answer: is that floor a **head/training** problem (fixable) or a
 **feature ceiling** (frozen PE-Spatial doesn't encode pose at the needed
 granularity — needs a new tower)?
 
-## Phase 0 — the ceiling probe (`bench/tagger_ceiling/run_bench.py`)
+## Phase 0 — the ceiling probe (`_archive/bench/tagger_ceiling/run_bench.py`)
 
 Re-fit the spatial branch on the *same* frozen PE-Spatial tokens at three
 capacity rungs, score every spatial tag threshold-free (mean AP), stratify by KB
@@ -55,7 +61,7 @@ out far better under a fresh head. But the ceiling probe's arms were confounded
 initial read ("linear beats the MAP oracle → architecture is over-engineered")
 turned out to be a `pos_weight` artifact. Phase 0.5 disentangles it.
 
-## Phase 0.5 — factor ablation (`bench/tagger_ceiling/ablate.py`) — RUN 2026-07-08
+## Phase 0.5 — factor ablation (`_archive/bench/tagger_ceiling/ablate.py`) — RUN 2026-07-08
 
 Grid on the same materialized features (all spatial-only), reading spatial mean AP:
 
@@ -107,7 +113,7 @@ flags in `cli.py`), all opt-in / default-inert:
 
 - **`--select_metric spatial_ap`** — model selection on threshold-free spatial
   mean AP over the PE-Spatial-routed tags (softmax-inclusive), matching
-  `bench/tagger_ceiling`. Default stays `macro_f1` (which *excludes* softmax
+  `_archive/bench/tagger_ceiling`. Default stays `macro_f1` (which *excludes* softmax
   groups and mixes in the near-solved core slices → blind to the floor); the
   retrain uses `spatial_ap`. Reported every epoch either way.
 - **`--spatial_refit_epochs N`** — option (c): after joint training, freeze
@@ -123,7 +129,7 @@ flags in `cli.py`), all opt-in / default-inert:
   −0.107. Not wired.
 
 **Recommended retrain:** `--select_metric spatial_ap --spatial_refit_epochs ~15`
-(± `--lr_spatial` sweep). Validate by re-running `bench/tagger_ceiling/run_bench.py`
+(± `--lr_spatial` sweep). Validate by re-running `_archive/bench/tagger_ceiling/run_bench.py`
 (deployed arm → ~0.38) and `bench/tagger_eval/run_bench.py` (floor slices up,
 identity slices flat).
 
@@ -160,7 +166,7 @@ The refit was still climbing at ep47 (spatial_ap 0.278) and it, not the selectio
 metric, carries the gain — so the sweeps all target the **refit stage** (joint
 stage stays fixed at the v2 recipe; dual-checkpointing keeps the macro_f1 baseline
 free every run). Grid, cheapest first, each scored by `bench/tagger_eval` (floor
-slices ↑, identity Δ≈0, residual macro-F1 not down) + `bench/tagger_ceiling`
+slices ↑, identity Δ≈0, residual macro-F1 not down) + `_archive/bench/tagger_ceiling`
 (deployed arm → ceiling):
 
 1. **Longer refit** — `--spatial_refit_epochs {25, 40}` at the default LR. First
@@ -176,9 +182,38 @@ slices ↑, identity Δ≈0, residual macro-F1 not down) + `bench/tagger_ceiling
    run them as detached jobs (`setsid nohup … --no-ram_resident`), not tracked
    background tasks (the harness reaps idle ones).
 
-Also owed: ceiling-probe re-run on the shipped v3 for a true "vs-deployed" number
-(the +0.123 target was against the stale 1405-tag v2). Sweep bench envelopes land
-in `bench/tagger_eval/results/<ts>-<label>/`.
+Sweep bench envelopes land in `bench/tagger_eval/results/<ts>-<label>/`.
+
+### Closing — v3 ceiling re-run — RUN 2026-07-12 (`results/20260712-1248-v3-full`)
+
+The owed "true vs-deployed" probe, same config as v2-full (12k cap, 40 ep, val
+N=756) against the promoted v3 (2131 spatial tags, 1879 supported — vocab grew
+from v2's 1224, so mean-AP is not directly comparable across the two runs):
+
+| arm | spatial mean AP |
+|---|---|
+| deployed (shipped v3) | 0.2784 |
+| linear | 0.3357 |
+| oracle (isolated MAPHead, 40 ep) | 0.2891 |
+
+**VERDICT `MIXED`** — floor median lift (oracle − deployed) collapsed to
+**+0.022** (was +0.051 on v2), control median lift −0.001 (oracle_valid=True).
+The deployed v3 now sits at the same-architecture isolated ceiling: the
+multitask-starvation gap this proposal targeted is gone, which retroactively
+confirms the Phase-1 refit as the fix. Reads on what's left: (1) the refit
+sweeps above have little probe-visible headroom remaining — run them only as
+cheap opportunistic rungs, scored by `bench/tagger_eval` alone; (2) the linear
+arm still clears deployed by +0.057 mean AP, concentrated in high-support
+object-y slices (furniture 0.57 vs 0.29, costume 0.45 vs 0.27, bag 0.66 vs
+0.39) — that residual is head/tail territory, i.e. the un-run **`label_embed`
+arm**, not the starvation mechanism (closed). Caveat: the oracle was still
+climbing at ep40 (+0.002/4ep) on the larger vocab, so the isolated ceiling may
+be slightly understated; it passed the control sanity gate regardless.
+
+With the attribution question answered end-to-end (floor → head → starvation →
+fix shipped → gap closed), `_archive/bench/tagger_ceiling` is archived
+(`_archive/bench/tagger_ceiling/`, with `test_tagger_ceiling.py`); future
+tagger changes regression-score through `bench/tagger_eval`.
 
 Orthogonal arm (fold in, don't gate on): the **`label_embed` head A/B**
 (`--tag_head_kind label_embed`, un-run). It's a head-side lever aimed at the tail
@@ -187,7 +222,7 @@ the isolation fix, not competing with it.
 
 ## Success metric & guardrails
 
-- Primary: spatial mean AP through `bench/tagger_ceiling/run_bench.py` (deployed
+- Primary: spatial mean AP through `_archive/bench/tagger_ceiling/run_bench.py` (deployed
   arm) and per-slice AP through `bench/tagger_eval/run_bench.py`. Target: move the
   deployed spatial arm from 0.260 toward the isolated ceiling **0.383 (+0.123)**
   on the floor slices, without regressing the identity/core slices (a
@@ -212,4 +247,4 @@ the isolation fix, not competing with it.
 `project_tagger_ceiling_head_headroom`, `project_tagger_dual_hardrouted`,
 `project_lora_crossattn_learns_labeled_only` (untagged content lives off the
 labeled cross-attn path — orthogonal, but the same "where does the signal live"
-lens), `bench/tagger_eval`, `bench/tagger_groups`.
+lens), `bench/tagger_eval`, `_archive/bench/tagger_groups`.

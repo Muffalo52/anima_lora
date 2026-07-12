@@ -67,7 +67,7 @@ def spatial_mean_ap(
     branch that floors) and (b) unlike the trainer's macro-F1, does NOT drop
     softmax-group tags — AP is threshold-free, so eye/hair-color group tags
     count. NaN per-tag APs (no positives in the split) are ignored by the
-    nan-mean, matching ``bench/tagger_ceiling``.
+    nan-mean, matching ``_archive/bench/tagger_ceiling``.
     """
     from .eval_metrics import per_tag_average_precision
 

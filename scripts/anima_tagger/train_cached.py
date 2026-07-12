@@ -773,7 +773,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     train_loader = DataLoader(train_ds, batch_sampler=train_sampler, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_sampler=val_sampler, **loader_kwargs)
 
-    # Spatial-routed tag indices — the branch that floors (bench/tagger_ceiling)
+    # Spatial-routed tag indices — the branch that floors (_archive/bench/tagger_ceiling)
     # and the target of both the spatial_ap selection metric and the refit stage.
     spatial_idx = torch.tensor(routing[1], dtype=torch.long, device=device)
     spatial_names = spatial_param_names(model)

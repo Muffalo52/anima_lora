@@ -336,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ── Spatial-branch headroom levers (docs/proposal/tagger_spatial_head_headroom.md) ──
-    # bench/tagger_ceiling showed the spatial branch floors ~0.12 AP below an
+    # _archive/bench/tagger_ceiling showed the spatial branch floors ~0.12 AP below an
     # isolated same-arch head. The trunks are disjoint, so the fix is selection +
     # optimization, not loss-scaling (AdamW cancels a uniform spatial up-weight).
     p.add_argument(
@@ -347,7 +347,7 @@ def parse_args() -> argparse.Namespace:
         "legacy) EXCLUDES softmax-group tags and mixes in the near-solved core "
         "slices, so it is blind to the spatial branch's floor. 'spatial_ap' — "
         "threshold-free mean AP over the PE-Spatial-routed tags "
-        "(softmax-inclusive), matching bench/tagger_ceiling — is the right "
+        "(softmax-inclusive), matching _archive/bench/tagger_ceiling — is the right "
         "selection signal for the localized-semantic slices.",
     )
     p.add_argument(
@@ -358,7 +358,7 @@ def parse_args() -> argparse.Namespace:
         "core / rating / people params and refits only the spatial branch "
         "(pool_spatial + trunk_spatial + tag_head_spatial) for N epochs, "
         "selecting on val spatial_ap. Reproduces the isolated-branch ceiling "
-        "(bench/tagger_ceiling dep_arch__nobal, +0.123 AP) while guaranteeing "
+        "(_archive/bench/tagger_ceiling dep_arch__nobal, +0.123 AP) while guaranteeing "
         "the identity/core slices cannot regress. The refit is kept only if it "
         "beats the joint checkpoint's spatial_ap. 0 (default) = joint-only, "
         "bit-identical to the pre-refit path.",
