@@ -1,189 +1,83 @@
-# PSOFT-integrated OrthoLoRA
+# OrthoLoRA and the SVD-warm-start family
 
-A re-parameterization of the LoRA delta that keeps the basis matrices **exactly orthogonal** at every training step, initializes them from the pretrained weight's SVD, and swaps the $O(rd)$ trainable bases for two tiny $r \times r$ skew-symmetric seeds. Inspired by PSOFT (Wu et al., *Efficient Orthogonal Fine-Tuning with Principal Subspace Adaptation*, ICLR 2026).
+Three variants in this repo share one idea: **aim the LoRA delta at the pretrained weight's principal subspace instead of a random direction**, by seeding from $W_0$'s SVD. They differ only in how hard they hold onto that subspace afterwards — and in practice the *loosest* one is what ships.
 
-Recap from `lora.md`: plain LoRA replaces a frozen `Linear` $W_0$ with a residual $y = W_0 x + m\,s\,B A x$, $A \in \mathbb{R}^{r \times d_\text{in}}$ down, $B \in \mathbb{R}^{d_\text{out} \times r}$ up, both trainable. OrthoLoRA keeps the same insertion point — every adapted Linear still sees `org_forward(x) + delta` — but re-shapes what $A$ and $B$ actually are so that the delta stays inside an orthonormal subspace of the pretrained weight.
+| Variant | Flag | SVD is… | Trainable | ΔW can reach |
+|---|---|---|---|---|
+| **SVD-Down** *(shipped default)* | `down_init = "weight_svd"` | init only, down side | plain $A, B$ | anywhere |
+| **OrthoInit** | `use_ortho_init = true` | init only, both sides | $P, Q$ bases + $\lambda$ | anywhere |
+| **OrthoLoRA** (PSOFT-style) | `use_ortho = true` | frozen constraint | $r{\times}r$ Cayley seeds + $\lambda$ | top-$r$ subspace of $W_0$ only |
+
+Recap from `lora.md`: plain LoRA is $y = W_0 x + m\,s\,BAx$ with a random-direction $A$ and $B=0$. The problem all three variants address is the same — training spends its first epochs discovering a useful subspace from scratch, and an unconstrained delta can drift into directions that fight $W_0$ (style transfer that degrades anatomy, etc.).
 
 ![PSOFT-integrated OrthoLoRA](../structure_images/ortholora.png)
 
 ---
 
-## 1. Why rewrite the bases
+## 1. What ships: SVD-Down
 
-Two weaknesses of vanilla LoRA motivate the change:
+The live `configs/methods/lora.toml` gets the warm-start benefit with the smallest possible mechanism: seed `lora_down` from $W_0$'s top-$r$ right singular vectors and change nothing else.
 
-1. **Random Kaiming init for $A$.** The down-projection starts aimed at a direction unrelated to anything the base model cares about. Training spends its first few epochs finding a useful subspace from scratch.
-2. **No structural constraint on the delta.** $BA$ can drift into directions that fight the pretrained weight — a classic symptom is style transfer that also degrades anatomy, because the delta is rewriting weights it shouldn't need to touch.
+$$
+A_0 = V_r^\top / \sqrt{3}, \qquad B_0 = 0
+$$
 
-A soft orthogonality penalty ($\|A A^\top - I\|^2 + \|B^\top B - I\|^2$ on the bases) is the cheap fix. It works but it has its own cost:
+The $1/\sqrt{3}$ scale-matches Kaiming's expected row-norm, so the comparison against the default init isn't confounded by a larger effective step — it's purely "better direction." After init this is **ordinary LoRA**: ΔW = 0 at step 0 (via $B=0$), full $A$ and $B$ trainable from step 1, standard save format, no constraint, no extra buffers. It applies to plain `LoRAModule` only (the config raises if combined with the ortho or MoE variants, which have their own SVD machinery). Details and benching: `docs/methods/svd-down-lora.md`.
 
-- A new hyperparameter, `ortho_reg_weight`, sitting on the Pareto front between "orthogonality satisfied" and "task loss minimized." Too low and the bases drift off-orthonormal mid-training; too high and the reg term dominates the task gradient.
-- The penalty is never *exact* — at any step the bases are only approximately orthonormal.
-
-The PSOFT-style fix is to move orthogonality from the loss to the parameterization itself.
+If you remember one thing from this doc: **the SVD's value here is as a prior, not a cage.** The rest of this page covers the two variants that hold the subspace more tightly, and where they still earn their keep.
 
 ---
 
-## 2. The parameterization
+## 2. OrthoLoRA: the subspace as a hard constraint
 
-### 2.1 Frozen SVD bases
+OrthoLoRA (`networks/lora_modules/ortho.py`, inspired by PSOFT — Wu et al., ICLR 2026) makes the principal subspace *structural*:
 
-Compute the thin SVD of the pretrained weight (randomized, `torch.svd_lowrank`, $\sim 10$–$100{\times}$ faster than full SVD for $r \ll \min(d_\text{in}, d_\text{out})$):
+- **Frozen bases.** The top-$r$ singular vectors of $W_0$ (via randomized `torch.svd_lowrank`) are stored as non-trainable buffers $P_\text{basis}$ (out side) and $Q_\text{basis}$ (in side).
+- **Cayley rotations.** The trainable parameters are two tiny skew-symmetric seeds $S_p, S_q \in \mathbb{R}^{r\times r}$, mapped through the Cayley transform $R = (I-A)(I+A)^{-1}$ (exact `linalg.solve`, not the paper's Neumann series — the series silently diverges once $\|A\| \ge 1$, and an $r{\times}r$ solve is free). The effective bases $P_\text{basis}R_p$ / $R_q Q_\text{basis}$ are **exactly orthonormal at every step, by construction** — no regularizer, no hyperparameter.
+- **Diagonal scale.** A zero-init $\lambda \in \mathbb{R}^{1\times r}$ closes the delta: $\Delta W = P_\text{eff}\,\text{diag}(\lambda)\,Q_\text{eff}$. $\lambda = 0$ ⇒ ΔW = 0 at step 0.
 
-$$
-W_0\ \approx\ U\,\Sigma\,V^\top,\qquad
-U \in \mathbb{R}^{d_\text{out} \times r},\ \ V \in \mathbb{R}^{d_\text{in} \times r}
-$$
+The forward keeps plain LoRA's shape — down-projection, bottleneck (where the T-LoRA mask gates $\lambda$), up-projection — so the family stacks as usual. Trainable params per module collapse from $r(d_\text{in}+d_\text{out})$ to $2r^2 + r$ (~50× fewer at $r=64$), traded against per-module frozen basis buffers.
 
-Store the top-$r$ singular vectors as **non-trainable buffers**:
-
-$$
-P_\text{basis}\ \leftarrow\ U_{:,\,1..r}\quad (d_\text{out}\times r),\qquad
-Q_\text{basis}\ \leftarrow\ V_{:,\,1..r}^{\top}\quad (r\times d_\text{in})
-$$
-
-`networks/lora_modules/ortho.py:58–73`. These are the pretrained weight's **principal subspace** at rank $r$ — the directions where $W_0$'s row and column activity is concentrated.
-
-### 2.2 Cayley-parameterized rotations
-
-The trainable parameters are two *tiny* skew-symmetric seeds:
+### The cost: a capped delta
 
 $$
-S_p,\ S_q\ \in\ \mathbb{R}^{r\times r}, \qquad \text{initialized to 0}
+\text{colspace}(\Delta W)\ \subseteq\ \text{top-}r\ \text{left singular vectors of}\ W_0
 $$
 
-Each is run through the **Cayley transform** to produce an orthogonal matrix:
+Plain LoRA can point ΔW anywhere; OrthoLoRA can only rotate and rescale *inside* $W_0$'s principal subspace. For creative fine-tuning that cap is real — a new character or style may need components outside the top-$r$ directions, and when it does, OrthoLoRA plateaus early. This is exactly the "ortho feels too weak" experience that motivated the retreat to init-only variants.
 
-$$
-A_\star\ =\ S_\star - S_\star^\top\qquad\text{(skew-symmetric)}\\[2pt]
-R_\star\ =\ (I - A_\star)\,(I + A_\star)^{-1}\quad\Rightarrow\quad R_\star^\top R_\star\ =\ I
-$$
-
-(`ortho.py:87–93`). The effective bases are computed each forward pass:
-
-$$
-P_\text{eff}\ =\ P_\text{basis}\,R_p\quad (d_\text{out}\times r),\qquad
-Q_\text{eff}\ =\ R_q\,Q_\text{basis}\quad (r\times d_\text{in})
-$$
-
-Because $P_\text{basis}$ already has orthonormal columns and $R_p$ is orthogonal, $P_\text{eff}$ also has orthonormal columns. Same for $Q_\text{eff}$'s rows. **Orthogonality is structural, not regularized** — it holds exactly at every step, for every sample, regardless of training dynamics.
-
-At init $S_p = S_q = 0 \Rightarrow R_\star = I \Rightarrow P_\text{eff} = P_\text{basis}$, $Q_\text{eff} = Q_\text{basis}$.
-
-### 2.3 The diagonal scale
-
-One more trainable piece — a row vector $\lambda \in \mathbb{R}^{1\times r}$, zero-initialized (`ortho.py:81`). The full delta is:
-
-$$
-\Delta W\ =\ P_\text{eff}\,\text{diag}(\lambda)\,Q_\text{eff}\ \in\ \mathbb{R}^{d_\text{out}\times d_\text{in}}
-$$
-
-$\lambda = 0$ at init means $\Delta W = 0$, exactly — step 0 reproduces the pretrained model identically, same as plain LoRA's $B = 0$ convention.
+**OrthoInit** (`use_ortho_init = true`) is the halfway house: same top-$r$ SVD seed on *both* sides, but the bases are promoted to trainable parameters — no Cayley, no frozen subspace, $\lambda = 0$ still guarantees exact base preservation at step 0. Full LoRA expressivity with a two-sided warm start. Mutually exclusive with `use_ortho`; unlike the Cayley form it also composes with ChimeraHydra's pools.
 
 ---
 
-## 3. The forward
+## 3. Where the frozen-Cayley form still earns its keep: MoE experts
 
-The adapted Linear (`ortho.py:95–129`):
+For a *single* adapter, the hard constraint is usually not worth the cap — hence SVD-Down as the default. The Cayley parameterization's real remaining home is the **MoE variants**, where frozen disjointness is a feature, not a limitation:
 
-```python
-def forward(self, x):
-    org = self.org_forward(x)                 # frozen W0·x
-    if self._skip_module():
-        return org
+- **OrthoHydra** (`hydralora.md` §5.2) partitions the top-$(E \cdot r)$ singular vectors into per-expert **disjoint** slices. Because each expert rotates only within its own frozen slice, experts *cannot* collapse into each other — the structural fix for the MoE cold-start deadlock.
+- **ChimeraHydra** (`chimera-hydra.md`) builds both of its pools on the same substrate, with disjointness on both the down and up sides, plus capacity levers (`basis_mult`, `expert_diag`) that deepen each expert while preserving the disjoint guarantee.
 
-    R_q   = cayley(self.S_q)                  # (r, r)
-    Q_eff = R_q @ self.Q_basis                # (r, d_in)
-
-    lx = F.linear(x, Q_eff)                   # (..., r)
-    lx = lx * self.lambda_layer               # per-rank scale
-    if self._timestep_mask is not None:       # T-LoRA plugs in here
-        lx = lx * self._timestep_mask
-    lx, scale = self._apply_rank_dropout(lx)
-
-    R_p   = cayley(self.S_p)                  # (r, r)
-    P_eff = self.P_basis @ R_p                # (d_out, r)
-    out   = F.linear(lx, P_eff)               # (..., d_out)
-
-    return org + (out * self.multiplier * scale).to(org.dtype)
-```
-
-Compared to plain LoRA's `lora_down → mask → lora_up` the structure is identical — what changed is that `lora_down`'s weight is now $R_q\,Q_\text{basis}$ (a rotation of a frozen matrix) and `lora_up`'s is $P_\text{basis}\,R_p$. Everything else — dropout, rank dropout, timestep masking, `multiplier · scale` — sits in the same place.
+There, "the delta can't leave its slice" is precisely the property being purchased.
 
 ---
 
-## 4. Exact inverse, not Neumann series
+## 4. Save format
 
-The PSOFT paper computes $R = (I + A)^{-1}(I - A)$ via a $K$-term Neumann series (stopping at $K=5$). We use `torch.linalg.solve(I + A, I - A)` — an **exact inverse** (`ortho.py:93`).
-
-Two reasons:
-
-- **Cost is negligible.** $r$ is 4 to 64. A $64 \times 64$ solve is a rounding-error fraction of the DiT block's compute; at $r = 4$ it's essentially free.
-- **Correctness is always.** The Neumann series only converges when $\|A\| < 1$. Outside that ball it silently *diverges* — the output still has a numerical value, but it is not close to the Cayley transform and $R^\top R \ne I$. Since $\|A\|$ grows as training rotates farther from init, hitting this regime is a live possibility. The exact solve just works.
-
----
-
-## 5. Parameter and memory accounting
-
-For a target Linear with $d_\text{in}$, $d_\text{out}$, rank $r$:
-
-| Component         | Plain LoRA                     | OrthoLoRA                                            |
-| ----------------- | ------------------------------ | ---------------------------------------------------- |
-| Trainable params  | $r\,(d_\text{in} + d_\text{out})$       | $2r^2 + r$                                           |
-| Frozen buffers    | —                              | $r\,(d_\text{in} + d_\text{out})$ (the SVD bases)    |
-| Optimizer state   | $\sim$ trainable               | $\sim$ trainable                                     |
-
-Concrete: $d = 3072$, $r = 64$ → trainable drops from ${\sim}394\text{K}$ to ${\sim}8.3\text{K}$ per module. Across ~280 adapted Linears that's ~110M → ~2.3M trainable params — a ~50× reduction in what the optimizer has to carry.
-
-The trade: frozen buffers now hold a per-module copy of the SVD bases (same size as plain LoRA's full trainable weight). `P_\text{eff}$ and `Q_\text{eff}` are *computed* tensors — not leaf parameters — so they sit in the autograd graph as activations. Net VRAM overhead vs. plain LoRA at matched rank: roughly **+150–200 MB** at $r=64$ across the whole DiT. Optimizer memory goes *down* by more than that, so the sum is a small net positive.
-
----
-
-## 6. The expressiveness trade-off
-
-This is the load-bearing caveat, and it's why the config flag is called `use_ortho` rather than something more declarative — there's a real benchmark happening here.
-
-$P_\text{eff}$ can only rotate within the column space of $P_\text{basis}$. The whole $\Delta W$ is therefore restricted to **rotations inside the principal subspace of $W_0$**:
+All variants converge on disk. OrthoLoRA's effective delta is already rank $r$, so it factors exactly into **standard LoRA keys** with no SVD at save time:
 
 $$
-\text{colspace}(\Delta W)\ \subseteq\ \text{colspace}(P_\text{basis})\ =\ \text{top-}r\ \text{left singular vectors of}\ W_0
+\text{lora\_up} = P_\text{eff}\,\text{diag}(\lambda),\qquad \text{lora\_down} = Q_\text{eff}
 $$
 
-Plain LoRA, by contrast, can set $\Delta W$ to point **anywhere** — $B$ and $A$ are free $d_\text{in} \cdot r$ and $r \cdot d_\text{out}$ matrices, learnable in the full space.
-
-This is a well-motivated restriction for NLP fine-tuning, where the pretrained model already "knows" the task domain and you want to nudge it inside that domain. It is a more open question for **creative fine-tuning**: a new character or art style might need a $\Delta W$ component outside the top-$r$ singular directions of $W_0$. If that's the case, OrthoLoRA will plateau earlier than plain LoRA at the same rank. The Cayley guarantee is bought at the cost of basis freedom.
-
-The practical answer has been to stack it with T-LoRA — T-LoRA gives the bottleneck rank room to specialize by noise level, and the OrthoLoRA weight delta handles what fits inside the principal subspace cleanly. `configs/methods/lora.toml` enables both by default for exactly this reason.
+OrthoInit distills the same way ($R = I$); SVD-Down was standard LoRA all along. The payoff is uniform: stock ComfyUI loading and lossless `scripts/merge_to_dit.py` merging, whichever variant trained the checkpoint.
 
 ---
 
-## 7. Save format
+## 5. Minimal mental model
 
-Training state dict carries the *native* keys:
-
-```
-<prefix>.S_p           # (r, r)
-<prefix>.S_q           # (r, r)
-<prefix>.lambda_layer  # (1, r)
-<prefix>.P_basis       # (d_out, r)   — frozen buffer
-<prefix>.Q_basis       # (r, d_in)    — frozen buffer
-```
-
-On save, the native form is converted to **standard LoRA** (`lora_up.weight`, `lora_down.weight`, `alpha`) for ComfyUI compatibility. The conversion is exact — the effective delta $\Delta W = P_\text{eff}\,\text{diag}(\lambda)\,Q_\text{eff}$ is already rank $r$, so it factors directly with no SVD:
-
-$$
-\text{lora\_up}\ =\ P_\text{eff}\cdot\text{diag}(\lambda),\qquad
-\text{lora\_down}\ =\ Q_\text{eff}
-$$
-
-`scripts/merge_to_dit.py` can fold this into the DiT weight the same way it folds plain LoRA — $W_\text{merged} = W_0 + m \cdot s \cdot \text{lora\_up} \cdot \text{lora\_down}$ — so OrthoLoRA produces standalone checkpoints losslessly.
-
----
-
-## 8. Minimal mental model
-
-1. Freeze the top-$r$ left/right singular vectors of each adapted weight. Those become `P_basis` and `Q_basis`.
-2. Rotate them each forward with $r \times r$ Cayley-parameterized orthogonal matrices. Trainable params shrink from $O(rd)$ to $O(r^2)$.
-3. Scale with a zero-init diagonal $\lambda$. Step 0 reproduces the base model exactly.
-4. The delta lives **inside the principal subspace of $W_0$** — structurally orthogonal, no reg hyperparameter, but expressiveness is bounded to rotations within that subspace.
-5. Saves as standard LoRA keys. ComfyUI can load the output without any custom node.
+1. One idea — seed from $W_0$'s SVD so the first gradients land where the base model already concentrates — at three strengths of commitment.
+2. **SVD-Down ships**: init-only, down-side, scale-matched; ordinary LoRA afterwards.
+3. **OrthoLoRA** freezes the subspace and trains only $r{\times}r$ rotations + a diagonal: exact orthogonality with ~50× fewer trainable params, but ΔW is capped to the principal subspace — the cap that pushed the default back to init-only.
+4. **OrthoInit** keeps the two-sided seed, frees the bases.
+5. The frozen-Cayley machinery survives where disjointness is the point: OrthoHydra / ChimeraHydra expert slices.
+6. Everything saves as standard LoRA keys.

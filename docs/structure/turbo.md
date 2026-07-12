@@ -31,7 +31,7 @@ inference-side code, you just run it at `--infer_steps <student_steps> --cfg 1.0
 
 The teacher is good but slow: 28 sampling steps × 2 forwards per step (cond +
 uncond for CFG=4) = 56 DiT forwards per image. A distilled student that matches it
-at 2 steps × 1 forward (CFG baked in) is a ~28× inference cut.
+at 4 steps × 1 forward (CFG baked in) is a ~14× inference cut.
 
 The naive distillation target — "regress the student's few-step trajectory onto the
 teacher's many-step trajectory" — is brittle: it locks the student to one solver and
@@ -131,8 +131,8 @@ produces noisy gradients and the quality refinement stops landing on-manifold (t
 paper's high-frequency checkerboard that compounds over training). The student LoRA
 at rank $r_s$ defines a manifold of perturbed scores; the fake needs to be at least
 $r_s$-expressive to track it pointwise. So $r_\text{fake} \ge r_\text{student}$ is a
-capacity floor on the regularizer, not a stability prior. (Defaults ship
-`student_rank = fake_rank = 64`.)
+capacity floor on the regularizer, not a stability prior — the config validator
+warns when it's violated. (Defaults ship `student_rank = fake_rank = 48`.)
 
 ---
 
@@ -300,10 +300,11 @@ x_\tau^\text{fake} = (1-\tau_\text{fake})\,x_\theta^\text{detach} + \tau_\text{f
 \mathcal L_\text{fake} = \big\|\,\text{fake}(x_\tau^\text{fake}, \tau_\text{fake}, c) - (\varepsilon - x_\theta^\text{detach})\,\big\|^2
 $$
 
-Run `fake_steps_per_student_step` (default 5) inner steps against the **same**
+Run `fake_steps_per_student_step` (default 1) inner steps against the **same**
 $x_\theta^\text{detach}$, resampling $(\tau, \varepsilon)$ each time. Standard DMD2
-practice: the fake's target distribution is *moving* as the student sharpens, so the
-fake is given extra SGD iterations to stay ahead. The fake's cosine LR schedule
+practice is to give the fake *extra* iterations (the reference uses 5): its target
+distribution is moving as the student sharpens, and a lagging critic produces noisy
+DM gradients — raise this knob when `dm_cos` drifts high. The fake's cosine LR schedule
 anneals over `iterations × fake_steps_per_student_step + fake_warmup_steps`, not the
 student's count.
 
@@ -337,18 +338,19 @@ $\tau < \texttt{norm\_floor}/\overline{|v^\text{real}|}$ (a thin sliver).
 
 | Policy | What it is |
 |---|---|
-| (a) | $\tau$-damping only |
-| (b) | DMD magnitude-normalization ($\tau$ roughly cancels) — **shipped default** (`dm_x0_norm=true`) |
+| (a) | $\tau$-damping only — **shipped default** (`dm_x0_norm=false`) |
+| (b) | DMD magnitude-normalization ($\tau$ roughly cancels) — opt-in via `dm_x0_norm=true` |
 | (c) | both ≈ (b) with $\tau$ re-multiplied in — **do not ship believing it composes** |
 
-**Why (b) ships (settled A/B, 2026-05-28).** (b)'s per-sample normalization gives
-every sample a unit-scale direction → even distribution-matching pressure → preserves
-fine structure, with **text rendering** the clearest win. The CA-era A/B also read it
-as the diversity fix; under DP-DMD the **diversity-collapse story has moved to the
-anchor (§1, §5)** — the first-step supervision is what now carries pose/composition
-spread, and `dm_x0_norm` is a *scale-invariance* lever on the quality term, not the
-diversity lever it was once over-credited as. It still ships true: scale-invariant
-DM grads keep the tails and detail sharp. See [[project_turbo_dmd_x0_norm_wins]].
+**How to think about the choice.** (b)'s per-sample normalization gives every sample
+a unit-scale direction → even distribution-matching pressure; in the CA-era A/B it
+was the clearest win for fine structure (text rendering especially), and it was once
+over-credited as the diversity fix. Under DP-DMD the **diversity-collapse story
+moved to the anchor (§1, §5)** — first-step supervision now carries pose/composition
+spread — which demoted `dm_x0_norm` to a pure *scale-invariance* lever on the quality
+term, and the shipped default reverted to plain $\tau$-damping. Reach for (b) when
+fine detail / text degrades late in a run; never combine it with (a) expecting the
+two to stack.
 
 ---
 
@@ -372,7 +374,10 @@ clamp). Normalization stays `/numel` (no renorm by mask area, matching
 
 `TurboDMDNetwork.save_student` serializes **only the student** in the standard
 plain-LoRA layout (`save_variant="standard"`); the fake is training scaffolding and
-never shipped. The student is an ordinary rank-$r$ LoRA with **CFG=4 baked in** — load
+never shipped. (The off-by-default `per_step_expert` variant — a shared-down student
+with one up-head per rollout step — saves a bespoke step-expert layout instead: not
+a plain LoRA, kept live at inference, refused by merge.) The default student is an
+ordinary rank-$r$ LoRA with **CFG=4 baked in** — load
 it through the normal inference path and run `--infer_steps <student_steps> --cfg 1.0`
 (currently 4). No turbo code runs at inference.
 
@@ -411,12 +416,13 @@ Consequences of the plain-LoRA bake (the load-bearing constraint):
    update picks up a $\tau$ factor; its sign must point $x_\theta$ toward $x_0^\text{real}$.
 5. **The DMD real score is CFG-guided** ($v_u + \alpha(v_c-v_u)$) — the one
    un-decoupling now that the CA branch is gone; the fake stays cond-only.
-6. **Fake stays ahead** with extra inner steps on the moving $x_\theta$ distribution
-   plus a pre-loop head-start; $r_\text{fake} \ge r_\text{student}$.
-7. **DM grad uses x0-norm (b), not τ-damping (a)** — a scale-invariance lever on the
-   quality term (the diversity job moved to the anchor); the two are alternatives,
-   never stacked.
-8. **Ships as a plain student LoRA**, CFG baked in, run at 2 steps / CFG=1.
+6. **Fake stays ahead** via the pre-loop head-start (and extra inner steps when the
+   critic lags); $r_\text{fake} \ge r_\text{student}$.
+7. **DM grad scaling: τ-damping (a) is the shipped default; per-sample x0-norm (b)
+   is the opt-in scale-invariance lever** — the two are alternatives, never stacked
+   (the diversity job lives in the anchor, not here).
+8. **Ships as a plain student LoRA**, CFG baked in, run at `student_steps` (4) with
+   CFG=1.
 
 ---
 

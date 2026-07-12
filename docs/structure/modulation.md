@@ -28,7 +28,7 @@ crossattn_emb  (B, 512, 1024)
 
 Three pieces fully specify it.
 
-**Pool** (`library/anima/models.py:1636`):
+**Pool** (`library/anima/models.py`):
 
 ```python
 pooled_text = crossattn_emb.max(dim=1).values   # (B, 1024)
@@ -36,7 +36,7 @@ pooled_text = crossattn_emb.max(dim=1).values   # (B, 1024)
 
 Global **max-pool** over the 512 context tokens — per channel, pick the most-activating token.
 
-**Project** (`library/anima/models.py:1345–1349`):
+**Project**:
 
 ```python
 self.pooled_text_proj = nn.Sequential(
@@ -78,6 +78,8 @@ Two reasons:
 Classic AdaLN-Zero convention. At step 0 the MLP output is exactly zero → `t_emb` is unchanged → AdaLN modulation is the pure timestep-only form. The pretrained DiT already works in that form (it was trained with whatever `pooled_text_proj` it shipped with); zero-init means any learned contribution is added from scratch without regressing the base.
 
 Training then learns what **caption-dependent bias** to add to the AdaLN gains, per channel, on top of the timestep-only default.
+
+One operational gotcha that has bitten before: `pooled_text_proj` loads as part of `load_dit_model`, not the text stack — tooling that swaps or ablates the text encoder still exercises this path.
 
 ---
 
