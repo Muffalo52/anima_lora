@@ -364,7 +364,7 @@ def compute_grouped_loss(
     the category, so the negative may be a missing label) gets its BCE
     contribution scaled by λ. Positives, active-group negatives, and ungrouped
     tags are untouched. λ=1.0 (default) is bit-identical to the un-weighted
-    path. Phase-0 gold-check (bench/tagger_groups) found inactive-group
+    path. Phase-0 gold-check (_archive/bench/tagger_groups) found inactive-group
     negatives only *mildly* less reliable than active-group ones, so a gentle
     λ≈0.6–0.75 is the intended operating range — masking (λ→0) would trade away
     too much precision.

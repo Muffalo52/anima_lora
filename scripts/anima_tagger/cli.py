@@ -238,7 +238,7 @@ def parse_args() -> argparse.Namespace:
         "tag whose group has NO tags on that image (annotator likely skipped "
         "the category → possible missing label) gets its BCE scaled by λ. "
         "Positives / active-group negatives / ungrouped tags untouched. 1.0 "
-        "(default) is bit-inert; 0.6–0.75 is the intended range (bench/"
+        "(default) is bit-inert; 0.6–0.75 is the intended range (_archive/bench/"
         "tagger_groups gold-check: inactive-group negatives only mildly less "
         "reliable, so don't mask). Trades long-tail recall↑ vs precision↓ — "
         "A/B on val. Val loss is always reported at λ=1.",
