@@ -45,7 +45,7 @@ from library.inference.text import prepare_text_inputs  # noqa: E402
 from library.inference.sampling import get_timesteps_sigmas  # noqa: E402
 from library.runtime.device import clean_memory_on_device  # noqa: E402
 
-REAL_PROMPTS = REPO_ROOT / "bench" / "cross_attn_drive" / "real_prompts.txt"
+REAL_PROMPTS = REPO_ROOT / "bench" / "turbo" / "real_prompts.txt"
 
 
 def _load_prompts(n: int) -> list[str]:

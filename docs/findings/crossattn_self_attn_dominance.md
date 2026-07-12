@@ -1,5 +1,12 @@
 # Cross-attn vs self-attn drive across σ — text writes the low-σ plan early, self-attn + MLP render it; the dominant pathway is self/MLP at *every* σ
 
+> **ARCHIVED (2026-07-12).** The measurement bench moved to
+> `_archive/bench/cross_attn_drive/` — mechanism questions answered, the
+> exploitation lever shipped as `--xattn_boost` (see
+> `docs/inference/xattn_boost.md`, `bench/frontload_text_boost/`). The glyph
+> scatter probe lives on in `bench/turbo/glyph_scatter_probe.py` (turbo
+> text-loss diagnosis). Paths below are pre-archive.
+>
 > **STATUS (2026-06-28).** Measurement-only finding. Two probes added under
 > `bench/cross_attn_drive/`: `attn_evolution.py` (cross-attn *map* re-routing —
 > "where patches look") and `attn_contribution.py` (gated residual contribution
@@ -207,20 +214,22 @@ elaborate them.
 ## Reproduce
 
 ```
-uv run python bench/cross_attn_drive/attn_evolution.py   --captions 12 --seeds 2 --tags "speech bubble,japanese text,english text" [--lora_weight …]
-uv run python bench/cross_attn_drive/attn_contribution.py --captions 12 --seeds 2 [--tags "@sincos"] [--lora_weight …]
+# NB the probes live in _archive/ now; their sys.path bootstrap assumes bench/<x>/,
+# so run them with PYTHONPATH=. from the repo root:
+PYTHONPATH=. uv run python _archive/bench/cross_attn_drive/attn_evolution.py   --captions 12 --seeds 2 --tags "speech bubble,japanese text,english text" [--lora_weight …]
+PYTHONPATH=. uv run python _archive/bench/cross_attn_drive/attn_contribution.py --captions 12 --seeds 2 [--tags "@sincos"] [--lora_weight …]
 
 # Result 4 — literal glyph columns. The tracked tags must appear as comma entries in
 # each caption (caption_has_tag selection + exact token-id subsequence match), so pass
 # a --prompts file of tag-list captions that each carry every tracked tag, e.g.
 #   "1girl, …, speech bubble, korean text, english text, this is anima image, 아니마 이미지 입니다"
-uv run python bench/cross_attn_drive/attn_evolution.py --prompts <glyph_captions.txt> \
+PYTHONPATH=. uv run python _archive/bench/cross_attn_drive/attn_evolution.py --prompts <glyph_captions.txt> \
   --tags "speech bubble,korean text,english text,this is anima image,아니마 이미지 입니다" \
   --captions 8 --seeds 2 --label glyph_ko_en
 # NB read mass PER TOKEN (divide by tag token count); flat-high mass + low re-route
 # rate = attention sink, not rendering fidelity (see Result 4 context-flip).
 ```
 
-Results: `bench/cross_attn_drive/results/*-contrib_{base,sincos}/` (+ `attn_contribution.png`),
+Results: `_archive/bench/cross_attn_drive/results/*-contrib_{base,sincos}/` (+ `attn_contribution.png`),
 `*-tag_{base,sincos2}/`, `*-sincostag_{base,lora}/`,
 `*-glyph_vs_bubble/` (Run A), `*-glyph_ko_en/` (Run B).

@@ -32,7 +32,8 @@ What it measures, per generation, on the *conditional* pass only (CFG uncond ski
     a likely learned data-prior trigger. Each prompt with ``cropped`` is also run with
     it removed; if the border sink collapses without the tag it is tag/data-prior-driven
     (RQ1 kill → "wants crop-conditioning / border aug, not headroom"), if it persists it
-    is a genuine relocatable sink. Same knockout discipline as ``cross_attn_drive``.
+    is a genuine relocatable sink. Same knockout discipline as ``cross_attn_drive``
+    (archived: ``_archive/bench/cross_attn_drive/``).
 
 Kill criteria (any ⇒ register line closes): no high-norm self-attn sink; sink not
 border-co-located; sink lives in cross-attn; **or** the step-0 border rate is ~0.
@@ -299,7 +300,7 @@ def _patched_forward(block: Block, rec: SinkRecorder, block_idx: int):
     """Mirror of ``Block._forward`` that additionally hands the gated self- and
     cross-attn contributions to the recorder. Bit-identical to the original
     computation (same submodule calls, same residual), so generation is unchanged.
-    Copied structurally from bench/cross_attn_drive/attn_contribution.py."""
+    Copied structurally from _archive/bench/cross_attn_drive/attn_contribution.py."""
 
     def _forward(
         x_B_T_H_W_D,

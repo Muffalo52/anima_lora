@@ -6,7 +6,7 @@
 set -euo pipefail
 cd /home/sorryhyun/anima/anima_lora
 
-PROMPTS=bench/cross_attn_drive/real_prompts.txt
+PROMPTS=bench/turbo/real_prompts.txt
 OUT=output/tests/turbo_drive
 TURBO=output/ckpt/anima_turbo_R/anima_turbo_R_4500.safetensors
 mkdir -p "$OUT"

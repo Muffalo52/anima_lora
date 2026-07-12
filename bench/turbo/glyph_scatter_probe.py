@@ -28,11 +28,11 @@ Two measurements per arm (one invocation = one arm at its operating point):
 Usage
 -----
     # teacher arm (base, its operating point)
-    uv run python bench/cross_attn_drive/glyph_scatter_probe.py \
+    uv run python bench/turbo/glyph_scatter_probe.py \
         --infer_steps 28 --cfg 4.0 --label glyph_teacher
 
     # student arm (turbo, its operating point)
-    uv run python bench/cross_attn_drive/glyph_scatter_probe.py \
+    uv run python bench/turbo/glyph_scatter_probe.py \
         --lora_weight output/ckpt/anima_turbo_S.safetensors \
         --infer_steps 4 --cfg 1.0 --label glyph_turboS
 
@@ -397,7 +397,7 @@ def main():
     def context_of(prompt):
         return prepare_text_inputs(gen_args, device, anima, shared, prompt=prompt)
 
-    out_dir = make_run_dir("cross_attn_drive", args.label)
+    out_dir = make_run_dir("turbo", args.label)
     diff_rows: list[dict] = []
     latents_store: list[tuple[str, torch.Tensor]] = []  # (name, cpu latent)
 
@@ -486,7 +486,7 @@ def main():
     mean_area50 = round(sum(r["area50"] for r in diff_rows) / len(diff_rows), 5)
     write_result(
         out_dir,
-        script="bench/cross_attn_drive/glyph_scatter_probe.py",
+        script="bench/turbo/glyph_scatter_probe.py",
         label=args.label,
         args=args,
         metrics={

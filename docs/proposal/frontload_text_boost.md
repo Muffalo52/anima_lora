@@ -14,7 +14,7 @@ one-afternoon falsification either way.
 
 - Cross-attn text drive is **front-loaded**: peaks at σ = 1, falls to a ~0.02
   floor below σ ≈ 0.85 (`docs/findings/crossattn_self_attn_dominance.md`,
-  `bench/cross_attn_drive/`). The reweight lever only has headroom in the first
+  `_archive/bench/cross_attn_drive/`). The reweight lever only has headroom in the first
   ~2–3 steps of the 28-step schedule.
 - LoRAs learn **labeled tags only** — influence Δ tracks training-label
   frequency; weak/rare tags underdrive precisely in the window where drive
@@ -54,7 +54,7 @@ deliberately.
 ## Phase 0 — grids, matched everything
 
 Fixed prompt set: ~12 prompts built around known **weak tags** (selected with the
-existing `bench/cross_attn_drive/tag_influence.py` machinery — used for
+existing `_archive/bench/cross_attn_drive/tag_influence.py` machinery — used for
 *selection only*, it is not a gate) + the border reproducer + 4 ordinary prompts
 as regressions. Render baseline / arm (a) at 2 strengths / arm (b) at 2
 strengths, matched seed and NFE, standard 28-step protocol. Judgment is

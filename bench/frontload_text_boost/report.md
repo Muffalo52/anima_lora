@@ -4,7 +4,7 @@ Proposal: `docs/proposal/frontload_text_boost.md`. Run:
 `results/20260706-2135-phase0/` (2026-07-06, base DiT, single seed 0).
 Eye-adjudicated on the contact sheet + per-prompt strips — no quality reward
 exists for Anima; the montage is the gate (same discipline as
-`bench/cross_attn_drive/report.md`).
+`_archive/bench/cross_attn_drive/report.md`).
 
 **Headline: arm (b) — cross-attn residual gain, cond-pass-only, σ ≥ 0.85 —
 passes G1+G2. Arm (a) — σ-gated CFG — fails G2 at every strength that does

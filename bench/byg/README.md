@@ -17,7 +17,7 @@ teach an edit the base can't already express through captions; it repackages
 base caption-following as instruction-conditioning. Two settled repo findings
 cut against that signal being strong here:
 
-1. **Text drive is front-loaded** (`bench/cross_attn_drive/`,
+1. **Text drive is front-loaded** (`_archive/bench/cross_attn_drive/`,
    `project_crossattn_drive_frontloaded`): caption-induced velocity difference
    peaks at σ=1 and decays to a ~0.02 floor; below σ≈0.85 text mostly
    *rescales* the base velocity. BYG samples `t ~ U(0,1)`, so `L_dir` is
@@ -37,7 +37,7 @@ part.
 
 1. **Prior-SNR probe** (cheap, before any training): measure
    `‖v_tgt − v_src‖ / ‖v_src‖` across σ on real tag-swap tuples, reusing the
-   `bench/cross_attn_drive/` machinery. If the directional signal sits at the
+   `_archive/bench/cross_attn_drive/` machinery (archived 2026-07-12). If the directional signal sits at the
    rescale floor below σ≈0.85, the effective supervision is confined to the
    first few steps of the rollout grid — quantify how much of `t ~ U(0,1)`
    actually carries signal before spending training compute.
