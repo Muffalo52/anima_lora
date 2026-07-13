@@ -112,6 +112,17 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--student_lr", type=float, default=-1.0)
     parser.add_argument("--fake_lr", type=float, default=-1.0)
     parser.add_argument(
+        "--lr_schedule",
+        type=str,
+        default=None,
+        choices=("cosine", "constant"),
+        help="LR shape after the 2%% warmup, for all three optimizers (student / "
+        "fake / disc): 'cosine' anneals to 0.1·lr over the run; 'constant' holds "
+        "peak lr to the last step (the superturbo_B postmortem: the cosine tail "
+        "spent the back half of the run at ~0.1·lr, so 4k→8k under it buys "
+        "nothing). Default: TOML (optim.lr_schedule, default 'cosine').",
+    )
+    parser.add_argument(
         "--fake_steps_per_student_step",
         type=int,
         default=-1,
@@ -247,6 +258,16 @@ def build_argparser() -> argparse.ArgumentParser:
         "Sentinel None → TOML (activation_memory_budget, default 1.0 = off).",
     )
     parser.add_argument("--save_every", type=int, default=-1)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Resume from a crash-resume bundle (student + fake + disc + all three "
+        "optimizers/schedulers + RNG), restoring the LR schedule mid-flight. "
+        "'auto' → output/ckpt/<output_name>/<output_name>_resume.pt if it exists, "
+        "else start fresh — safe to bake into a restart wrapper. A named path must "
+        "exist. Bundles are written every --save_every.",
+    )
     parser.add_argument("--log_interval", type=int, default=-1)
     parser.add_argument("--log_dir", type=str, default=None)
     parser.add_argument("--no_log", action="store_true")
@@ -420,6 +441,7 @@ class TurboConfig:
     output_name: str
     log_dir: str
     save_every: int
+    resume: str
     log_interval: int
     no_log: bool
 
@@ -517,6 +539,7 @@ class TurboConfig:
     # Optimizer + scheduler
     student_lr: float
     fake_lr: float
+    lr_schedule: str
     fake_steps_per_student_step: int
     fake_warmup_steps: int
     weight_decay: float
@@ -553,6 +576,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     output_name = _pick(args.output_name, cfg, "output_name", "anima_turbo")
     log_dir = _pick(args.log_dir, cfg, "io.log_dir", "output/logs/turbo")
     save_every = int(_pick(args.save_every, cfg, "io.save_every", 1000))
+    # CLI-only: a resume is a property of *this launch*, not of the method config.
+    resume = str(getattr(args, "resume", "") or "")
     log_interval = int(_pick(args.log_interval, cfg, "io.log_interval", 2))
     validate_every_n_steps = int(
         _pick(args.validate_every_n_steps, cfg, "io.validate_every_n_steps", 0)
@@ -705,6 +730,11 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     # Optimizer
     student_lr = float(_pick(args.student_lr, cfg, "optim.student_lr", 1e-5))
     fake_lr = float(_pick(args.fake_lr, cfg, "optim.fake_lr", 1e-5))
+    lr_schedule = _pick(args.lr_schedule, cfg, "optim.lr_schedule", "cosine")
+    if lr_schedule not in ("cosine", "constant"):
+        raise ValueError(
+            f"optim.lr_schedule={lr_schedule!r}: expected 'cosine' or 'constant'"
+        )
     fake_steps_per_student_step = int(
         _pick(
             args.fake_steps_per_student_step,
@@ -972,6 +1002,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         output_dir=output_dir,
         output_name=output_name,
         log_dir=log_dir,
+        resume=resume,
         save_every=save_every,
         log_interval=log_interval,
         no_log=bool(args.no_log),
@@ -1035,6 +1066,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         mv_calib_batches=mv_calib_batches,
         student_lr=student_lr,
         fake_lr=fake_lr,
+        lr_schedule=lr_schedule,
         fake_steps_per_student_step=fake_steps_per_student_step,
         fake_warmup_steps=fake_warmup_steps,
         weight_decay=weight_decay,
@@ -1076,7 +1108,8 @@ def snapshot_toml_text(c: TurboConfig, *, source_config: str | None = None) -> s
     )
 
 
-# TensorBoard config summary — the hand-picked subset (same key set/order as v1).
+# TensorBoard config summary — the hand-picked subset (v1 key set/order, plus
+# lr_schedule once it grew a second shape).
 _TB_KEYS = (
     "base_loss",
     "gan_loss_weight_gen",
@@ -1095,6 +1128,7 @@ _TB_KEYS = (
     "fake_warmup_steps",
     "student_lr",
     "fake_lr",
+    "lr_schedule",
     "fake_steps_per_student_step",
     "iterations",
     "batch_size",

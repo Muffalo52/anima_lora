@@ -118,3 +118,33 @@ def test_create_tb_writer_enabled_makes_timestamped_dir(tmp_path):
     finally:
         if w is not None:
             w.close()
+
+
+def test_make_scheduler_constant_holds_peak_lr_to_the_end():
+    """lr_schedule='constant' must be flat at peak lr after the 2% warmup.
+
+    Implemented as eta_min_ratio=1.0 on the shared warmup+cosine builder (the
+    cosine degenerates to a constant), so both shapes share one scheduler class
+    and one resume path — pin that the degenerate case really is flat.
+    """
+    import torch
+
+    from scripts.distill_turbo.primitives import make_scheduler
+
+    total, lr = 1000, 3e-5
+    opt = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=lr)
+    sched = make_scheduler(opt, total, lr, "constant")
+    warmup = max(1, int(0.02 * total))
+    for step in range(1, total + 1):
+        opt.step()
+        sched.step()
+        if step >= warmup:
+            assert sched.get_last_lr()[0] == pytest.approx(lr), f"step {step}"
+
+    # And the default stays an anneal: cosine must end well below peak.
+    opt2 = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=lr)
+    cosine = make_scheduler(opt2, total, lr)
+    for _ in range(total):
+        opt2.step()
+        cosine.step()
+    assert cosine.get_last_lr()[0] == pytest.approx(0.1 * lr, rel=1e-3)

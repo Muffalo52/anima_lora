@@ -1,5 +1,11 @@
 # x0-contradiction — measuring "in-step contradiction" in Anima t2i
 
+> **ARCHIVED 2026-07-12** — line closed: hypothesis reversed (wander = scene
+> complexity, base-owned, ⊥ breakage; F1–F3 closed the wander→breakage caveat
+> with the SAM3 finger detector). Map entry: `_archive/shelved_benches.md`;
+> memory: `project_x0_contradiction_bench`. The scripts' `parents[2]` bootstrap
+> assumed `bench/` depth — rerun from repo root with `PYTHONPATH=.`.
+
 **Question (user).** Broken regions in t2i (hands, weird objects) seem to track
 *under-specified captions*: the model "knows" more detail is needed than the
 caption gives (tag dropout), tries to draw it, and **different denoising steps

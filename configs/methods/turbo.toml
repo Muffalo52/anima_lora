@@ -11,13 +11,13 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-# output_name = "anima_superturbo_A"
-output_name = "anima_turbo_T2"
+# output_name = "anima_turbo_T2"
+output_name = "anima_superturbo_B"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 8000
+iterations = 4000
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -71,8 +71,8 @@ fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
 
 # DMD schedule.
 [dmd]
-# student_steps = 2
-student_steps = 4
+student_steps = 2
+# student_steps = 4
 teacher_cfg = 4
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
@@ -80,10 +80,15 @@ grad_step = "random"
 
 # Optimization.
 [optim]
-# student_lr = 5e-5 # warm start can make start from safe basin
+# student_lr = 5e-5   # T2: overshoots early — the 1k ckpt was voided, healed only by 2k
 # fake_lr = 5e-5
-student_lr = 5e-5
-fake_lr = 5e-5
+student_lr = 3e-5
+fake_lr = 3e-5
+lr_schedule = "constant"        # flat lr after the 2% warmup, all three optimizers.
+                                # superturbo_B postmortem: the cosine tail had the
+                                # student at ~0.1·lr for the whole back half — the
+                                # plateau tracked the anneal, not convergence.
+# lr_schedule = "cosine"        # warmup → cosine to 0.1·lr (the pre-_B default)
 fake_steps_per_student_step = 4
 fake_warmup_steps = 200
 weight_decay = 0.0
@@ -195,7 +200,7 @@ warmup_ratio = 1.0              # fill this fraction of the pool before firing (
 
 # Logging / checkpoints.
 [io]
-save_every = 1000
+save_every = 500
 log_interval = 5
 log_dir = "output/logs/turbo"
 validate_every_n_steps = 1000

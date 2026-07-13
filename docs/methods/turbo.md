@@ -190,6 +190,7 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | `[dpdmd]` | `div_weight` (λ) | `0.05` | weight on the first-step diversity MSE |
 | `[dpdmd]` | `detach_after_first` | `true` | **load-bearing** stop-grad after step 1; keep True (A/B only) |
 | `[optim]` | `student_lr` / `fake_lr` | `1e-5` / `2e-5` | fake runs hotter; **do not raise the student to 2e-5** — adversarial instability ([[project_turbo_lr_instability_threshold]]) |
+| `[optim]` | `lr_schedule` | `cosine` | LR shape after the 2% warmup, all three optimizers: `cosine` anneals to 0.1·lr; `constant` holds peak lr to the end — superturbo_B showed the cosine tail idles the whole back half of a run, so extended runs want `constant` |
 | `[optim]` | `fake_steps_per_student_step` | `4` | keep the fake ahead of the moving x_θ |
 | `[optim]` | `fake_warmup_steps` | `50` | fake (critic) head-start before the main loop — kills the early grad_signal_rms spike (~step 50); `0` = off |
 | `[optim]` | `grad_clip` | `1.0` | grad-norm cap (both nets) |

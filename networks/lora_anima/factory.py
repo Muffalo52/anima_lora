@@ -546,6 +546,11 @@ def create_network_from_weights(
                     f"Inconsistent σ-feature dims across modules: expected "
                     f"{sigma_feature_dim_detected}, found {extra} at {k!r}."
                 )
+    elif has_stacked_experts:
+        # Spec/module_class already resolved to stacked_experts_global_fei
+        # above. MoE wins over for_inference like Hydra: per-expert weights
+        # can't fold into a static merge, so don't downgrade to plain LoRA.
+        pass
     elif for_inference:
         # Force plain LoRA spec even for ortho — merge_to/fuse_weight wants flat
         # down/up, and ortho checkpoints are distilled to LoRA shape at save.

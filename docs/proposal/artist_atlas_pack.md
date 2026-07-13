@@ -1,6 +1,38 @@
 # Artist atlas — pack N trained artist LoRAs into one tag-hard-routed checkpoint
 
-Status: **PROPOSED 2026-07-06 (Phase 0 not run).**
+Status: **PHASE 0 PASSED 2026-07-12** — packer shipped
+(`scripts/atlas/pack.py`), G3 unit gates green (`tests/test_atlas_pack.py`),
+G1/G2 full-model gates green (`bench/atlas/run_bench.py`; G2 bitwise, G1 at
+the measured kernel-noise floor via a duplicate-ingredient control). See
+`bench/atlas/report.md`. Packed artifact: `output/ckpt/anima_atlas5_moe.safetensors`.
+Phase 1 (gate wiring, `make pack`, mixing grids) not started.
+
+## Premise correction (2026-07-12, measured)
+
+The near-orthogonality premise below is **population-dependent**. The five
+shipped artist *soups* (kat/ama_mitsuki/hews/suujiniku/sincos) are NOT
+near-orthogonal in raw ΔW space: pairwise cos **+0.96..+0.98**, energy ratio
+4.89 ≈ N (coherent sum), and all five fit in ONE rank-32 subspace (rank-32
+truncation of the 5-way soup retains 99.99% energy). Cause: every soup
+fine-tunes from the same uncond inter-train init
+(`anima_uncond_df58248c_r1_e4`), and that shared component carries **~98% of
+each ΔW's energy** (per-artist residual: 1.7–2.2%, sincos 6.6%). The
+*residuals* are near-orthogonal (pairwise cos −0.02..+0.09) — the
+merge-interference finding holds one level down.
+
+Consequences for this proposal:
+- **Mixing theory improves**: a *convex* blend `[α, 1−α]` of soup ingredients
+  keeps the shared uncond component at exactly 1× and interpolates only the
+  near-orthogonal style residuals. Weights should sum to 1 — non-convex gates
+  over/under-drive the shared component (this is what `merge_loras.py
+  --normalize global` was compensating for: its scale came out 0.202 ≈ 1/N,
+  the coherent-sum value, on these ingredients).
+- **The truncated-merge baseline is NOT handicapped** for soup-line
+  ingredients (truncation is ~free at rank 32); a uniform merge washes styles
+  by 1/N *averaging*, not truncation. The atlas's edge over one merged file is
+  per-request selection/exactness, not retained energy.
+- Independently-trained (non-soup) artist LoRAs presumably remain the
+  near-orthogonal population; the stacked independent-A layout covers both.
 
 ## Premise sources
 

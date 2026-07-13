@@ -17,7 +17,16 @@ from library.training.schedulers import make_warmup_cosine_scheduler
 __all__ = ["renoise", "sample_t", "make_scheduler", "PadCache", "make_collate"]
 
 
-def make_scheduler(opt, total_steps: int, lr: float):
-    """Warmup (2% of ``total_steps``, ≥1 step) → cosine annealing to ``0.1·lr``."""
+def make_scheduler(opt, total_steps: int, lr: float, schedule: str = "cosine"):
+    """Warmup (2% of ``total_steps``, ≥1 step) → cosine annealing to ``0.1·lr``,
+    or flat ``lr`` when ``schedule == "constant"`` (eta_min = lr degenerates the
+    cosine to a constant, so both shapes share one scheduler class and one
+    resume path)."""
     warmup_steps = max(1, int(0.02 * total_steps))
-    return make_warmup_cosine_scheduler(opt, total_steps, lr, warmup_steps=warmup_steps)
+    return make_warmup_cosine_scheduler(
+        opt,
+        total_steps,
+        lr,
+        warmup_steps=warmup_steps,
+        eta_min_ratio=1.0 if schedule == "constant" else 0.1,
+    )

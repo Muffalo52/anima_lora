@@ -67,6 +67,13 @@ from .primitives import (
     renoise,
     sample_t,
 )
+from .resume import (
+    apply_resume_state,
+    load_resume_state,
+    resolve_resume_arg,
+    resume_path_for,
+    save_resume_state,
+)
 from .softrank import CaptionNegativePool, caption_rank_loss
 from .warmup import run_fake_warmup
 
@@ -353,14 +360,40 @@ def main():
     turbo.student.to(device=device, dtype=dtype)
     turbo.fake.to(device=device, dtype=dtype)
 
+    # Crash-resume: the bundle carries the student/fake/disc weights the run died
+    # with, so it supersedes the warm start entirely — seeding from the init LoRA
+    # first would just be an SVD we immediately overwrite. Resolved here (before
+    # the networks are populated) so a bad --resume fails fast, and applied after
+    # the optimizers/schedulers exist.
+    resume_state = None
+    if cfg.resume:
+        arg = resolve_resume_arg(cfg.resume, cfg.output_dir, cfg.output_name)
+        if arg.path is None:
+            logger.info(
+                "--resume auto: no bundle at "
+                f"{resume_path_for(cfg.output_dir, cfg.output_name)} — starting fresh."
+            )
+        else:
+            resume_state = load_resume_state(arg.path)
+            logger.info(
+                f"resuming from {arg.path} @ step {resume_state['step']} "
+                f"(student + fake + disc + optimizers + LR schedule restored)"
+            )
+
     # Warm start (network.student_init_weights / fake_init_weights): seed the
     # stack's ΔW from a plain LoRA file (e.g. an official-release delta from
     # scripts/extract_delta_lora.py). After .to() so the SVD runs on-device,
     # before compile so traced forwards see the final tensors.
-    if cfg.student_init_weights:
-        warm_start_plain_lora(turbo.student, cfg.student_init_weights, "student")
-    if cfg.fake_init_weights:
-        warm_start_plain_lora(turbo.fake, cfg.fake_init_weights, "fake")
+    if resume_state is not None:
+        if cfg.student_init_weights or cfg.fake_init_weights:
+            logger.info(
+                "resume: skipping warm start — the bundle's weights supersede it."
+            )
+    else:
+        if cfg.student_init_weights:
+            warm_start_plain_lora(turbo.student, cfg.student_init_weights, "student")
+        if cfg.fake_init_weights:
+            warm_start_plain_lora(turbo.fake, cfg.fake_init_weights, "fake")
     # Disc stays fp32 (LayerNorm/Linear) for GAN-loss stability — its forward
     # casts the bf16 teacher features to float.
     if turbo.disc is not None:
@@ -472,7 +505,9 @@ def main():
         fused=torch.cuda.is_available(),
     )
 
-    student_sched = make_scheduler(student_opt, cfg.iterations, cfg.student_lr)
+    student_sched = make_scheduler(
+        student_opt, cfg.iterations, cfg.student_lr, cfg.lr_schedule
+    )
     # The fake optimizer takes ``iterations · fake_steps_per_student_step``
     # updates in the main loop plus ``fake_warmup_steps`` head-start updates
     # BEFORE it (the head-start is now counted in fake updates directly, NOT
@@ -486,6 +521,7 @@ def main():
         fake_opt,
         cfg.iterations * cfg.fake_steps_per_student_step + cfg.fake_warmup_steps,
         cfg.fake_lr,
+        cfg.lr_schedule,
     )
 
     # Disc steps once per fake inner step (FastGen ties it to the fake_score
@@ -500,7 +536,10 @@ def main():
             fused=torch.cuda.is_available(),
         )
         disc_sched = make_scheduler(
-            disc_opt, cfg.iterations * cfg.fake_steps_per_student_step, cfg.gan_disc_lr
+            disc_opt,
+            cfg.iterations * cfg.fake_steps_per_student_step,
+            cfg.gan_disc_lr,
+            cfg.lr_schedule,
         )
         n_disc = sum(p.numel() for p in turbo.disc_params())
         logger.info(f"trainable: disc={n_disc:,}")
@@ -511,6 +550,36 @@ def main():
     fdistill_bins = None
     if fdistill_on and cfg.f_ratio_normalization:
         fdistill_bins = torch.ones(cfg.f_bin_num, device=device)
+
+    # Apply the resume now that every mutable object exists (nets are on-device and
+    # compiled, all three optimizers/schedulers are built, the f-distill EMA buffer
+    # is allocated). start_step = student steps already completed; 0 on a fresh run.
+    start_step = 0
+    if resume_state is not None:
+        start_step = apply_resume_state(
+            resume_state,
+            cfg=cfg,
+            turbo=turbo,
+            student_opt=student_opt,
+            fake_opt=fake_opt,
+            disc_opt=disc_opt,
+            student_sched=student_sched,
+            fake_sched=fake_sched,
+            disc_sched=disc_sched,
+            fdistill_bins=fdistill_bins,
+        )
+        if start_step >= cfg.iterations:
+            raise SystemExit(
+                f"resume: bundle is at step {start_step} but iterations={cfg.iterations} "
+                "— nothing left to run. Raise --iterations to extend the run."
+            )
+        logger.info(
+            f"resume: continuing at step {start_step}/{cfg.iterations} "
+            f"(student LR {student_sched.get_last_lr()[0]:.3g})"
+        )
+        # Free the CPU-side copy before training allocates: the bundle holds two
+        # full AdamW moment sets and is the largest transient in the process.
+        resume_state = None
 
     # Soft-rank caption auxiliary (turbo_caption_ranking.md Phase 1): at the
     # DP-DMD step-0 anchor, rank the matched caption against k shuffled-caption
@@ -737,32 +806,46 @@ def main():
             )
         )
 
-    # Fake (critic) head-start.
+    # Fake (critic) head-start. Skipped on resume: the restored critic is already
+    # calibrated against the restored student, and its scheduler has consumed the
+    # head-start's updates. Re-running it here would re-warm a cold critic against
+    # a trained student — the pathology this resume path exists to avoid.
     data_iter = iter(dataloader)
-    data_iter = run_fake_warmup(
-        warmup_steps=cfg.fake_warmup_steps,
-        turbo=turbo,
-        forward_fn=_forward,
-        data_iter=data_iter,
-        dataloader=dataloader,
-        fake_opt=fake_opt,
-        fake_sched=fake_sched,
-        grad_clip=cfg.grad_clip,
-        t_distribution=cfg.t_distribution,
-        sigmoid_scale=cfg.sigmoid_scale,
-        device=device,
-        dtype=dtype,
-        log_interval=cfg.log_interval,
-        writer=writer,
-    )
+    if start_step > 0:
+        logger.info(
+            "resume: skipping the fake head-start (critic restored, already warm)."
+        )
+    else:
+        data_iter = run_fake_warmup(
+            warmup_steps=cfg.fake_warmup_steps,
+            turbo=turbo,
+            forward_fn=_forward,
+            data_iter=data_iter,
+            dataloader=dataloader,
+            fake_opt=fake_opt,
+            fake_sched=fake_sched,
+            grad_clip=cfg.grad_clip,
+            t_distribution=cfg.t_distribution,
+            sigmoid_scale=cfg.sigmoid_scale,
+            device=device,
+            dtype=dtype,
+            log_interval=cfg.log_interval,
+            writer=writer,
+        )
 
     # base_loss='dpdmd' runs the first-step teacher anchor (diversity); 'dmd' is
     # plain DMD2 with no anchor (student_steps may be 1).
     use_anchor = cfg.base_loss == "dpdmd"
     logger.info(
-        f"starting turbo training ({cfg.base_loss}): {cfg.iterations} iterations"
+        f"{'resuming' if start_step else 'starting'} turbo training ({cfg.base_loss}): "
+        f"steps {start_step} → {cfg.iterations}"
     )
-    progress = tqdm(range(cfg.iterations), desc="turbo")
+    progress = tqdm(
+        range(start_step, cfg.iterations),
+        desc="turbo",
+        initial=start_step,
+        total=cfg.iterations,
+    )
     metrics = TurboMetrics(device)
 
     for step in progress:
@@ -1293,6 +1376,27 @@ def main():
             for save_path in save_paths:
                 turbo.save_student(save_path, dtype=torch.bfloat16, metadata=metadata)
                 logger.info(f"saved checkpoint: {save_path}")
+
+            # Crash-resume bundle: everything save_student drops on the floor (fake,
+            # disc, three optimizers, three schedulers, f-distill EMA, RNG). Rolling
+            # single file, written atomically — see resume.py. Skipped on the final
+            # step: the run is complete, and the bundle is ~10× a student ckpt.
+            if not is_final:
+                rp = resume_path_for(cfg.output_dir, cfg.output_name)
+                save_resume_state(
+                    rp,
+                    step=n,
+                    cfg=cfg,
+                    turbo=turbo,
+                    student_opt=student_opt,
+                    fake_opt=fake_opt,
+                    disc_opt=disc_opt,
+                    student_sched=student_sched,
+                    fake_sched=fake_sched,
+                    disc_sched=disc_sched,
+                    fdistill_bins=fdistill_bins,
+                )
+                logger.info(f"saved resume bundle: {rp} (step {n})")
 
     if writer is not None:
         writer.close()

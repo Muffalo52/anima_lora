@@ -57,3 +57,4 @@ The leftmost column is the outcome — what the evidence settled:
 |---------|-----|----------|
 | TRAP | [spectral_fraction_metric_inverts.md](spectral_fraction_metric_inverts.md) | A fraction-of-Δ spectral metric **inverts**, and per-block ablation can't see a cumulative artifact — before trusting a spectral probe's verdict. |
 | TRAP | [custom_autograd_removal_partitioner_oom.md](custom_autograd_removal_partitioner_oom.md) | Removing a numerically-inert custom autograd Function shifted the compile partitioner and OOMed: **numerically-inert ≠ memory-inert**. |
+| TRAP | [hang_fix.md](hang_fix.md) | Long runs die to a **recurring, loop-agnostic `Xid 8` GPU hang** — infra, not code, and not preventable. `journalctl -k` silently scopes to the current boot, which under-reported it 2→1. Defence is `--resume`, not debugging the loop. |

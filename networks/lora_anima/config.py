@@ -894,7 +894,11 @@ class LoRANetworkCfg:
             modules_dim=modules_dim,
             modules_alpha=modules_alpha,
             train_llm_adapter=train_llm_adapter,
-            num_experts=hydra_num_experts if is_hydra_or_ortho_hydra else 4,
+            num_experts=(
+                hydra_num_experts
+                if (is_hydra_or_ortho_hydra or is_stacked_experts)
+                else 4
+            ),
             channel_scales_dict=channel_scales_dict,
             use_moe_style=use_moe_style,
             route_per_layer=route_per_layer,
