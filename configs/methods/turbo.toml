@@ -12,7 +12,7 @@
 # student during distillation).
 
 # output_name = "anima_turbo_T2"
-output_name = "anima_superturbo_B"
+output_name = "anima_superturbo_C"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -37,6 +37,17 @@ student_alpha = 212
 fake_rank = 96
 fake_alpha = 212
 attn_mode = "flash"
+# τ-split critic (docs/proposal/turbo_tau_split_critic.md, Phase-0 gate FIRED
+# 2026-07-14 on the superturbo_B bundle): 2 = dual fake LoRAs, bank 0 owning
+# τ < fake_tau_boundary, bank 1 the rest. Both the fake updates AND the DMD
+# queries route by the drawn τ, so total critic compute is unchanged — the
+# existing updates are partitioned, not added. Memory: +1 fake LoRA's
+# params/grads/Adam moments (read `n_fake` from the startup log); one extra
+# dynamo graph specialization per block. Requires batch_size = 1. With banks=2
+# consider fake_warmup_steps 200 → 400 (each bank gets ~half the head-start).
+# 1 = the second stack is never constructed → byte-identical shipped loop.
+fake_tau_banks = 1
+fake_tau_boundary = 0.5
 # Per-step expert: split the student into K = student_steps up-heads off a
 # shared down-proj, head k serving denoise step k. Removes the diversity↔quality
 # tug-of-war (step 0 vs steps 1..N) in shared up-weights. Default off — the
@@ -66,8 +77,16 @@ per_step_expert = false
 # the warm-start distribution, so a matched critic starts calibrated.
 # The _asvd file is the activation-whitened extraction (--act_scales; ASVD-style
 # functional truncation) — same rank/size, strictly better capture (≡ plain r128).
-student_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
-fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
+# superturbo_C: warm-start from our own from-zero NFE=4 keeper instead of the
+# official turboV10 delta. Analytic rationale (2026-07-14 subspace probe):
+# cos(S, turboV10) = 0.002 and cos(S, superturbo_B) = 0.007 — orthogonal DMD
+# solutions; 4k NFE=2 steps from the turboV10 init never rotated toward the
+# S-family mode, so the init picks the mode and this is the one discriminating
+# arm for "NFE=2 objective ceiling" vs "turboV10 mode selection".
+student_init_weights = "output/ckpt/turbo/anima_turbo_S.safetensors"
+fake_init_weights = "output/ckpt/turbo/anima_turbo_S.safetensors"
+# student_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"  # A/B/B2 init
+# fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
 
 # DMD schedule.
 [dmd]
@@ -84,11 +103,11 @@ grad_step = "random"
 # fake_lr = 5e-5
 student_lr = 3e-5
 fake_lr = 3e-5
-lr_schedule = "constant"        # flat lr after the 2% warmup, all three optimizers.
-                                # superturbo_B postmortem: the cosine tail had the
-                                # student at ~0.1·lr for the whole back half — the
-                                # plateau tracked the anneal, not convergence.
-# lr_schedule = "cosine"        # warmup → cosine to 0.1·lr (the pre-_B default)
+# LR shape is warmup → cosine to 0.1·lr, no longer configurable: the
+# lr_schedule="constant" knob was removed 2026-07-14 after the B (cosine) vs
+# B2 (constant) A/B — B2 never destabilized but never settled either (grad RMS
+# stayed at full magnitude → ~5-10x per-step weight displacement in the tail,
+# noise-ball) and rendered worse. The cosine tail is settling, not dead time.
 fake_steps_per_student_step = 4
 fake_warmup_steps = 200
 weight_decay = 0.0
@@ -109,27 +128,6 @@ detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 t_distribution = "uniform"      # "uniform" or "sigmoid"
 sigmoid_scale = 1.0
 flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
-
-# Mean-variance regularization (lever B / paper Eq. 7; proposal §3.B, run S2).
-#
-# A KL of each generated image's per-image Gaussian (μ_i, σ²_i) toward the
-# real-latent target (μ_t, σ²_t):
-#   L_mv = (1/B) Σ ½[ (σ_i² + (μ_i − μ_t)²)/σ_t² − 1 − log(σ_i²/σ_t²) ]
-# added to the student loss with `weight`. It directly clamps the variance
-# INFLATION that IS the over-bake's oversaturation (paper §3.2), so it stacks
-# on the DM shield as a cheap second shield. weight=0 disables (default).
-# For run S2 use a small weight (~0.01–0.05).
-#
-# Target stats: leave `sigma2_t <= 0` to measure both μ_t and σ²_t EXACTLY in a
-# one-pass scan over the real latents (recommended for Anima's 16-ch VAE — the
-# paper's SDXL μ_t=0.075/σ²_t=0.81 don't transfer). The target is a static
-# dataset statistic, so the exact scan beats a running EMA (no decay lag / batch
-# wobble, deterministic). Set `sigma2_t > 0` to pin explicit values.
-[mean_var]
-weight = 0.0
-mu_t = 0.0                      # used only when sigma2_t > 0 (pinned target)
-sigma2_t = -1.0                 # <= 0 → measure μ_t/σ²_t exactly from real latents
-calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # DMD2 teacher-feature GAN (FastGen idea 1; _archive/proposals/turbo_gan.md).
 #

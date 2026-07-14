@@ -276,16 +276,6 @@ stays cond-only.** The teacher uncond is the **T5("") sidecar**
 fed-out-of-distribution and the resulting $v_\text{real,uncond}$ amplified at
 $(\alpha-1)=3\times$ drives the student off-manifold (saturated white output).
 
-### 5.4 Mean-variance reg — optional second shield
-
-With `mean_var_weight > 0` an Eq.7 KL of each generated image's per-image Gaussian
-$N(\mu_i, \sigma^2_i)$ toward the real-latent target $N(\mu_t, \sigma^2_t)$ is added
-to the student loss. It is differentiable in $x_\theta$ and directly clamps the
-**variance inflation** that *is* the over-bake's oversaturation, stacking on the DM
-shield as a cheap global distribution clamp. The target is a static dataset
-statistic measured exactly in a one-pass scan over the real latents (no EMA lag).
-Off by default.
-
 ---
 
 ## 6. The fake update (keeping the shield sharp)

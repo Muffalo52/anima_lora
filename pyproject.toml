@@ -9,7 +9,7 @@ dependencies = [
     "torchvision>=0.27.0,<0.28",
     "accelerate>=1.13.0",
     "transformers>=5.10.1",
-    "diffusers>=0.37.0",
+    "diffusers>=0.39.0",
     "einops>=0.7.0",
     # Optimizers
     "pytorch-optimizer>=3.9.0",
@@ -56,7 +56,7 @@ dependencies = [
     "alembic>=1.18.4",
     "pydantic-settings>=2.14.0",
     "kornia>=0.8.2",
-    "comfy-kitchen>=0.2.10",
+    "comfy-kitchen>=0.2.18",
     "simpleeval>=1.0.7",
     "pytest>=9.0.3",
     "blake3>=1.0.8",

@@ -10,7 +10,12 @@ from dataclasses import fields
 import pytest
 import torch
 
-from scripts.distill_turbo.metrics import FlushedMetrics, TurboMetrics
+from scripts.distill_turbo.metrics import (
+    TAU_PROFILE_BINS,
+    FlushedMetrics,
+    TauBinCriticLoss,
+    TurboMetrics,
+)
 
 DEVICE = torch.device("cpu")
 
@@ -27,7 +32,6 @@ def _step_inputs(scale: float):
         tau_dm_e=rand(),
         v_real_cond_dm=rand(),
         v_fake_cond_dm=rand(),
-        mv_loss=torch.tensor(scale * 0.5),
     )
 
 
@@ -58,7 +62,6 @@ def test_accumulate_flush_matches_reference_formulas():
         vf = inp["v_fake_cond_dm"].float()
         dm_w = (inp["tau_dm_e"] * inp["delta_dm"].float()).pow(2).mean().sqrt()
         ref["fake"] += inp["fake_loss_mean_t"].item()
-        ref["mv"] += inp["mv_loss"].item()
         ref["grad"] += inp["grad_signal"].float().pow(2).mean().sqrt().item()
         ref["dm"] += inp["delta_dm"].float().pow(2).mean().sqrt().item()
         ref["xpred"] += inp["x_pred"].float().std().item()
@@ -80,6 +83,64 @@ def test_accumulate_flush_matches_reference_formulas():
     out = m.flush(log_interval)
     for name, total in ref.items():
         assert getattr(out, name) == pytest.approx(total / log_interval, rel=1e-5), name
+
+
+class _SpyWriter:
+    def __init__(self):
+        self.scalars = {}
+
+    def add_scalar(self, key, value, step):
+        self.scalars[key] = (value, step)
+
+
+def test_tau_bins_route_by_tau():
+    prof = TauBinCriticLoss(DEVICE)
+    # One loss per bin, τ at each bin's center → per-bin mean == that loss.
+    for i in range(TAU_PROFILE_BINS):
+        tau = torch.tensor([(i + 0.5) / TAU_PROFILE_BINS])
+        prof.add(torch.tensor(float(i + 1)), tau)
+    sums, cnts = prof.flush()
+    assert cnts == [1.0] * TAU_PROFILE_BINS
+    assert sums == pytest.approx([float(i + 1) for i in range(TAU_PROFILE_BINS)])
+
+
+def test_tau_bins_edge_values():
+    prof = TauBinCriticLoss(DEVICE)
+    prof.add(torch.tensor(1.0), torch.tensor([0.0]))  # → bin 0
+    prof.add(torch.tensor(2.0), torch.tensor([1.0]))  # τ=1.0 → LAST bin, not nbins
+    sums, cnts = prof.flush()
+    assert cnts[0] == 1.0 and sums[0] == pytest.approx(1.0)
+    assert cnts[-1] == 1.0 and sums[-1] == pytest.approx(2.0)
+    assert sum(cnts) == 2.0
+
+
+def test_tau_bins_batch_attribution_and_mean():
+    prof = TauBinCriticLoss(DEVICE, nbins=4)
+    # B=2: the batch-mean scalar loss is attributed to BOTH samples' bins.
+    prof.add(torch.tensor(3.0), torch.tensor([0.1, 0.9]))
+    # Second update into bin 0 only → bin-0 mean = (3 + 5) / 2.
+    prof.add(torch.tensor(5.0), torch.tensor([0.2]))
+    w = _SpyWriter()
+    prof.write(w, step=7)
+    assert w.scalars["train/fake_loss_tau0"] == (pytest.approx(4.0), 7)
+    assert w.scalars["train/fake_loss_tau3"] == (pytest.approx(3.0), 7)
+    # Empty bins are skipped, not written as 0.
+    assert "train/fake_loss_tau1" not in w.scalars
+    assert "train/fake_loss_tau2" not in w.scalars
+
+
+def test_tau_bins_write_resets_even_without_writer():
+    prof = TauBinCriticLoss(DEVICE, prefix="warmup/fake_loss_tau")
+    prof.add(torch.tensor(2.0), torch.tensor([0.5]))
+    prof.write(None, step=1)  # no writer (--no_log) must still reset
+    sums, cnts = prof.flush()
+    assert sums == [0.0] * TAU_PROFILE_BINS
+    assert cnts == [0.0] * TAU_PROFILE_BINS
+    # Reusable after the flush, with the custom prefix.
+    prof.add(torch.tensor(2.0), torch.tensor([0.5]))
+    w = _SpyWriter()
+    prof.write(w, step=2)
+    assert w.scalars["warmup/fake_loss_tau4"] == (pytest.approx(2.0), 2)
 
 
 def test_reset_zeroes_then_reaccumulates():

@@ -1,15 +1,19 @@
 """Turbo Anima — DP-DMD distillation harness.
 
 Owns two plain ``LoRANetwork`` instances (student + fake) on one frozen Anima
-DiT. Both call ``apply_to(unet)`` which chains them onto every targeted
-Linear's forward — at runtime the chain order is::
+DiT — three with the τ-split critic (``fake_tau_banks=2`` adds ``fake_hi``, a
+second fake bank owning the high-τ band; see
+``docs/proposal/turbo_tau_split_critic.md``). Each calls ``apply_to(unet)``
+which chains them onto every targeted Linear's forward — at runtime the chain
+order is::
 
-    linear(x) -> fake.forward -> student.forward -> original_linear.forward
+    linear(x) -> [fake_hi.forward ->] fake.forward -> student.forward -> original_linear.forward
 
 Each LoRA module short-circuits at ``not self.enabled`` (see
 ``lora_modules/lora.py::LoRAModule.forward``), so view-toggling is just
 ``set_enabled(bool)`` on each network — O(num_modules) Python loop, negligible
-vs a DiT forward.
+vs a DiT forward. The fake view drives exactly ONE bank (``set_fake_bank``,
+routed by the loop from the drawn τ); inactive banks stay disabled.
 
 Used by ``scripts/distill_turbo/distill.py``. Inference loads the saved
 ``anima_turbo.safetensors`` through the standard LoRA path (no inference-side
@@ -306,12 +310,21 @@ class TurboDMDNetwork:
         student_step_expert_K: int = 0,
         student_down_init: str = "kaiming",
         fake_down_init: str = "kaiming",
+        fake_tau_banks: int = 1,
         gan_feature_indices: set[int] | None = None,
         gan_disc_hidden: int | None = None,
     ) -> None:
         self.unet = unet
         self.student_rank = int(student_rank)
         self.fake_rank = int(fake_rank)
+        # τ-split critic (turbo_tau_split_critic Phase 1): 2 = a second fake
+        # stack (`fake_hi`) owning the high-τ band. Which bank answers/trains is
+        # the CALLER's choice via set_fake_bank (the boundary lives in the loop
+        # config, not here). 1 = the second stack is never constructed and every
+        # path below is byte-identical to the pre-bank harness.
+        self.fake_tau_banks = int(fake_tau_banks)
+        if self.fake_tau_banks not in (1, 2):
+            raise ValueError(f"fake_tau_banks={self.fake_tau_banks}: expected 1 or 2.")
         # SmoothQuant-style per-input-channel rebalance absorbed into each
         # ``lora_down`` (bit-equivalent at init, merges out cleanly). 0.0 = off,
         # 0.5 = sqrt-balance. Applied to both student and fake — it only
@@ -378,20 +391,28 @@ class TurboDMDNetwork:
         _fake_kwargs: dict = {}
         if self.fake_down_init != "kaiming":
             _fake_kwargs["down_init"] = self.fake_down_init
-        self.fake: LoRANetwork = create_network(
-            multiplier=1.0,
-            network_dim=self.fake_rank,
-            network_alpha=fake_alpha if fake_alpha is not None else self.fake_rank,
-            vae=None,
-            text_encoders=[],
-            unet=unet,
-            use_custom_down_autograd=use_custom_down_autograd,
-            channel_scaling_alpha=self.channel_scaling_alpha,
-            **_fake_kwargs,
+
+        def _make_fake() -> LoRANetwork:
+            return create_network(
+                multiplier=1.0,
+                network_dim=self.fake_rank,
+                network_alpha=fake_alpha if fake_alpha is not None else self.fake_rank,
+                vae=None,
+                text_encoders=[],
+                unet=unet,
+                use_custom_down_autograd=use_custom_down_autograd,
+                channel_scaling_alpha=self.channel_scaling_alpha,
+                **_fake_kwargs,
+            )
+
+        self.fake: LoRANetwork = _make_fake()  # bank 0 (banks=2: the low-τ bank)
+        self.fake_hi: LoRANetwork | None = (
+            _make_fake() if self.fake_tau_banks == 2 else None
         )
 
         # Apply student-first so the runtime chain is
-        # ``linear -> fake -> student -> original`` (additive, but a stable order).
+        # ``linear -> [fake_hi ->] fake -> student -> original`` (additive, but a
+        # stable order; fake_hi outermost when banks=2).
         self.student.apply_to(
             text_encoders=[],
             unet=unet,
@@ -404,21 +425,33 @@ class TurboDMDNetwork:
             apply_text_encoder=False,
             apply_unet=True,
         )
+        if self.fake_hi is not None:
+            self.fake_hi.apply_to(
+                text_encoders=[],
+                unet=unet,
+                apply_text_encoder=False,
+                apply_unet=True,
+            )
 
         logger.info(
             f"TurboDMDNetwork: student rank={self.student_rank} "
             f"({len(self.student.unet_loras)} modules), "
             f"fake rank={self.fake_rank} "
-            f"({len(self.fake.unet_loras)} modules)"
+            f"({len(self.fake.unet_loras)} modules"
+            + (f", x{self.fake_tau_banks} τ-banks" if self.fake_tau_banks > 1 else "")
+            + ")"
         )
 
         # Start in teacher view. LoRAModule defaults enabled=True, and diff-only
-        # set_view short-circuits when view==self._view, so we MUST disable both
-        # stacks explicitly here — else the set_view invariant (cur state matches
-        # _VIEW_FLAGS[_view]) breaks once either stack carries nonzero weights.
+        # set_view short-circuits when view==self._view, so we MUST disable every
+        # stack explicitly here — else the set_view invariant (cur state matches
+        # _VIEW_FLAGS[_view]) breaks once any stack carries nonzero weights.
         self.student.set_enabled(False)
         self.fake.set_enabled(False)
+        if self.fake_hi is not None:
+            self.fake_hi.set_enabled(False)
         self._view: View = "teacher"
+        self._fake_bank = 0
 
         # GAN feature tap: off unless gan_feature_indices is given. The disc reads
         # frozen-teacher block activations via the DiT's first-class feature-tap
@@ -505,12 +538,44 @@ class TurboDMDNetwork:
         if want_student != cur_student:
             self.student.set_enabled(want_student)
         if want_fake != cur_fake:
-            self.fake.set_enabled(want_fake)
+            # Only the ACTIVE bank ever toggles — inactive banks stay disabled
+            # from __init__ on, so the fake view is always exactly one bank.
+            self.fake_banks[self._fake_bank].set_enabled(want_fake)
         self._view = view
 
     @property
     def view(self) -> View:
         return self._view
+
+    @property
+    def fake_banks(self) -> list[LoRANetwork]:
+        """The fake stacks in bank order (bank 0 = low-τ; length 1 unless split)."""
+        return [self.fake] if self.fake_hi is None else [self.fake, self.fake_hi]
+
+    @property
+    def fake_bank(self) -> int:
+        """Index of the bank that answers/trains the next fake-view forward."""
+        return self._fake_bank
+
+    def set_fake_bank(self, i: int) -> None:
+        """Select which fake bank the fake view drives (τ-split critic routing).
+
+        The caller routes by the batch's drawn τ vs its configured boundary —
+        BEFORE the fake forward. Mid-fake-view switches flip only the two banks'
+        ``enabled`` flags (same dynamo-guard mechanism as teacher/student/fake
+        view switching). No-op at fake_tau_banks=1 (i must be 0).
+        """
+        banks = self.fake_banks
+        if not 0 <= i < len(banks):
+            raise ValueError(
+                f"set_fake_bank({i}): only {len(banks)} fake bank(s) exist."
+            )
+        if i == self._fake_bank:
+            return
+        if self._view == "fake":
+            banks[self._fake_bank].set_enabled(False)
+            banks[i].set_enabled(True)
+        self._fake_bank = i
 
     def set_student_step(self, i: int) -> None:
         """Select the student's step-``i`` up-head before its forward.
@@ -531,8 +596,16 @@ class TurboDMDNetwork:
         return [p for p in self.student.parameters() if p.requires_grad]
 
     def fake_params(self):
-        """Trainable params for the fake optimizer."""
-        return [p for p in self.fake.parameters() if p.requires_grad]
+        """Trainable params for the fake optimizer — all banks, bank order.
+
+        One optimizer spans every bank: with ``zero_grad(set_to_none=True)`` the
+        inactive bank's grads are None and AdamW skips them, and Adam's
+        per-param ``step`` state keeps bias correction correct under the sparse
+        updates τ-routing produces.
+        """
+        return [
+            p for bank in self.fake_banks for p in bank.parameters() if p.requires_grad
+        ]
 
     def freeze_dit(self) -> None:
         """Set ``requires_grad=False`` on every base DiT param.
@@ -546,7 +619,7 @@ class TurboDMDNetwork:
         """
         lora_prefixes = tuple(
             set(m.lora_name for m in self.student.unet_loras)
-            | set(m.lora_name for m in self.fake.unet_loras)
+            | {m.lora_name for bank in self.fake_banks for m in bank.unet_loras}
         )
         n_frozen = 0
         for name, param in self.unet.named_parameters():

@@ -69,6 +69,25 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--student_rank", type=int, default=-1)
     parser.add_argument("--fake_rank", type=int, default=-1)
     parser.add_argument(
+        "--fake_tau_banks",
+        type=int,
+        default=-1,
+        help="τ-split critic (turbo_tau_split_critic Phase 1): 2 = two fake "
+        "LoRAs, one owning each τ band; both updates and DMD queries route by "
+        "the drawn τ vs --fake_tau_boundary. Total critic compute is unchanged "
+        "(the existing updates are partitioned, not added). Requires "
+        "batch_size=1. Default: TOML (network.fake_tau_banks, default 1 = "
+        "byte-identical single-critic loop).",
+    )
+    parser.add_argument(
+        "--fake_tau_boundary",
+        type=float,
+        default=-1.0,
+        help="Raw-τ split point for --fake_tau_banks 2: bank 0 owns [0, b), "
+        "bank 1 owns [b, 1]. Uniform t_distribution → even update split at "
+        "0.5. Default: TOML (network.fake_tau_boundary, default 0.5).",
+    )
+    parser.add_argument(
         "--use_custom_down_autograd",
         action="store_true",
         default=None,
@@ -111,17 +130,6 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--student_lr", type=float, default=-1.0)
     parser.add_argument("--fake_lr", type=float, default=-1.0)
-    parser.add_argument(
-        "--lr_schedule",
-        type=str,
-        default=None,
-        choices=("cosine", "constant"),
-        help="LR shape after the 2%% warmup, for all three optimizers (student / "
-        "fake / disc): 'cosine' anneals to 0.1·lr over the run; 'constant' holds "
-        "peak lr to the last step (the superturbo_B postmortem: the cosine tail "
-        "spent the back half of the run at ~0.1·lr, so 4k→8k under it buys "
-        "nothing). Default: TOML (optim.lr_schedule, default 'cosine').",
-    )
     parser.add_argument(
         "--fake_steps_per_student_step",
         type=int,
@@ -203,19 +211,6 @@ def build_argparser() -> argparse.ArgumentParser:
         "multistep: sample g~U{0..N-1}, grad ONLY step g, supervise its one-step "
         "x0-prediction — memory-flat AND spreads supervision over every grid point. "
         "Default: TOML (dmd.grad_step, default 'all').",
-    )
-    # Mean-variance reg (lever B / paper Eq. 7; proposal §3.B / S2). Pulls each
-    # generated image's (μ_i, σ²_i) toward the real-latent target — clamps the
-    # variance inflation that is the over-bake's oversaturation.
-    parser.add_argument(
-        "--mean_var_weight",
-        type=float,
-        default=-1.0,
-        help="Weight on the Eq.7 mean-variance KL added to the student loss. "
-        "0 disables; S2 uses ~0.01–0.05. The target stats are read from TOML "
-        "([mean_var].mu_t/sigma2_t), or measured exactly in a one-pass scan over "
-        "the real latents when sigma2_t <= 0. Default: TOML (mean_var.weight, "
-        "default 0).",
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--attn_mode", type=str, default="flash")
@@ -462,6 +457,11 @@ class TurboConfig:
     fake_rank: int
     student_alpha: float
     fake_alpha: float
+    # τ-split critic (turbo_tau_split_critic Phase 1): 1 = single fake (the
+    # shipped, byte-identical loop); 2 = dual banks split at fake_tau_boundary
+    # (bank 0 owns [0, b)). Requires batch_size=1.
+    fake_tau_banks: int
+    fake_tau_boundary: float
     attn_mode: str
     use_custom_down_autograd: bool
     # Per-input-channel rebalance on each lora_down. Bit-equivalent at init,
@@ -530,16 +530,9 @@ class TurboConfig:
     softrank_pool_size: int
     softrank_warmup_ratio: float
 
-    # Mean-variance reg (lever B / Eq. 7)
-    mean_var_weight: float
-    mv_mu_t: float
-    mv_sigma2_t: float
-    mv_calib_batches: int
-
     # Optimizer + scheduler
     student_lr: float
     fake_lr: float
-    lr_schedule: str
     fake_steps_per_student_step: int
     fake_warmup_steps: int
     weight_decay: float
@@ -597,6 +590,32 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     fake_rank = int(_pick(args.fake_rank, cfg, "network.fake_rank", 48))
     student_alpha = float(_flatten(cfg, "network.student_alpha", student_rank))
     fake_alpha = float(_flatten(cfg, "network.fake_alpha", fake_rank))
+    fake_tau_banks = int(_pick(args.fake_tau_banks, cfg, "network.fake_tau_banks", 1))
+    fake_tau_boundary = float(
+        _pick(args.fake_tau_boundary, cfg, "network.fake_tau_boundary", 0.5)
+    )
+    if fake_tau_banks not in (1, 2):
+        raise ValueError(
+            f"network.fake_tau_banks={fake_tau_banks}: expected 1 (single critic) "
+            "or 2 (τ-split)."
+        )
+    if not (0.0 < fake_tau_boundary <= 1.0):
+        raise ValueError(
+            f"network.fake_tau_boundary={fake_tau_boundary}: must be in (0, 1]."
+        )
+    if fake_tau_banks == 2 and batch_size != 1:
+        # τ is per-sample; B=1 makes the routing decision a scalar. B>1 would
+        # need a split-batch double forward — out of scope for v0.
+        raise ValueError(
+            f"network.fake_tau_banks=2 requires batch_size=1 (got {batch_size}): "
+            "the bank routing is by the batch's scalar τ."
+        )
+    if fake_tau_banks == 2:
+        logger.info(
+            f"τ-split critic ON: 2 fake banks, boundary={fake_tau_boundary} "
+            "(bank 0 = low τ). Updates AND DMD queries route by drawn τ; total "
+            "critic compute unchanged."
+        )
     student_down_init = str(_flatten(cfg, "network.student_down_init", "kaiming"))
     if student_down_init not in ("kaiming", "weight_svd"):
         raise ValueError(
@@ -719,22 +738,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         detach_after_first = bool(args.detach_after_first)
     flow_shift = float(_pick(args.flow_shift, cfg, "sampling.flow_shift", 3.0))
 
-    # Mean-variance reg (lever B / Eq. 7). weight=0 disables. Target stats are
-    # pinned (sigma2_t > 0) or measured in a one-pass scan over the real latents
-    # (sigma2_t <= 0); calib_batches caps that scan (0 = full pass).
-    mean_var_weight = float(_pick(args.mean_var_weight, cfg, "mean_var.weight", 0.0))
-    mv_mu_t = float(_flatten(cfg, "mean_var.mu_t", 0.0))
-    mv_sigma2_t = float(_flatten(cfg, "mean_var.sigma2_t", -1.0))
-    mv_calib_batches = int(_flatten(cfg, "mean_var.calib_batches", 0))
-
     # Optimizer
     student_lr = float(_pick(args.student_lr, cfg, "optim.student_lr", 1e-5))
     fake_lr = float(_pick(args.fake_lr, cfg, "optim.fake_lr", 1e-5))
-    lr_schedule = _pick(args.lr_schedule, cfg, "optim.lr_schedule", "cosine")
-    if lr_schedule not in ("cosine", "constant"):
-        raise ValueError(
-            f"optim.lr_schedule={lr_schedule!r}: expected 'cosine' or 'constant'"
-        )
+    # lr_schedule was removed 2026-07-14: the "constant" arm (superturbo_B2)
+    # never settles and rendered worse than its cosine twin — cosine is the
+    # only shape again (see primitives.make_scheduler).
     fake_steps_per_student_step = int(
         _pick(
             args.fake_steps_per_student_step,
@@ -943,23 +952,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             "Single-prompt overfit mode pins the dataset to one sample; a "
             "batch_size > 1 dataloader with drop_last=True would yield zero batches."
         )
-    if mean_var_weight < 0.0:
-        raise ValueError(f"mean_var.weight={mean_var_weight}: must be ≥ 0")
-    if mean_var_weight > 0.0:
-        mv_auto = mv_sigma2_t <= 0.0
-        logger.info(
-            f"mean-variance reg ENABLED (Eq.7): weight={mean_var_weight}, target="
-            + (
-                "exact one-pass over real latents"
-                + (
-                    " (full pass)"
-                    if mv_calib_batches <= 0
-                    else f" (≤{mv_calib_batches} batches)"
-                )
-                if mv_auto
-                else f"fixed μ_t={mv_mu_t}, σ²_t={mv_sigma2_t}"
-            )
-        )
     logger.info(
         "DM gradient policy: "
         + (
@@ -1018,6 +1010,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         fake_rank=fake_rank,
         student_alpha=student_alpha,
         fake_alpha=fake_alpha,
+        fake_tau_banks=fake_tau_banks,
+        fake_tau_boundary=fake_tau_boundary,
         attn_mode=attn_mode,
         use_custom_down_autograd=use_custom_down_autograd,
         channel_scaling_alpha=channel_scaling_alpha,
@@ -1060,13 +1054,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         softrank_softness=softrank_softness,
         softrank_pool_size=softrank_pool_size,
         softrank_warmup_ratio=softrank_warmup_ratio,
-        mean_var_weight=mean_var_weight,
-        mv_mu_t=mv_mu_t,
-        mv_sigma2_t=mv_sigma2_t,
-        mv_calib_batches=mv_calib_batches,
         student_lr=student_lr,
         fake_lr=fake_lr,
-        lr_schedule=lr_schedule,
         fake_steps_per_student_step=fake_steps_per_student_step,
         fake_warmup_steps=fake_warmup_steps,
         weight_decay=weight_decay,
@@ -1108,8 +1097,7 @@ def snapshot_toml_text(c: TurboConfig, *, source_config: str | None = None) -> s
     )
 
 
-# TensorBoard config summary — the hand-picked subset (v1 key set/order, plus
-# lr_schedule once it grew a second shape).
+# TensorBoard config summary — the hand-picked subset (v1 key set/order).
 _TB_KEYS = (
     "base_loss",
     "gan_loss_weight_gen",
@@ -1128,12 +1116,10 @@ _TB_KEYS = (
     "fake_warmup_steps",
     "student_lr",
     "fake_lr",
-    "lr_schedule",
     "fake_steps_per_student_step",
     "iterations",
     "batch_size",
     "t_distribution",
-    "mean_var_weight",
     "use_masked_loss",
     "data_dir",
     "dit_path",

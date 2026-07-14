@@ -44,6 +44,7 @@ FORMAT_VERSION = 1
 _STRICT_FIELDS = (
     "student_rank",
     "fake_rank",
+    "fake_tau_banks",
     "step_expert_K",
     "gan_disc_hidden",
     "gan_feature_block_idx",
@@ -57,10 +58,10 @@ _STRICT_FIELDS = (
 # the schedulers restore their step counter onto the NEW curve (see
 # ``_restore_scheduler``). We warn so the change is never silent.
 _WARN_FIELDS = (
+    "fake_tau_boundary",
     "iterations",
     "student_lr",
     "fake_lr",
-    "lr_schedule",
     "gan_disc_lr",
     "student_alpha",
     "fake_alpha",
@@ -112,6 +113,13 @@ def save_resume_state(
         "fingerprint": _fingerprint(cfg),
         "student": turbo.student.state_dict(),
         "fake": turbo.fake.state_dict(),
+        # τ-split critic second bank (None on the shipped single-critic loop;
+        # getattr keeps pre-bank TurboDMDNetwork stand-ins loadable).
+        "fake_hi": (
+            turbo.fake_hi.state_dict()
+            if getattr(turbo, "fake_hi", None) is not None
+            else None
+        ),
         "disc": turbo.disc.state_dict() if turbo.disc is not None else None,
         "student_opt": student_opt.state_dict(),
         "fake_opt": fake_opt.state_dict(),
@@ -217,7 +225,7 @@ def _restore_scheduler(sched, saved: dict[str, Any]) -> None:
     ``load_state_dict`` would drag the OLD curve along: ``CosineAnnealingLR``'s
     ``T_max``/``eta_min``/``base_lrs`` (and ``SequentialLR``'s milestones) are
     all part of the state dict, so a resume that changes ``iterations`` /
-    ``student_lr`` / ``lr_schedule`` would silently keep training on the
+    ``student_lr`` would silently keep training on the
     bundle's schedule — and *extending* ``iterations`` steps the restored
     cosine past its old ``T_max``, where the recursive update drives the LR
     negative. Replaying ``step()`` on the new instance instead lands the
@@ -264,6 +272,25 @@ def apply_resume_state(
 
     turbo.student.load_state_dict(state["student"])
     turbo.fake.load_state_dict(state["fake"])
+    # τ-split critic bank count must match EXACTLY — unlike the disc (whose
+    # optimizer is separate, so an extra disc state can be dropped with a
+    # warning), both fake banks share ONE optimizer whose state is keyed by the
+    # combined param list; a bank-count mismatch would half-load it silently.
+    fake_hi = getattr(turbo, "fake_hi", None)
+    if fake_hi is not None:
+        if state.get("fake_hi") is None:
+            raise ResumeMismatchError(
+                "config sets fake_tau_banks=2 but the resume bundle carries no "
+                "second fake bank (it was written by a single-critic run). "
+                "Start fresh, or resume with fake_tau_banks=1."
+            )
+        fake_hi.load_state_dict(state["fake_hi"])
+    elif state.get("fake_hi") is not None:
+        raise ResumeMismatchError(
+            "resume bundle carries a second fake bank but fake_tau_banks=1 — "
+            "the shared fake optimizer state cannot align. Resume with "
+            "fake_tau_banks=2."
+        )
     if turbo.disc is not None:
         if state.get("disc") is None:
             raise ResumeMismatchError(

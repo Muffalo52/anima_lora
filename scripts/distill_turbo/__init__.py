@@ -56,13 +56,7 @@ Per training step:
         grad_signal = τ_DM·(v_real − v_fake)   (optionally x0-norm normalized)
         loss = (grad_signal · x_θ).mean()
              + div_weight · div_loss          # folded in here unless detached
-             + mean_var_weight · L_mv(x_θ)    # optional, lever B
         loss.backward()  → student.step()
-
-        The optional mean-variance reg (lever B / Eq. 7) is a real,
-        differentiable KL pulling each image's (μ_i, σ²_i) toward the real-latent
-        target — an auxiliary shield on variance inflation (off when
-        ``mean_var_weight == 0``).
 
     4.  Fake update — flow-matching loss on student's x_θ distribution:
         τ_fake ~ U[0,1]

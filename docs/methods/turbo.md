@@ -104,7 +104,7 @@ Per training step:
    grad is `τ_dm·Δ_dm` (optionally per-sample x0-norm), applied via the DMD2 grad
    trick `loss = (grad_signal · x_θ).mean()`.
 4. **Assemble + backward.** `loss = loss_dmd (+ div_weight·div_loss if not
-   detached) (+ mean_var_weight·L_mv)`. `grad_clip` runs once on the accumulated
+   detached)`. `grad_clip` runs once on the accumulated
    student grad (diversity + DMD) either way.
 5. **Fake update.** `fake_steps_per_student_step` plain flow-matching MSE steps on
    the student's `x_θ.detach()` distribution (resampling τ_fake, ε_fake each) —
@@ -180,6 +180,7 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | top | `use_masked_loss` | `true` | **student-only** mask on the DMD grad; fake/critic stays full-frame |
 | `[network]` | `student_rank` / `fake_rank` | `96` / `96` | `fake_rank ≥ student_rank` (fake is a score *tracker*, capacity ceiling on DM strength); matches the extracted delta's rank |
 | `[network]` | `student_init_weights` / `fake_init_weights` | `…/anima_turboV10_delta_r96_asvd.safetensors` | **warm start, standard** — both stacks seeded from the extracted official delta |
+| `[network]` | `fake_tau_banks` / `fake_tau_boundary` | `1` / `0.5` | τ-split critic (`docs/proposal/turbo_tau_split_critic.md`; Phase-0 gate fired 2026-07-14): `2` = dual fake banks, bank 0 owning `τ < boundary`; updates AND DMD queries route by drawn τ (matched compute by construction). Requires `batch_size=1`; `1` = byte-identical shipped loop. Memory +1 fake LoRA (params/grads/Adam); consider `fake_warmup_steps` ×2 |
 | `[dmd]` | `student_steps` (N) | `4` | Euler steps the student rolls; inference matches (`--infer_steps 4`) |
 | `[dmd]` | `teacher_cfg` (α) | `4` | CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4) |
 | `[dmd]` | `grad_step` | `random` | which refinement step(s) carry the DMD grad: `all` (BPTT) / `last` (tail-only, memory-flat) / `random` (one-step x0-pred at `g~U{1..N−1}`, memory-flat, trains every head). Honored under **both** `base_loss`. |
@@ -190,14 +191,12 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | `[dpdmd]` | `div_weight` (λ) | `0.05` | weight on the first-step diversity MSE |
 | `[dpdmd]` | `detach_after_first` | `true` | **load-bearing** stop-grad after step 1; keep True (A/B only) |
 | `[optim]` | `student_lr` / `fake_lr` | `1e-5` / `2e-5` | fake runs hotter; **do not raise the student to 2e-5** — adversarial instability ([[project_turbo_lr_instability_threshold]]) |
-| `[optim]` | `lr_schedule` | `cosine` | LR shape after the 2% warmup, all three optimizers: `cosine` anneals to 0.1·lr; `constant` holds peak lr to the end — superturbo_B showed the cosine tail idles the whole back half of a run, so extended runs want `constant` |
 | `[optim]` | `fake_steps_per_student_step` | `4` | keep the fake ahead of the moving x_θ |
 | `[optim]` | `fake_warmup_steps` | `50` | fake (critic) head-start before the main loop — kills the early grad_signal_rms spike (~step 50); `0` = off |
 | `[optim]` | `grad_clip` | `1.0` | grad-norm cap (both nets) |
 | `[sampling]` | `t_distribution` | `uniform` | τ sampling for the fake update + warmup (or `sigmoid`) |
 | `[sampling]` | `flow_shift` | `2.0` | σ-schedule shift for the student/teacher Euler grids (matches inference) |
 | `[gan]` | `weight_gen` | `0.03` (**on**) | teacher-feature GAN generator term — see below |
-| `[mean_var]` | `weight` | `0.0` (off) | optional Eq.7 mean-variance KL shield (lever B); `~0.01–0.05` to enable |
 
 Validation enforces `student_steps ≥ 2` (step 1 is diversity-supervised + detached,
 so at least one further step must carry the DMD loss) and
@@ -299,7 +298,6 @@ the teacher anchor. The live TB scalars:
 | `dm_cos` | `cos(v_fake_dm, v_real_dm)` — →1 healthy; ↓ = fake pointing the wrong way (worse than a magnitude miss). |
 | `dm_mag_ratio` | `rms(v_fake)/rms(v_real)` — ≈1 healthy. |
 | `x_pred_std` / `v_student_rms` | collapse → 0 or runaway up = student exploding (`v_student_rms` leads). |
-| `mean_var_kl` | Eq.7 KL (pre-weight); 0 when the reg is off. |
 | `gan_gen_loss` / `gan_disc_loss` | softplus-hinge generator / discriminator losses (pre-weight); 0 when the GAN is off. |
 
 ## GAN + f-distill (FastGen levers)

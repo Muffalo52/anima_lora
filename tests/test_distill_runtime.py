@@ -120,12 +120,12 @@ def test_create_tb_writer_enabled_makes_timestamped_dir(tmp_path):
             w.close()
 
 
-def test_make_scheduler_constant_holds_peak_lr_to_the_end():
-    """lr_schedule='constant' must be flat at peak lr after the 2% warmup.
+def test_make_scheduler_cosine_anneals_to_a_tenth_of_peak():
+    """The turbo scheduler is warmup → cosine to 0.1·lr, and nothing else.
 
-    Implemented as eta_min_ratio=1.0 on the shared warmup+cosine builder (the
-    cosine degenerates to a constant), so both shapes share one scheduler class
-    and one resume path — pin that the degenerate case really is flat.
+    The 'constant' shape was removed 2026-07-14 (superturbo_B2: never settles,
+    rendered worse than its cosine twin) — pin that the anneal really lands at
+    0.1·lr so a regression back to a flat tail can't slip in silently.
     """
     import torch
 
@@ -133,18 +133,8 @@ def test_make_scheduler_constant_holds_peak_lr_to_the_end():
 
     total, lr = 1000, 3e-5
     opt = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=lr)
-    sched = make_scheduler(opt, total, lr, "constant")
-    warmup = max(1, int(0.02 * total))
-    for step in range(1, total + 1):
-        opt.step()
-        sched.step()
-        if step >= warmup:
-            assert sched.get_last_lr()[0] == pytest.approx(lr), f"step {step}"
-
-    # And the default stays an anneal: cosine must end well below peak.
-    opt2 = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=lr)
-    cosine = make_scheduler(opt2, total, lr)
+    cosine = make_scheduler(opt, total, lr)
     for _ in range(total):
-        opt2.step()
+        opt.step()
         cosine.step()
     assert cosine.get_last_lr()[0] == pytest.approx(0.1 * lr, rel=1e-3)

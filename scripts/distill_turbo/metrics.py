@@ -20,11 +20,6 @@ sign-random gradient vehicle, not a real loss):
 * ``mag_ratio`` — rms(v_fake_dm) / rms(v_real_dm): ≈1 healthy; collapse/blow-up bad.
 * ``cos``       — cosine(v_fake_dm, v_real_dm): ↓ = fake pointing the wrong way.
 
-Mean-variance reg (lever B / paper Eq. 7; 0 when disabled):
-
-* ``mv`` — the per-step Eq.7 KL value (pre-weight). Higher = the student's
-  per-image stats are further from the real-latent target.
-
 DP-DMD diversity loss:
 
 * ``div`` — the first-step diversity MSE ‖v_first − v_target‖² (pre-weight).
@@ -40,6 +35,10 @@ import torch
 
 from library.training.accumulator import ScalarAccumulator
 
+# τ-binned critic-loss profile (turbo_tau_split_critic P0a): bin count for the
+# per-τ fake-loss telemetry. 8 uniform bins over τ ∈ [0, 1].
+TAU_PROFILE_BINS = 8
+
 
 @dataclass
 class FlushedMetrics:
@@ -51,7 +50,6 @@ class FlushedMetrics:
     rel_gap: float
     mag_ratio: float
     cos: float
-    mv: float
     div: float
     gan_gen: float
     gan_disc: float
@@ -92,11 +90,9 @@ class TurboMetrics:
         tau_dm_e: torch.Tensor,
         v_real_cond_dm: torch.Tensor,
         v_fake_cond_dm: torch.Tensor,
-        mv_loss: torch.Tensor,
     ) -> None:
         eps_r = 1e-8
         self._acc.add("fake", fake_loss_mean_t.float())
-        self._acc.add("mv", mv_loss.detach().float())
         self._acc.add("grad", grad_signal.float().pow(2).mean().sqrt())
         self._acc.add("dm", delta_dm.float().pow(2).mean().sqrt())
         self._acc.add("xpred", x_pred.detach().float().std())
@@ -143,6 +139,71 @@ class TurboMetrics:
         self._acc.reset()
 
 
+class TauBinCriticLoss:
+    """Per-τ-bin fake/critic loss profile — P0a of turbo_tau_split_critic.
+
+    Buckets each fake-update loss by its drawn ``tau_fake`` into
+    ``TAU_PROFILE_BINS`` uniform bins and logs the per-bin interval mean as
+    ``{prefix}{i}``. GPU-resident like :class:`TurboMetrics` (``index_add_`` is
+    async; one extra small sync per log boundary).
+
+    NOT a gate signal: the raw per-τ profile is structurally nonuniform (the FM
+    target ``ε − x0`` is intrinsically harder at some τ regardless of critic
+    capacity) — this is the baseline for the Phase-1 "does a τ-split flatten
+    the *excess*?" mechanism check only.
+
+    The loop's fake loss is a batch-mean scalar, so at B>1 it is attributed to
+    every sample's τ bin (exact at the shipped ``batch_size=1``).
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        *,
+        nbins: int = TAU_PROFILE_BINS,
+        prefix: str = "train/fake_loss_tau",
+        aggregate_key: str | None = None,
+    ):
+        self.nbins = nbins
+        self.prefix = prefix
+        # Optional extra scalar: the count-weighted mean over ALL bins under
+        # this key (per-bank overall fake loss when banks are split).
+        self.aggregate_key = aggregate_key
+        self._sum = torch.zeros(nbins, device=device)
+        self._cnt = torch.zeros(nbins, device=device)
+
+    @torch.no_grad()
+    def add(self, fake_loss: torch.Tensor, tau: torch.Tensor) -> None:
+        """Accumulate one fake update's loss under its ``(B,)`` τ draw."""
+        idx = (tau.detach().float().clamp(0.0, 1.0) * self.nbins).long()
+        idx = idx.clamp_(max=self.nbins - 1)  # τ = 1.0 → last bin
+        val = fake_loss.detach().float().expand(idx.shape)
+        self._sum.index_add_(0, idx, val)
+        self._cnt.index_add_(0, idx, torch.ones_like(val))
+
+    def flush(self) -> tuple[list[float], list[float]]:
+        """One sync: return ``(per-bin loss sums, per-bin counts)`` and reset."""
+        sums, cnts = torch.stack([self._sum, self._cnt]).tolist()
+        self._sum.zero_()
+        self._cnt.zero_()
+        return sums, cnts
+
+    def write(self, writer, step: int) -> None:
+        """Flush and push per-bin means to TensorBoard; empty bins are skipped.
+
+        Always flushes (accumulators reset) even when ``writer`` is None, so
+        call it unconditionally at every log boundary.
+        """
+        sums, cnts = self.flush()
+        if writer is None:
+            return
+        for i, (s, n) in enumerate(zip(sums, cnts)):
+            if n > 0:
+                writer.add_scalar(f"{self.prefix}{i}", s / n, step)
+        if self.aggregate_key is not None and sum(cnts) > 0:
+            writer.add_scalar(self.aggregate_key, sum(sums) / sum(cnts), step)
+
+
 def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     """Push every available scalar to TensorBoard at the canonical key names."""
     writer.add_scalar("train/fake_loss", m.fake, step)
@@ -153,7 +214,6 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     writer.add_scalar("train/dm_rel_gap", m.rel_gap, step)
     writer.add_scalar("train/dm_mag_ratio", m.mag_ratio, step)
     writer.add_scalar("train/dm_cos", m.cos, step)
-    writer.add_scalar("train/mean_var_kl", m.mv, step)
     writer.add_scalar("train/div_loss", m.div, step)
     writer.add_scalar("train/gan_gen_loss", m.gan_gen, step)
     writer.add_scalar("train/gan_disc_loss", m.gan_disc, step)
@@ -174,8 +234,6 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
         "xp": f"{m.xpred:.3f}",
         "fake": f"{m.fake:.2e}",
     }
-    if m.mv > 0:
-        postfix["mv"] = f"{m.mv:.3f}"
     if m.div > 0:
         postfix["div"] = f"{m.div:.3f}"
     if m.gan_gen != 0 or m.gan_disc != 0:

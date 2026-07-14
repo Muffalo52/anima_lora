@@ -59,13 +59,14 @@ from .config import (
     tb_config_text,
 )
 from .diversity import run_diversity_validation
-from .metrics import TurboMetrics, tqdm_postfix, write_scalars
+from .metrics import TauBinCriticLoss, TurboMetrics, tqdm_postfix, write_scalars
 from .primitives import (
     PadCache,
     make_collate,
     make_scheduler,
     renoise,
     sample_t,
+    sample_t_routed,
 )
 from .resume import (
     apply_resume_state,
@@ -112,77 +113,6 @@ def _step_tag(step: int) -> str:
     Matches the hand-rolled ``_1k`` / ``_500`` naming the runs already use.
     """
     return f"{step // 1000}k" if step % 1000 == 0 else str(step)
-
-
-def mean_var_kl(
-    x: torch.Tensor, mu_t: torch.Tensor | float, sigma2_t: torch.Tensor | float
-) -> torch.Tensor:
-    """Mean-variance regularizer (lever B / paper Eq. 7, arXiv:2511.22677).
-
-    KL of each generated image's per-image Gaussian ``N(μ_i, σ²_i)`` toward the
-    real-latent target ``N(μ_t, σ²_t)``, averaged over the batch:
-
-        L_mv = (1/B) Σ_i ½[ (σ_i² + (μ_i − μ_t)²)/σ_t² − 1 − log(σ_i²/σ_t²) ]
-
-    Differentiable in ``x`` (= ``x_pred``), so it backprops into the student and
-    directly clamps the **variance inflation** that *is* the over-bake's
-    oversaturation (§3.2). Stats are per-image over (C, H, W); full-frame even
-    under masked loss (paper-faithful — the reg is a global distribution clamp).
-    """
-    B = x.shape[0]
-    flat = x.reshape(B, -1)
-    mu_i = flat.mean(dim=1)
-    var_i = flat.var(dim=1, unbiased=False)
-    kl = 0.5 * (
-        (var_i + (mu_i - mu_t) ** 2) / sigma2_t
-        - 1.0
-        - torch.log((var_i / sigma2_t).clamp_min(1e-8))
-    )
-    return kl.mean()
-
-
-def calibrate_mean_var(
-    dataloader: torch.utils.data.DataLoader,
-    *,
-    max_batches: int = 0,
-    norm_floor: float = 0.05,
-) -> tuple[float, float]:
-    """Exact one-pass global mean/variance of the real cached latents.
-
-    The Eq.7 reg target is a static dataset statistic — a single scalar
-    ``(μ, σ²)`` over every latent element — so we measure it directly rather
-    than EMA-tracking it during training. Accumulates count / sum / sum-of-
-    squares in fp64 (population variance, ``unbiased=False`` — matching the
-    per-image stats in :func:`mean_var_kl`) for numerical stability across the
-    whole pool. ``max_batches <= 0`` scans the full dataset; a positive cap
-    trades a little exactness for I/O (the global scalar converges fast).
-    Returns ``(μ_t, σ²_t)`` with σ²_t floored at ``norm_floor²``.
-    """
-    n = 0
-    s = 0.0
-    s2 = 0.0
-    seen = 0
-    for batch in dataloader:
-        latents = batch["latents"].double()
-        flat = latents.reshape(-1)
-        n += flat.numel()
-        s += float(flat.sum())
-        s2 += float((flat * flat).sum())
-        seen += 1
-        if max_batches > 0 and seen >= max_batches:
-            break
-    if n == 0:
-        raise RuntimeError(
-            "mean-variance calibration scanned 0 latents — empty dataloader "
-            "(check data_dir / curation keep_list / drop_last vs batch_size)."
-        )
-    mu = s / n
-    var = max(s2 / n - mu * mu, norm_floor**2)
-    logger.info(
-        f"mean-variance calibration: scanned {seen} batches / {n:,} latent "
-        f"elements → μ_t={mu:.6g}, σ²_t={var:.6g}"
-    )
-    return mu, var
 
 
 # --- f-distill reweighting (FastGen idea 2; f_distill.py:20 + _get_f_div_weighting_h)
@@ -353,12 +283,14 @@ def main():
         student_step_expert_K=cfg.step_expert_K,
         student_down_init=cfg.student_down_init,
         fake_down_init=cfg.fake_down_init,
+        fake_tau_banks=cfg.fake_tau_banks,
         gan_feature_indices=gan_indices,
         gan_disc_hidden=cfg.gan_disc_hidden if cfg.gan_disc_hidden > 0 else None,
     )
     turbo.freeze_dit()
     turbo.student.to(device=device, dtype=dtype)
-    turbo.fake.to(device=device, dtype=dtype)
+    for bank in turbo.fake_banks:
+        bank.to(device=device, dtype=dtype)
 
     # Crash-resume: the bundle carries the student/fake/disc weights the run died
     # with, so it supersedes the warm start entirely — seeding from the init LoRA
@@ -393,7 +325,10 @@ def main():
         if cfg.student_init_weights:
             warm_start_plain_lora(turbo.student, cfg.student_init_weights, "student")
         if cfg.fake_init_weights:
-            warm_start_plain_lora(turbo.fake, cfg.fake_init_weights, "fake")
+            # Both τ-banks seed from the same file (matched-critic-at-init).
+            for bi, bank in enumerate(turbo.fake_banks):
+                label = "fake" if len(turbo.fake_banks) == 1 else f"fake[bank{bi}]"
+                warm_start_plain_lora(bank, cfg.fake_init_weights, label)
     # Disc stays fp32 (LayerNorm/Linear) for GAN-loss stability — its forward
     # casts the bf16 teacher features to float.
     if turbo.disc is not None:
@@ -505,9 +440,7 @@ def main():
         fused=torch.cuda.is_available(),
     )
 
-    student_sched = make_scheduler(
-        student_opt, cfg.iterations, cfg.student_lr, cfg.lr_schedule
-    )
+    student_sched = make_scheduler(student_opt, cfg.iterations, cfg.student_lr)
     # The fake optimizer takes ``iterations · fake_steps_per_student_step``
     # updates in the main loop plus ``fake_warmup_steps`` head-start updates
     # BEFORE it (the head-start is now counted in fake updates directly, NOT
@@ -521,7 +454,6 @@ def main():
         fake_opt,
         cfg.iterations * cfg.fake_steps_per_student_step + cfg.fake_warmup_steps,
         cfg.fake_lr,
-        cfg.lr_schedule,
     )
 
     # Disc steps once per fake inner step (FastGen ties it to the fake_score
@@ -539,7 +471,6 @@ def main():
             disc_opt,
             cfg.iterations * cfg.fake_steps_per_student_step,
             cfg.gan_disc_lr,
-            cfg.lr_schedule,
         )
         n_disc = sum(p.numel() for p in turbo.disc_params())
         logger.info(f"trainable: disc={n_disc:,}")
@@ -780,32 +711,6 @@ def main():
         v_u = _forward("teacher", x, t_b, c_null, no_grad=True).squeeze(2)
         return v_u.float() + cfg.teacher_cfg * (v_c.float() - v_u.float())
 
-    # Mean-variance reg target (lever B / Eq.7): real-data stats the KL pulls each
-    # generated image toward. Either pinned (mv_sigma2_t > 0) or measured exactly
-    # in a one-pass fp64 scan over the REAL latents (NOT teacher-synthetic — the
-    # reg shields against the teacher's variance inflation). Runs BEFORE the fake
-    # head-start (model-independent → fails fast on an empty pool).
-    mv_auto = cfg.mean_var_weight > 0.0 and cfg.mv_sigma2_t <= 0.0
-    mv_tgt_mu = cfg.mv_mu_t
-    mv_tgt_var = cfg.mv_sigma2_t
-    if cfg.mean_var_weight > 0.0:
-        if mv_auto:
-            mv_tgt_mu, mv_tgt_var = calibrate_mean_var(
-                dataloader,
-                max_batches=cfg.mv_calib_batches,
-                norm_floor=cfg.norm_floor,
-            )
-        logger.info(
-            "mean-variance reg ON (lever B / Eq.7): weight="
-            f"{cfg.mean_var_weight}, target="
-            + (
-                f"measured μ_t={mv_tgt_mu:.6g}, σ²_t={mv_tgt_var:.6g} "
-                f"(exact, over real latents)"
-                if mv_auto
-                else f"fixed μ_t={mv_tgt_mu}, σ²_t={mv_tgt_var}"
-            )
-        )
-
     # Fake (critic) head-start. Skipped on resume: the restored critic is already
     # calibrated against the restored student, and its scheduler has consumed the
     # head-start's updates. Re-running it here would re-warm a cold critic against
@@ -831,6 +736,8 @@ def main():
             dtype=dtype,
             log_interval=cfg.log_interval,
             writer=writer,
+            fake_tau_banks=cfg.fake_tau_banks,
+            fake_tau_boundary=cfg.fake_tau_boundary,
         )
 
     # base_loss='dpdmd' runs the first-step teacher anchor (diversity); 'dmd' is
@@ -847,6 +754,20 @@ def main():
         total=cfg.iterations,
     )
     metrics = TurboMetrics(device)
+    # P0a (turbo_tau_split_critic): per-τ-bin critic-loss profile. One per fake
+    # bank when the τ-split is on (the Phase-1 mechanism check reads whether the
+    # split flattens each bank's excess over the single-critic baseline).
+    if cfg.fake_tau_banks > 1:
+        tau_profiles = [
+            TauBinCriticLoss(
+                device,
+                prefix=f"train/fake_loss_bank{b}_tau",
+                aggregate_key=f"train/fake_loss_bank{b}",
+            )
+            for b in range(cfg.fake_tau_banks)
+        ]
+    else:
+        tau_profiles = [TauBinCriticLoss(device)]
 
     for step in progress:
         try:
@@ -1058,7 +979,20 @@ def main():
         # without guidance v_real≈v_fake (both unguided cond preds collapse,
         # dm_cos≈0.9999) and the quality gradient is noise. Fake stays cond-only
         # (matches the reference compute_dmd_loss).
-        tau_dm = torch.rand(B, device=device, dtype=dtype)
+        # τ-split critic: the DMD query routes to the owner bank too (training a
+        # specialist and letting one bank answer all queries would ignore it).
+        # The query τ is uniform by design (independent of t_distribution);
+        # banks=1 resolves to the identical torch.rand call/RNG stream.
+        tau_dm = sample_t_routed(
+            B,
+            turbo=turbo,
+            fake_tau_banks=cfg.fake_tau_banks,
+            fake_tau_boundary=cfg.fake_tau_boundary,
+            distribution="uniform",
+            sigmoid_scale=cfg.sigmoid_scale,
+            device=device,
+            dtype=dtype,
+        )
         eps_dm = torch.randn_like(x_pred)
         x_renoised_dm = renoise(x_pred.detach(), tau_dm, eps_dm)
         v_real_cond_dm = _teacher_cfg_velocity(
@@ -1126,7 +1060,7 @@ def main():
                 )
                 grad_signal = grad_signal * h.view(B, 1, 1, 1)
 
-        # --- assemble: DMD surrogate on x_θ (+ optional mean-var) ---
+        # --- assemble: DMD surrogate on x_θ ---
         # The diversity term was already backwarded above when split_bwd; otherwise
         # it rides this combined backward (graphs still entangled). grad_clip below
         # runs once on the ACCUMULATED .grad (div + DMD), so the clipped norm is the
@@ -1136,11 +1070,6 @@ def main():
         else:
             loss_dmd = (grad_signal * x_pred.float()).mean()
         loss_student = loss_dmd
-
-        mv_loss = torch.zeros((), device=device)
-        if cfg.mean_var_weight > 0.0:
-            mv_loss = mean_var_kl(x_pred.float(), mv_tgt_mu, mv_tgt_var)
-            loss_student = loss_student + cfg.mean_var_weight * mv_loss
 
         if use_anchor and not split_bwd:
             # div + soft-rank both ride v_first's retained step-0 graph here (no
@@ -1170,8 +1099,13 @@ def main():
         fake_loss_sum = torch.zeros((), device=device)
         gan_disc_sum = torch.zeros((), device=device)
         for _ in range(cfg.fake_steps_per_student_step):
-            tau_fake = sample_t(
+            # τ-split critic: the drawn τ picks which bank trains this update
+            # (banks=1 resolves to the identical sample_t call/RNG stream).
+            tau_fake = sample_t_routed(
                 B,
+                turbo=turbo,
+                fake_tau_banks=cfg.fake_tau_banks,
+                fake_tau_boundary=cfg.fake_tau_boundary,
                 distribution=cfg.t_distribution,
                 sigmoid_scale=cfg.sigmoid_scale,
                 device=device,
@@ -1193,6 +1127,7 @@ def main():
             fake_opt.zero_grad(set_to_none=True)
             fake_sched.step()
             fake_loss_sum = fake_loss_sum + fake_loss.detach()
+            tau_profiles[turbo.fake_bank].add(fake_loss, tau_fake)
 
             # Discriminator update (idea 1), co-located with the fake/critic update
             # (FastGen cadence). The disc scores frozen-TEACHER block features of
@@ -1277,7 +1212,6 @@ def main():
             tau_dm_e=tau_dm_e,
             v_real_cond_dm=v_real_cond_dm,
             v_fake_cond_dm=v_fake_cond_dm,
-            mv_loss=mv_loss,
         )
         metrics.add_div(div_loss_t)
         if turbo.disc is not None:
@@ -1303,6 +1237,8 @@ def main():
             # just eliminated).
             progress.set_postfix(**tqdm_postfix(m))
             metrics.reset()
+            for tp in tau_profiles:
+                tp.write(writer, step + 1)
 
         # --- diversity validation (DAVE same-prompt probe) ---
         if val_cond is not None and (step + 1) % cfg.validate_every_n_steps == 0:
