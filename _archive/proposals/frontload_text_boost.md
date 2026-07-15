@@ -1,5 +1,10 @@
 # Front-loaded text-drive boost — amplify the text pathway in the first 2–3 steps only
 
+> **ARCHIVED 2026-07-14 — landed.** Arm (b) shipped as `--xattn_boost` /
+> `XATTN_BOOST=`; the live doc is `docs/inference/xattn_boost.md` and the
+> bench (`bench/frontload_text_boost/`) stays live for the deferred arm (c)
+> span-flag. Kept as the decision log for why each arm lived or died.
+
 Status: **Phase 1 RUN 2026-07-06** — arm (a) CLOSED (Phase 0, style
 collapse); arm (b) G1+G2 PASS and **SHIPPED** as `--xattn_boost` /
 `XATTN_BOOST=` (see `docs/inference/xattn_boost.md`); arm (c) validated at

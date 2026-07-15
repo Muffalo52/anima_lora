@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Front-loaded text-drive boost — Phase-0/1 render grid (proposal
-docs/proposal/frontload_text_boost.md).
+_archive/proposals/frontload_text_boost.md).
 
 Inference-only arms against a matched-seed/NFE baseline, all gated to the
 high-σ window where cross-attn text drive actually exists (peaks at σ=1, ~0.02

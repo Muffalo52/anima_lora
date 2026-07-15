@@ -134,7 +134,10 @@ def cmd_soup(extra):
     ``POOL_PATH_PATTERN`` (Phase-1 uncond pool glob, default "*" = whole dataset,
     the fine-tune set always unioned in), ``UNCOND_RATIO`` (0.5),
     ``UNCOND_EPOCHS`` (2), ``NUM_SOUP`` (3 — number of seeded fine-tunes to
-    soup, seeds 1001..1000+N), ``RANK`` (default network_dim), ``PRESET``.
+    soup, seeds 1001..1000+N), ``LR_POOL`` (per-ingredient LRs, e.g.
+    ``"1e-5,2e-5,4e-5"``; cycled — unset = every ingredient trains at the config
+    LR) or ``LR_INTERVAL`` (``"1e-5:4e-5"``, geometric over NUM_SOUP points),
+    ``RANK`` (default network_dim), ``PRESET``.
     Submitted as ONE daemon command job — the pipeline runs train.py
     subprocesses directly (nested daemon submission would deadlock the serial
     queue).
@@ -186,6 +189,8 @@ def cmd_soup(extra):
         ("UNCOND_EPOCHS", "--uncond_epochs"),
         ("UNCOND_INIT", "--uncond_init"),
         ("NUM_SOUP", "--num_soup"),
+        ("LR_POOL", "--lr_pool"),
+        ("LR_INTERVAL", "--lr_interval"),
         ("RANK", "--rank"),
     ):
         if os.environ.get(env):

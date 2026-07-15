@@ -148,7 +148,7 @@ OrthoHydra (§5.2) is activated by adding `use_ortho = true` on top of the share
 
 ### ComfyUI — the custom node
 
-The **Anima Adapter Loader** node (`custom_nodes/comfyui-hydralora/`, published from https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter) installs per-Linear `forward_hook`s reproducing the module forward exactly, RMS pool and all. Its `CLAUDE.md` documents the hook-not-override invariant that keeps it compile-safe.
+The **Anima Adapter Loader** node installs per-Linear `forward_hook`s reproducing the module forward exactly, RMS pool and all. It no longer lives in this tree — it was extracted to its own repo (https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter, standalone checkout at `~/ComfyUI-Anima_lora-Adapter`). Its `CLAUDE.md` documents the hook-not-override invariant that keeps it compile-safe.
 
 ---
 

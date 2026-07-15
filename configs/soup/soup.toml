@@ -54,5 +54,7 @@ pool_path_pattern = "*"  # Phase 1 uncond pool glob; "*" = whole dataset (dilute
 uncond_ratio = 1.0      # Phase 1 --sample_ratio (the Act-3 operating point)
 uncond_epochs = 4       # Phase 1 dose: 2 epochs at a minority share is memorization-neutral
 num_soup = 3            # number of seeded fine-tunes to soup (seeds 1001..1000+N; souping absorbs the seed lottery). >= 2
+# lr_pool = "1e-5,2e-5,4e-5"  # Phase 2 per-ingredient learning rates (cycled if shorter than num_soup). Unset = every ingredient uses learning_rate above (seed-only soup).
+# lr_interval = "1e-5:4e-5"   # ...or a geometric spread over num_soup points. Mutually exclusive with lr_pool. NOTE: the soup is a UNIFORM average with no greedy-selection gate — a bad LR draw is averaged in, not dropped. Keep the spread narrow.
 # rank = 16             # Phase 3 SVD truncation rank; default = network_dim above
 # uncond_init = ""      # pin a pre-trained uncond adapter → Phase 1 skipped (pool/uncond_ratio/uncond_epochs ignored). Bare name resolves under output/ckpt/.

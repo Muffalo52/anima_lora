@@ -35,8 +35,42 @@ command job; the pipeline drives its own `train.py` phases as direct subprocesse
 Env knobs (all optional): `NAME` (output slug), `POOL_PATH_PATTERN` (Phase-1
 uncond pool glob, default `*` = whole dataset — the fine-tune set is always
 unioned in), `UNCOND_RATIO` (0.5), `UNCOND_EPOCHS` (2), `NUM_SOUP` (3 — number
-of seeded fine-tunes to soup; seeds are `1001..1000+N`), `RANK` (default =
+of seeded fine-tunes to soup; seeds are `1001..1000+N`), `LR_POOL` /
+`LR_INTERVAL` (per-ingredient LR diversity, see below), `RANK` (default =
 method `network_dim`), `PRESET`.
+
+## Ingredient diversity — seed by default, LR opt-in
+
+By default the ingredients differ **only in `--seed`**; every one trains at the
+`learning_rate` in the ingredient config. That is a deliberate narrowing of the
+model-soup recipe (Wortsman et al.), where ingredients come from a *random
+hyperparameter search* — LR, weight decay, augmentation, seed.
+
+Learning-rate diversity is available opt-in, on either of two mutually exclusive
+knobs (`[soup]` table defaults, `--lr_pool` / `--lr_interval` flags, or
+`LR_POOL=` / `LR_INTERVAL=` env):
+
+```bash
+make soup TARGET=sincos LR_POOL="1e-5,2e-5,4e-5"   # explicit list, cycled to NUM_SOUP
+make soup TARGET=sincos LR_INTERVAL="1e-5:4e-5"    # geometric spread over NUM_SOUP points
+```
+
+Phase 1 is unaffected — the uncond init is a shared, reusable artifact and stays
+on the config LR. Passing `--learning_rate` in `ARGS` alongside either knob is
+refused rather than silently resolved.
+
+**Read the caveat before turning this on.** In the paper the diverse pool is
+protected by *greedy* soup: an ingredient is accepted only if it improves a
+held-out metric, which is what stops a bad-LR draw from dragging the average.
+This pipeline is a **uniform** ΔW average with no such gate (greedy selection was
+closed as unverifiable — we have no trustworthy held-out quality metric at these
+sample sizes; see `bench/memorization/report.md` and the CMMD fragility guards).
+So a too-hot ingredient is averaged *in*, not dropped. There is also a prior
+against a large win: the ingredient ΔWs already share ~98% of one uncond
+component (cos +0.96..0.98 pairwise), with diversity living in the residuals — a
+wider LR mostly rescales that shared direction rather than decorrelating the
+residuals. Keep the spread narrow, and treat any gain as unproven until it is
+eyeballed on renders.
 
 ## What it is — three phases
 
@@ -54,7 +88,8 @@ method `network_dim`), `PRESET`.
 2. **Seeded fine-tunes.** `--num_soup` (default 3) normal captioned runs on the
    `--path_pattern` images, each `--network_weights`-initialized from the uncond
    checkpoint, one per derived seed (`1001..1000+N`) →
-   `anima_soup_<slug>_s<seed>.safetensors`.
+   `anima_soup_<slug>_s<seed>.safetensors`. Seed is the only axis that varies
+   unless `--lr_pool` / `--lr_interval` is set (see above).
 3. **ΔW soup, SVD-truncated to the ingredient rank** (`scripts/soup/build.py`)
    → `anima_soup_<slug>.safetensors`. The first ingredient's
    `.snapshot.toml` is copied next to the soup so the memorization probes can

@@ -1,6 +1,6 @@
 # Front-loaded text-drive boost — Phase-0 + Phase-1 report
 
-Proposal: `docs/proposal/frontload_text_boost.md`. Run:
+Proposal: `_archive/proposals/frontload_text_boost.md`. Run:
 `results/20260706-2135-phase0/` (2026-07-06, base DiT, single seed 0).
 Eye-adjudicated on the contact sheet + per-prompt strips — no quality reward
 exists for Anima; the montage is the gate (same discipline as

@@ -17,7 +17,10 @@ ladder, 2026-07-04/05) as one pipeline:
 2. **Seeded fine-tunes**: N normal captioned runs on the ``--path_pattern``
    images, ``--network_weights``-initialized from the uncond checkpoint. Souping
    absorbs the training-seed lottery (a catastrophic draw is invisible to
-   loss/AUC — report Act 5).
+   loss/AUC — report Act 5). Seed is the only axis that varies by default;
+   ``--lr_pool`` / ``--lr_interval`` add per-ingredient learning-rate diversity
+   (the model-soup recipe's other axis — see ``resolve_lrs`` for the caveat that
+   we have no greedy-selection gate to protect a uniform average from a bad draw).
 3. **ΔW soup, SVD-truncated to the ingredient rank** (``scripts/soup/build.py``)
    so the artifact stays single-adapter-sized (~99.9% retained energy on
    shared-init ingredients). The first ingredient's ``.snapshot.toml`` is
@@ -149,6 +152,46 @@ def slug_for_pattern(pattern: str) -> str:
     return f"{slug}_{digest}" if slug else f"pat_{digest}"
 
 
+def resolve_lrs(num: int, pool: str | None, interval: str | None) -> list[float] | None:
+    """The per-ingredient learning rates, or ``None`` to leave every fine-tune on
+    the method config's ``learning_rate`` (the default: a seed-only soup).
+
+    ``pool`` is an explicit comma-separated list, cycled if shorter than ``num``;
+    ``interval`` is ``"<lo>:<hi>"``, spread **geometrically** over ``num`` points
+    (LR is a scale knob, so log-spacing is the natural sweep). The two are
+    mutually exclusive.
+
+    Hyperparameter-diverse ingredients are the model-soup recipe (Wortsman et
+    al.), but there the pool is protected by *greedy* selection on a held-out
+    metric. This soup is a uniform ΔW average with no such gate, so a bad LR draw
+    is averaged in rather than dropped — keep the spread narrow.
+    """
+    if pool and interval:
+        raise SystemExit("--lr_pool and --lr_interval are mutually exclusive.")
+    if pool:
+        try:
+            lrs = [float(x) for x in pool.replace(" ", "").split(",") if x]
+        except ValueError:
+            raise SystemExit(f"--lr_pool: not a comma-separated float list: {pool!r}")
+        if not lrs:
+            raise SystemExit("--lr_pool: empty list.")
+        return [lrs[i % len(lrs)] for i in range(num)]
+    if interval:
+        parts = [p for p in interval.replace(" ", "").split(":") if p]
+        if len(parts) != 2:
+            raise SystemExit(f"--lr_interval: expected '<lo>:<hi>', got {interval!r}")
+        try:
+            lo, hi = (float(p) for p in parts)
+        except ValueError:
+            raise SystemExit(f"--lr_interval: not two floats: {interval!r}")
+        if lo <= 0 or hi <= 0:
+            raise SystemExit("--lr_interval: both bounds must be > 0 (geometric).")
+        if num == 1:
+            return [lo]
+        return [lo * (hi / lo) ** (i / (num - 1)) for i in range(num)]
+    return None
+
+
 def uncond_name(pool: str, ratio: float, epochs: int) -> str:
     """Deterministic uncond checkpoint name — same pool+dose → same artifact."""
     digest = hashlib.sha1(pool.encode()).hexdigest()[:8]
@@ -233,6 +276,20 @@ def main() -> None:
         "i.e. 1001..1000+N). Must be >= 2.",
     )
     ap.add_argument(
+        "--lr_pool",
+        default=d.get("lr_pool"),
+        help="per-ingredient learning rates, comma-separated (e.g. "
+        "'1e-5,2e-5,4e-5'); cycled if shorter than --num_soup. Default: unset = "
+        "every fine-tune uses the method config's learning_rate (seed-only soup).",
+    )
+    ap.add_argument(
+        "--lr_interval",
+        default=d.get("lr_interval"),
+        help="per-ingredient learning rates as '<lo>:<hi>', spread geometrically "
+        "over --num_soup points (e.g. '1e-5:4e-5'). Mutually exclusive with "
+        "--lr_pool.",
+    )
+    ap.add_argument(
         "--rank",
         type=int,
         default=d.get("rank"),
@@ -256,6 +313,12 @@ def main() -> None:
     # Seeds are derived from the count: UNCOND_SEED+1 .. UNCOND_SEED+num_soup
     # (1001..1000+N), deterministic so re-runs reproduce the same ingredients.
     seeds = [UNCOND_SEED + i for i in range(1, args.num_soup + 1)]
+    lrs = resolve_lrs(args.num_soup, args.lr_pool, args.lr_interval)
+    if lrs and any(a.split("=", 1)[0] == "--learning_rate" for a in ft_extra):
+        raise SystemExit(
+            "--learning_rate in ARGS conflicts with --lr_pool/--lr_interval "
+            "(the pipeline sets a per-ingredient LR). Drop one."
+        )
 
     ckpt_dir = ROOT / "output" / "ckpt"
     name = args.name or slug_for_pattern(args.path_pattern)
@@ -307,12 +370,15 @@ def main() -> None:
                 args.dry_run,
             )
 
-    # Phase 2 — captioned fine-tunes from the shared init, one per seed.
+    # Phase 2 — captioned fine-tunes from the shared init, one per seed (and,
+    # when --lr_pool/--lr_interval is set, one LR per ingredient).
     ingredients: list[Path] = []
-    for seed in seeds:
+    for i, seed in enumerate(seeds):
         iname = f"anima_soup_{name}_s{seed}"
         ingredients.append(ckpt_dir / f"{iname}.safetensors")
-        print(f"[soup] phase 2: fine-tune seed {seed} -> {iname}")
+        lr_extra = ["--learning_rate", f"{lrs[i]:g}"] if lrs else []
+        lr_note = f" (lr {lrs[i]:g})" if lrs else ""
+        print(f"[soup] phase 2: fine-tune seed {seed}{lr_note} -> {iname}")
         _train(
             build_method_args(
                 args.method,
@@ -327,6 +393,7 @@ def main() -> None:
                     str(seed),
                     "--output_name",
                     iname,
+                    *lr_extra,
                     *ft_extra,
                 ],
             ),

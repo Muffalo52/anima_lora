@@ -8,7 +8,7 @@
 > text-loss diagnosis). Paths below are pre-archive.
 >
 > **STATUS (2026-06-28).** Measurement-only finding. Two probes added under
-> `bench/cross_attn_drive/`: `attn_evolution.py` (cross-attn *map* re-routing —
+> `_archive/bench/cross_attn_drive/`: `attn_evolution.py` (cross-attn *map* re-routing —
 > "where patches look") and `attn_contribution.py` (gated residual contribution
 > per pathway — "what each pathway writes"). Extends the velocity-level result
 > [[project_crossattn_drive_frontloaded]] and [[project_crossattn_map_evolution]].

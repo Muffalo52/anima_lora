@@ -177,20 +177,21 @@ the geometry scripts were never committed. Mechanism refs: `library/anima/models
 
 ## Reproduce
 
-Paths are post-archive — the scripts live under `_archive/bench/mod_guidance/` now
-(copy them back under `bench/` to run; they import `bench/_common.py`).
+Paths are post-archive — the scripts live under `_archive/bench/mod_guidance/` now.
+The invocations below are written against that location; they import `bench/_common.py`,
+so copy them back under `bench/` if the `sys.path` bootstrap doesn't resolve from the archive.
 
 ```bash
 # Image-space channel attribution (swap / order / intensity / origin)
-uv run python bench/mod_guidance/channel_attribution.py \
+uv run python _archive/bench/mod_guidance/channel_attribution.py \
     --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
     --experiment all --dataset_samples 6 \
     --tags "score_9,masterpiece,holding a sword" --seeds 0,1 --compile --label full
 
 # σ / layer schedule axes
-uv run python bench/mod_guidance/channel_attribution.py --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
+uv run python _archive/bench/mod_guidance/channel_attribution.py --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
     --experiment sigma_window --dataset_samples 6 --seeds 0,1 --sigwin_dose both --compile --label phase0
-uv run python bench/mod_guidance/channel_attribution.py --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
+uv run python _archive/bench/mod_guidance/channel_attribution.py --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
     --experiment layer_window --dataset_samples 6 --seeds 0,1 --layerwin_mode single --compile --label phase0b
 
 # Text-Jacobian (probe with the head's TRAINING distribution)

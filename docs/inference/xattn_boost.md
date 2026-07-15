@@ -12,7 +12,7 @@ state is rescaled back toward the norm it would have had unboosted, so the
 intervention is a *rotation toward the cross-attn direction* on (near) the norm
 shell downstream blocks were trained on, not an unconstrained residual add.
 
-Origin: `docs/proposal/frontload_text_boost.md` arm (b), Phase-0 G1+G2 PASS;
+Origin: `_archive/proposals/frontload_text_boost.md` arm (b), Phase-0 G1+G2 PASS;
 renorm = Phase-1'' arm (g) (`bench/frontload_text_boost/report.md`). The
 σ-gated **CFG** arm (a) of the same proposal is CLOSED — style collapse at
 every strength that does anything; do not re-propose plain high-σ CFG-up.

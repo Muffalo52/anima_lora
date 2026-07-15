@@ -116,6 +116,23 @@ GEN_SEED_BASE = 7_000_000
 # ---------------------------------------------------------------------------
 
 
+_SNAPSHOT_KNOBS = ("sample_ratio", "artists_shard", "path_pattern")
+
+
+def _read_snapshot_knobs(adapter: str) -> dict:
+    """Membership-relevant knobs from the run's ``.snapshot.toml`` (the run's
+    ground truth — method TOMLs drift over time). Missing file → {}. Mirrors
+    ``loss_gap._read_snapshot_knobs`` so both probes see the same pool."""
+    import tomllib  # noqa: PLC0415
+
+    snap = Path(adapter).with_suffix(".snapshot.toml")
+    if not snap.exists():
+        return {}
+    with snap.open("rb") as f:
+        raw = tomllib.load(f)
+    return {k: raw[k] for k in _SNAPSHOT_KNOBS if k in raw}
+
+
 def build_training_args(
     method: str, preset: str, overrides: dict
 ) -> argparse.Namespace:
@@ -152,7 +169,14 @@ def build_training_args(
     return args
 
 
-def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
+def build_train_items(
+    args,
+    *,
+    pe_encoder: str = "pe_spatial",
+    sample_ratio=None,
+    artists_shard=None,
+    path_pattern=None,
+) -> list:
     """The *training* split items (info, te_npz, pe_sidecar) — memorization is
     about the images the model actually trained on. Same blueprint path as the
     trainer; we take the train group (the archived seed_lottery probe took the
@@ -161,7 +185,14 @@ def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
     ``pe_encoder`` selects which cached PE sidecar to use as the reference
     feature: ``pe_spatial`` (``{stem}_anima_pe_spatial.safetensors`` — what
     `make preprocess` writes for REPA, present on every artist set) or ``pe``
-    (the pooled PE-Core global, only cached where CMMD ran)."""
+    (the pooled PE-Core global, only cached where CMMD ran).
+
+    ``sample_ratio`` / ``artists_shard`` / ``path_pattern`` replay train.py's
+    pre-blueprint subset mutations so the reference pool is exactly the images
+    the adapter trained on (mirrors ``loss_gap.py``). This matters for
+    single-artist adapters: without a ``path_pattern`` filter the pool is the
+    whole multi-artist blueprint and the memorization signal is diluted — most
+    generated captions are images the adapter never saw (see README)."""
     from library.config import loader as config_util  # noqa: PLC0415
     from library.config.io import load_dataset_config_from_base  # noqa: PLC0415
 
@@ -173,6 +204,12 @@ def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
             "outputs and cannot run in live-encoding mode."
         )
 
+    # Pin BOTH the namespace and (below) the subset-level keys, so a preset- or
+    # method-TOML value can't silently override what the snapshot asked for.
+    if sample_ratio is not None:
+        args.sample_ratio = float(sample_ratio)
+    args.path_pattern = path_pattern
+
     user_config = load_dataset_config_from_base(
         overrides=vars(args),
         method=getattr(args, "method", None),
@@ -180,6 +217,21 @@ def build_train_items(args, *, pe_encoder: str = "pe_spatial") -> list:
     )
     if user_config is None:
         raise RuntimeError("No dataset blueprint found in configs/base.toml.")
+
+    # Mirror train.py's pre-blueprint mutations (as loss_gap.build_items).
+    if sample_ratio is not None and float(sample_ratio) != 1.0:
+        for ds in user_config.get("datasets", []):
+            for sub in ds.get("subsets", []):
+                sub["sample_ratio"] = float(sample_ratio)
+    if path_pattern:
+        for ds in user_config.get("datasets", []):
+            for sub in ds.get("subsets", []):
+                sub["path_pattern"] = path_pattern
+    if artists_shard:
+        from library.datasets.artist_shard import apply_artist_shard  # noqa: PLC0415
+        from library.env import resolve_under_home  # noqa: PLC0415
+
+        apply_artist_shard(user_config, artists_shard, resolve=resolve_under_home)
 
     blueprint_generator = config_util.BlueprintGenerator(
         config_util.ConfigSanitizer(support_dropout=True)
@@ -535,6 +587,25 @@ def main():
         default=0.05,
         help="Min (s_self - s_other) cosine gap for a self_lock (instance copy).",
     )
+    ap.add_argument(
+        "--path_pattern",
+        default=None,
+        help="Restrict the reference pool to this fnmatch pattern ('none' to "
+        "force off; default: adapter .snapshot.toml). Without it a "
+        "single-artist adapter is scored against the whole blueprint and the "
+        "signal is diluted — see README.",
+    )
+    ap.add_argument(
+        "--sample_ratio",
+        type=float,
+        default=None,
+        help="The RUN's sample_ratio (default: adapter .snapshot.toml, else 1.0).",
+    )
+    ap.add_argument(
+        "--artists_shard",
+        default=None,
+        help="The RUN's artists_shard ('none' to force off; default: snapshot).",
+    )
     ap.add_argument("--dtype", type=str, default="bf16")
     ap.add_argument(
         "--compile",
@@ -559,7 +630,33 @@ def main():
     acc = prepare_accelerator(targs)
     shim = _Acc(acc.device, dtype)
 
-    items = build_train_items(targs, pe_encoder=args_cli.pe_encoder)
+    # Snapshot is authoritative for the pool (matches loss_gap/generalize);
+    # explicit CLI flags override it, 'none' forces a knob off.
+    snap = _read_snapshot_knobs(args_cli.adapter)
+    if snap:
+        print(f"snapshot knobs: {snap}", flush=True)
+
+    def _resolve(cli_val, key):
+        if cli_val is not None:
+            return None if str(cli_val).lower() == "none" else cli_val
+        return snap.get(key)
+
+    sample_ratio = _resolve(args_cli.sample_ratio, "sample_ratio")
+    artists_shard = _resolve(args_cli.artists_shard, "artists_shard")
+    path_pattern = _resolve(args_cli.path_pattern, "path_pattern")
+    print(
+        f"pool filter: path_pattern={path_pattern!r} "
+        f"sample_ratio={sample_ratio!r} artists_shard={artists_shard!r}",
+        flush=True,
+    )
+
+    items = build_train_items(
+        targs,
+        pe_encoder=args_cli.pe_encoder,
+        sample_ratio=sample_ratio,
+        artists_shard=artists_shard,
+        path_pattern=path_pattern,
+    )
     if not items:
         sidecar = (
             "_anima_pe_spatial.safetensors"

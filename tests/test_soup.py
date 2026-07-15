@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from scripts.soup.build import soup_state_dicts, truncated_soup
-from scripts.soup.pipeline import pool_glob, slug_for_pattern, uncond_name
+from scripts.soup.pipeline import pool_glob, resolve_lrs, slug_for_pattern, uncond_name
 
 OUT, IN, RANK = 12, 10, 4
 
@@ -156,6 +156,34 @@ class TestSlugForPattern:
         # Deterministic and distinct from a different pattern.
         assert slug == slug_for_pattern("a/*|b/*")
         assert slug != slug_for_pattern("a/*|c/*")
+
+
+class TestResolveLrs:
+    def test_unset_leaves_the_config_lr_alone(self):
+        # The default soup is seed-only: no --learning_rate reaches the fine-tunes.
+        assert resolve_lrs(3, None, None) is None
+        assert resolve_lrs(3, "", "") is None
+
+    def test_pool_is_cycled_to_num_soup(self):
+        assert resolve_lrs(3, "1e-5,2e-5,4e-5", None) == [1e-5, 2e-5, 4e-5]
+        assert resolve_lrs(4, "1e-5,2e-5", None) == [1e-5, 2e-5, 1e-5, 2e-5]
+        assert resolve_lrs(2, "1e-5, 2e-5", None) == [1e-5, 2e-5]  # spaces tolerated
+
+    def test_interval_is_geometric_and_hits_both_bounds(self):
+        lrs = resolve_lrs(3, None, "1e-5:4e-5")
+        assert lrs[0] == pytest.approx(1e-5)
+        assert lrs[-1] == pytest.approx(4e-5)
+        assert lrs[1] == pytest.approx(2e-5)  # log-midpoint, not 2.5e-5
+
+    def test_conflicts_and_bad_input_are_refused(self):
+        with pytest.raises(SystemExit):
+            resolve_lrs(3, "1e-5,2e-5", "1e-5:4e-5")  # mutually exclusive
+        with pytest.raises(SystemExit):
+            resolve_lrs(3, None, "1e-5")  # not a lo:hi pair
+        with pytest.raises(SystemExit):
+            resolve_lrs(3, None, "0:4e-5")  # geometric needs positive bounds
+        with pytest.raises(SystemExit):
+            resolve_lrs(3, "fast", None)
 
 
 class TestUncondName:
