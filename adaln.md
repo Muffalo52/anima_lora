@@ -36,14 +36,14 @@ detection does the same (`comfy/model_detection.py:801`).
 | Trainer | adaln in LoRA target set? | Evidence |
 |---|---|---|
 | **diffusion-pipe** (Anima author's trainer) | **YES** — targets *every* `nn.Linear` under `Block`/`TransformerBlock`, no exclusions and no config filter | `models/base.py::configure_adapter` (~line 219) |
-| **sd-scripts** (official kohya, upstream Anima support) | **NO by default** — appends `.*(_modulation\|_norm\|_embedder\|final_layer).*`; opt-in via `include_patterns` (include beats exclude, same mechanism as ours) | `networks/lora_anima.py:254` |
+| **sd-scripts** (official kohya, upstream Anima support) | **NO by default** — appends `.*(_modulation\|_norm\|_embedder\|final_layer).*`; opt-in via `include_patterns` (include beats exclude, same mechanism as ours) | `sd-scripts/networks/lora_anima.py:254` |
 | **this repo** | **NO** — `_DEFAULT_EXCLUDE` blocks `adaln_up_` | `networks/lora_anima/config.py:168` |
 
 Our exclusion is **inherited verbatim from kohya's `lora_anima.py`** (ours extends
 the same regex with the runtime rename names) — a conservative
 "attention+MLP only" convention bundled with norms/embedders, specific to the
 Anima implementation (kohya's Flux LoRA has no such exclude machinery at all).
-Notably kohya also ships `networks/convert_anima_lora_to_comfy.py`, which
+Notably kohya also ships `sd-scripts/networks/convert_anima_lora_to_comfy.py`, which
 **already handles adaln module names** — so an sd-scripts user who opts in gets
 a ComfyUI-shippable adaln LoRA today. That converter is prior art for our
 missing trained-checkpoint export step.
@@ -122,6 +122,16 @@ included: continue`), and runtime `adaln_up_{br}` is a plain `nn.Linear`.
 # method TOML
 include_patterns = [".*adaln_up_.*"]
 ```
+
+Turbo knobs (2026-07-15): `network.train_adaln` wires the include on student+fake;
+`network.fake_adaln = false` builds an adaln-less critic (VRAM lever);
+`network.adaln_rank = N` builds the adaln modules at their own rank via the
+factory's `network_reg_dims` regex→dim override — measured on the r96 extract,
+the adaln ΔW keeps 0.980/0.991/0.995 of its energy at r32/48/64 (in-dim is 256),
+so sub-attn rank there is near-free. The reg_dims path keeps the NETWORK alpha
+(hotter alpha/rank scale on adaln by rank/adaln_rank; warm start folds scale so
+init is exact). The extractor mirrors it as `--adaln_rank`. Guards in
+`tests/test_turbo_adaln.py`.
 
 **Compile interaction (fixed 2026-07-15)**: training adaln under
 `compile_dynamic_seq` initially crashed at the first grad-bearing forward with

@@ -163,6 +163,16 @@ def main() -> None:
         help="Also extract adaln_up_{branch} LoRAs (needs adaln targeting on load).",
     )
     ap.add_argument(
+        "--adaln_rank",
+        type=int,
+        default=0,
+        help="Truncate the adaln_up_{branch} deltas at their own rank "
+        "(0 = use --rank). Their in-dim is 256, so they are near-lossless well "
+        "below attn rank (r64 keeps ~99.5%% of the r96 energy). Per-module "
+        "alpha == rank is written either way, so mixed-rank files load "
+        "everywhere plain LoRA does.",
+    )
+    ap.add_argument(
         "--adaln_layout",
         choices=("runtime", "comfy"),
         default="runtime",
@@ -225,9 +235,11 @@ def main() -> None:
             dim=0,
         )
         scale = act_scales.get(_module_path(lora_name)) if act_scales else None
-        if act_scales and scale is None and not _ADALN_NAME_RE.match(lora_name):
+        is_adaln = bool(_ADALN_NAME_RE.match(lora_name))
+        if act_scales and scale is None and not is_adaln:
             print(f"warning: no act scale for {lora_name} — plain SVD for it")
-        up, down, energy = svd_truncate(delta, args.rank, act_scale=scale)
+        rank = args.adaln_rank if (is_adaln and args.adaln_rank > 0) else args.rank
+        up, down, energy = svd_truncate(delta, rank, act_scale=scale)
         energies.append(energy)
         sd[f"{lora_name}.lora_up.weight"] = up.to(save_dtype).cpu()
         sd[f"{lora_name}.lora_down.weight"] = down.to(save_dtype).cpu()
@@ -251,6 +263,7 @@ def main() -> None:
                 "base": Path(args.base).name,
                 "tuned": Path(args.tuned).name,
                 "rank": args.rank,
+                "adaln_rank": args.adaln_rank if args.adaln_rank > 0 else None,
                 "include_adaln": bool(args.include_adaln),
                 "adaln_layout": args.adaln_layout if args.include_adaln else None,
                 "act_scales": Path(args.act_scales).name if args.act_scales else None,

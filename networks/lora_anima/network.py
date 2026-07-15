@@ -298,6 +298,20 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                                             else lora_dim
                                         )
                                         alpha_val = alpha
+                                # Per-pattern alpha override (completes the
+                                # reg_dims / reg_lrs trio). Independent of
+                                # reg_dims: applies whether the dim came from a
+                                # reg_dims match or the network default — e.g.
+                                # a scale-preserving alpha on adaln modules
+                                # built at their own rank.
+                                if cfg.reg_alphas is not None and dim:
+                                    for reg, a in cfg.reg_alphas.items():
+                                        if re.fullmatch(reg, original_name):
+                                            alpha_val = a
+                                            logger.info(
+                                                f"Module {original_name} matched with regex '{reg}' -> alpha: {a}"
+                                            )
+                                            break
 
                             if dim is None or dim == 0:
                                 if is_linear or is_conv2d_1x1:

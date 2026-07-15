@@ -54,6 +54,14 @@ train_adaln = true
 #                        # critic's 84 adaln modules (~0.8 GB params+grads+AdamW
 #                        # at rank 96); the score estimate goes blind to the
 #                        # student's adaln subspace (unbenched trade).
+# adaln_rank = 64        # build the adaln modules at their own rank (0/absent =
+#                        # network rank). adaln in-dim is 256 — r64 keeps ~99.5%
+#                        # of the r96 ΔW energy, so lower rank there is ~free
+#                        # VRAM. Requires train_adaln.
+# adaln_alpha = 141.3    # their own alpha (0/absent = network alpha, which runs
+#                        # rank/adaln_rank hotter when adaln_rank is set).
+#                        # Scale-preserving: student_alpha × adaln_rank/rank
+#                        # (212 × 64/96 here). Warm start folds scale either way.
 # τ-split critic (docs/proposal/turbo_tau_split_critic.md, Phase-0 gate FIRED
 # 2026-07-14 on the superturbo_B bundle): 2 = dual fake LoRAs, bank 0 owning
 # τ < fake_tau_boundary, bank 1 the rest. Both the fake updates AND the DMD

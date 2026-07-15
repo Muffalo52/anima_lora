@@ -199,6 +199,10 @@ class LoRANetworkCfg:
 
     reg_dims: Optional[Dict[str, int]] = None
     reg_lrs: Optional[Dict[str, float]] = None
+    # Per-pattern alpha override (regex fullmatch on the module path, like
+    # reg_dims). Applies independently of reg_dims — a matched module keeps its
+    # resolved dim and takes this alpha instead of the network alpha.
+    reg_alphas: Optional[Dict[str, float]] = None
 
     use_timestep_mask: bool = False
     min_rank: int = 1
@@ -704,6 +708,10 @@ class LoRANetworkCfg:
         reg_dims = _parse_kv_pairs(reg_dims_str, is_int=True) if reg_dims_str else None
         reg_lrs_str = kwargs.get("network_reg_lrs")
         reg_lrs = _parse_kv_pairs(reg_lrs_str, is_int=False) if reg_lrs_str else None
+        reg_alphas_str = kwargs.get("network_reg_alphas")
+        reg_alphas = (
+            _parse_kv_pairs(reg_alphas_str, is_int=False) if reg_alphas_str else None
+        )
 
         # DSR register tokens (LoRA + registers trained jointly). Bounds of
         # register_insert_block are validated at network build (needs n_blocks).
@@ -730,6 +738,7 @@ class LoRANetworkCfg:
             module_dropout=module_dropout,
             reg_dims=reg_dims,
             reg_lrs=reg_lrs,
+            reg_alphas=reg_alphas,
             use_timestep_mask=use_timestep_mask,
             min_rank=min_rank,
             alpha_rank_scale=alpha_rank_scale,

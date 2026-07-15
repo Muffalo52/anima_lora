@@ -328,6 +328,8 @@ class TurboDMDNetwork:
         fake_tau_banks: int = 1,
         train_adaln: bool = False,
         fake_adaln: bool | None = None,
+        adaln_rank: int = 0,
+        adaln_alpha: float = 0.0,
         gan_feature_indices: set[int] | None = None,
         gan_disc_hidden: int | None = None,
     ) -> None:
@@ -351,6 +353,24 @@ class TurboDMDNetwork:
         # module set (file keys without a module are skipped).
         self.train_adaln = bool(train_adaln)
         self.fake_adaln = self.train_adaln if fake_adaln is None else bool(fake_adaln)
+        # 0 = adaln modules share network_dim; >0 = their own rank (see the
+        # network_reg_dims comment below). Applies to student and (when
+        # fake_adaln) the fake banks alike.
+        self.adaln_rank = int(adaln_rank)
+        if self.adaln_rank < 0:
+            raise ValueError(f"adaln_rank must be >= 0, got {adaln_rank}")
+        if self.adaln_rank > 0 and not self.train_adaln:
+            raise ValueError("adaln_rank > 0 requires train_adaln=true")
+        # 0 = adaln modules keep the network alpha (the reg_dims default —
+        # runs a rank/adaln_rank hotter alpha/rank scale when adaln_rank is
+        # set); >0 = their own alpha, e.g. scale-preserving
+        # network_alpha × adaln_rank / network_dim. Shared by student and
+        # (when fake_adaln) the fake banks, like adaln_rank.
+        self.adaln_alpha = float(adaln_alpha)
+        if self.adaln_alpha < 0:
+            raise ValueError(f"adaln_alpha must be >= 0, got {adaln_alpha}")
+        if self.adaln_alpha > 0 and not self.train_adaln:
+            raise ValueError("adaln_alpha > 0 requires train_adaln=true")
         # τ-split critic (turbo_tau_split_critic Phase 1): 2 = a second fake
         # stack (`fake_hi`) owning the high-τ band. Which bank answers/trains is
         # the CALLER's choice via set_fake_bank (the boundary lives in the loop
@@ -404,14 +424,30 @@ class TurboDMDNetwork:
         # no-op in the factory (fp32-bottleneck path removed 2026-06-10).
         # step_expert_K rides **kwargs; >1 flips resolve_network_spec to
         # StepExpertLoRAModule for the student only (the fake never sees it).
-        _adaln_include = [".*adaln_up_.*"] if self.train_adaln else None
+        # adaln_rank > 0 builds the adaln modules at their own (lower) rank via
+        # the factory's regex→dim override (``network_reg_dims``): the official
+        # turbo's adaln ΔW is near-lossless well below attn rank (in-dim 256 —
+        # r64 keeps 99.5% of the r96 energy), so uniform rank there is wasted
+        # VRAM. NB the reg_dims path keeps the NETWORK alpha, so the adaln
+        # modules run a higher alpha/rank scale (≈ rank/adaln_rank × the attn
+        # scale) — warm start folds the scale so the init is exact either way.
+        _adaln_reg_dims = (
+            f".*adaln_up_.*={self.adaln_rank}" if self.adaln_rank > 0 else None
+        )
+        _adaln_reg_alphas = (
+            f".*adaln_up_.*={self.adaln_alpha}" if self.adaln_alpha > 0 else None
+        )
         _student_kwargs: dict = {}
         if self.student_step_expert_K > 1:
             _student_kwargs["step_expert_K"] = self.student_step_expert_K
         if self.student_down_init != "kaiming":
             _student_kwargs["down_init"] = self.student_down_init
-        if _adaln_include is not None:
-            _student_kwargs["include_patterns"] = _adaln_include
+        if self.train_adaln:
+            _student_kwargs["include_patterns"] = [".*adaln_up_.*"]
+            if _adaln_reg_dims is not None:
+                _student_kwargs["network_reg_dims"] = _adaln_reg_dims
+            if _adaln_reg_alphas is not None:
+                _student_kwargs["network_reg_alphas"] = _adaln_reg_alphas
         self.student: LoRANetwork = create_network(
             multiplier=1.0,
             network_dim=self.student_rank,
@@ -430,6 +466,10 @@ class TurboDMDNetwork:
             _fake_kwargs["down_init"] = self.fake_down_init
         if self.fake_adaln:
             _fake_kwargs["include_patterns"] = [".*adaln_up_.*"]
+            if _adaln_reg_dims is not None:
+                _fake_kwargs["network_reg_dims"] = _adaln_reg_dims
+            if _adaln_reg_alphas is not None:
+                _fake_kwargs["network_reg_alphas"] = _adaln_reg_alphas
 
         def _make_fake() -> LoRANetwork:
             return create_network(

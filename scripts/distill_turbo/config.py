@@ -493,6 +493,15 @@ class TurboConfig:
     # params+grads+AdamW states at rank 96) at the cost of a score estimate
     # blind to the student's adaln subspace (unbenched trade).
     fake_adaln: bool
+    # Build the adaln modules at their own rank (0 = share network rank). The
+    # official turbo adaln ΔW is near-lossless well below attn rank (in-dim
+    # 256: r64 keeps 99.5% of the r96 energy) — a lower adaln_rank cuts the
+    # adaln VRAM add roughly in proportion. Requires train_adaln.
+    adaln_rank: int
+    # Their own alpha too (0 = network alpha, which runs rank/adaln_rank hotter
+    # when adaln_rank is set). Scale-preserving value:
+    # student_alpha × adaln_rank / student_rank. Requires train_adaln.
+    adaln_alpha: float
     # AOT min-cut partitioner tuning (mirrors train.py's partitioner_* args):
     # change what the default partition is willing to recompute, on top of
     # activation_memory_budget. Ignored under --grad_ckpt (same gate as the
@@ -728,6 +737,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     fake_init_weights = str(_flatten(cfg, "network.fake_init_weights", ""))
     train_adaln = bool(_flatten(cfg, "network.train_adaln", False))
     fake_adaln = bool(_flatten(cfg, "network.fake_adaln", train_adaln))
+    adaln_rank = int(_flatten(cfg, "network.adaln_rank", 0))
+    if adaln_rank > 0 and not train_adaln:
+        raise SystemExit("network.adaln_rank > 0 requires network.train_adaln = true")
+    adaln_alpha = float(_flatten(cfg, "network.adaln_alpha", 0.0))
+    if adaln_alpha > 0 and not train_adaln:
+        raise SystemExit("network.adaln_alpha > 0 requires network.train_adaln = true")
     for name, path, conflicts in (
         (
             "student",
@@ -1041,6 +1056,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         fake_init_weights=fake_init_weights,
         train_adaln=train_adaln,
         fake_adaln=fake_adaln,
+        adaln_rank=adaln_rank,
+        adaln_alpha=adaln_alpha,
         use_masked_loss=use_masked_loss,
         mask_dir=mask_dir,
         k_anchor=k_anchor,

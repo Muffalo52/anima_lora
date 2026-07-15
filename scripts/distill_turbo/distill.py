@@ -287,6 +287,8 @@ def main():
         fake_tau_banks=cfg.fake_tau_banks,
         train_adaln=cfg.train_adaln,
         fake_adaln=cfg.fake_adaln,
+        adaln_rank=cfg.adaln_rank,
+        adaln_alpha=cfg.adaln_alpha,
         gan_feature_indices=gan_indices,
         gan_disc_hidden=cfg.gan_disc_hidden if cfg.gan_disc_hidden > 0 else None,
     )
@@ -1303,6 +1305,9 @@ def main():
                 # The student targets adaln_up_{branch}; save_student ships the
                 # adaln keys in the ComfyUI layout (adaln.md).
                 metadata["ss_turbo_train_adaln"] = "1"
+                if cfg.adaln_rank > 0:
+                    # Provenance only — per-module rank/alpha live in the file.
+                    metadata["ss_turbo_adaln_rank"] = str(cfg.adaln_rank)
             if cfg.student_init_weights:
                 # Provenance only — the warm start distills to a normal LoRA.
                 metadata["ss_turbo_student_init_weights"] = os.path.basename(
