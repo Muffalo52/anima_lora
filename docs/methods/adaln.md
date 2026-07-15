@@ -1,7 +1,7 @@
 # AdaLN LoRA — training → ComfyUI-compatible shipping
 
 Status: **extraction path shipped & verified; training path plumbed but unbenched.**
-Any train-side default change is bench-gated (Tier 1.5/2 per `CONTRIBUTING.md`) — this
+Any train-side default change is bench-gated (Tier 1.5/2 per `../../CONTRIBUTING.md`) — this
 doc is the map, not the verdict.
 
 ## What adaln is in this architecture
@@ -134,17 +134,15 @@ init is exact). The extractor mirrors it as `--adaln_rank`. Guards in
 `tests/test_turbo_adaln.py`.
 
 **Compile interaction (fixed 2026-07-15)**: training adaln under
-`compile_dynamic_seq` initially crashed at the first grad-bearing forward with
-`ConstraintViolationError: … 4096 <= seq <= 4200` vs the marked `[lo, 4200]`
-range. Cause: the adaln LoRA makes shift/scale/gate require grad, so the
-backward gains a seq-axis reduction (broadcast-backward for the modulation
-grads); inductor's mix-order-reduction fusion (torch 2.12, default-on) guards
-its profitability check as `Ge(seq, 4096)` at the compile hint, records it in
-the FxGraphCache artifact, and the next cache lookup replays that guard into
-the ShapeEnv — contradicting the strict `mark_dynamic` range. Fix:
-`compile_blocks` disables `torch._inductor.config.triton.mix_order_reduction`
-whenever dynamic-seq marks are active (`library/anima/models.py`); see also the
-caveat added to `isolate_compile_cache`. Applies to ANY LoRA on a
+`compile_dynamic_seq` initially crashed at the first grad-bearing forward with a
+`ConstraintViolationError` on the marked seq range. The adaln LoRA makes
+shift/scale/gate require grad, so the backward gains a seq-axis reduction whose
+inductor mix-order-reduction fusion records a `Ge(seq, 4096)` guard that
+FxGraphCache replays into the ShapeEnv — contradicting the strict `mark_dynamic`
+bound. Fixed by disabling `triton.mix_order_reduction` whenever dynamic-seq
+marks are active — full mechanism in
+[`../optimizations/for_compile.md`](../optimizations/for_compile.md) §2.6 and
+[[project_inductor_mix_order_reduction_guard]]. Applies to ANY LoRA on a
 broadcast-consumed Linear, not just adaln.
 
 **Missing piece for shipping trained adaln**: the trainer saves runtime-layout
@@ -168,7 +166,7 @@ No text or spatial pathway. Plausible fits:
 ### Interaction with modulation guidance (MOD=1)
 
 The adaln modulation MLPs are a shared pipe with **three tenants**
-(`docs/inference/mod-guidance.md`):
+(`../inference/mod-guidance.md`):
 
 1. **Stock**: t-embedding → per-σ shift/scale/gate.
 2. **Mod-guidance**: adds `schedule[ℓ]·δ` (pooled-text steering delta) to the

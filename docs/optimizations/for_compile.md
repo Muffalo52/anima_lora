@@ -113,7 +113,36 @@ padding_mask.unsqueeze(2).expand(-1, -1, n_heads)
 
 The cache budget is `cache_size_limit = max(current, 2*n + 8)` where `n` is the number of token-count families (2): the `2*` covers fwd+bwd sharing the one `_forward` bytecode, the `+8` covers requires_grad / stride specializations. The `max()` lets a multi-resolution caller (e.g. a distill loop whose downsampled stages produce more distinct shapes) pre-raise the limit without `compile_blocks` lowering it.
 
-There is no padded mode anymore. The legacy `set_static_token_count(count, pad=True)` path zero-padded every bucket up to a single shape, but it leaked padded tokens into flash self-attention (AdaLN shift + Q/K/V bias make zero-input padded rows emit non-trivial K/V; up to ~6.5% rel-L2 on the 4032 buckets) and couldn't even run the shipped table (4200 > the legacy 4096 target → truncation). It was removed 2026-05-24 along with `compile_core` / `--compile_mode full`, `static_token_count`, `static_pad`, and the flex self-attn pad-mask.
+There is no padded mode anymore.
+
+### 2.6 Dynamic-seq marks disable inductor mix-order reduction
+
+When `compile_dynamic_seq` is active (free-fit — §3.1 — auto-enables it, and the
+bespoke distill loops force it via `ensure_dynamic_seq_for_freefit`),
+`compile_blocks` marks only the seq axis dynamic and bounds it to the tier's
+`seq_range` via a strict `mark_dynamic`. That strict bound collides with an
+inductor fusion pass:
+
+```python
+# compile_blocks, when dynamic-seq marks are active
+torch._inductor.config.triton.mix_order_reduction = False
+```
+
+**Why.** `mix_order_reduction` (torch 2.12, default-on) guards its profitability
+check as `Ge(seq, 4096)` **at the compile hint** and records that guard in the
+FxGraphCache artifact. The *next* cache lookup replays the recorded guard into
+the `ShapeEnv`, which contradicts the strict `[lo, 4200]` `mark_dynamic` range
+and raises `ConstraintViolationError: … 4096 <= seq <= 4200`. The failure only
+surfaces once a **backward gains a seq-axis reduction** — e.g. an adaln LoRA
+makes shift/scale/gate require grad, so the modulation grads reduce over the seq
+axis (broadcast-backward). It therefore hits *any* LoRA on a broadcast-consumed
+Linear, not just adaln, and only under dynamic-seq. Disabling the fusion when
+dynamic-seq marks are live is the fix; see also the caveat on
+`isolate_compile_cache` (stale-guard poisoning across cache reuse). Discovered
+fixing the adaln training path (2026-07-15) — `docs/methods/adaln.md` §Path 2.
+
+> **sd-scripts**: no dynamic-seq path, no free-fit, no per-block compile — none
+> of this machinery exists upstream. The legacy `set_static_token_count(count, pad=True)` path zero-padded every bucket up to a single shape, but it leaked padded tokens into flash self-attention (AdaLN shift + Q/K/V bias make zero-input padded rows emit non-trivial K/V; up to ~6.5% rel-L2 on the 4032 buckets) and couldn't even run the shipped table (4200 > the legacy 4096 target → truncation). It was removed 2026-05-24 along with `compile_core` / `--compile_mode full`, `static_token_count`, `static_pad`, and the flex self-attn pad-mask.
 
 ---
 

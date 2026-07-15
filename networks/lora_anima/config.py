@@ -414,6 +414,25 @@ class LoRANetworkCfg:
         exclude_patterns.append(_DEFAULT_EXCLUDE)
         include_patterns = _as_str_list(kwargs.get("include_patterns"))
 
+        # adaln convenience knobs (mirror the turbo distill surface): train_adaln
+        # adds the adaln_up_{branch} Linears to the target set — they sit in
+        # _DEFAULT_EXCLUDE, so this rescues them via include_patterns (an
+        # exclude-override, not a whitelist, so the default attn+MLP set is
+        # untouched). adaln_rank / adaln_alpha give them their own rank / alpha
+        # (0/absent = the network's). Translates to the exact
+        # include_patterns / network_reg_dims / network_reg_alphas primitives the
+        # turbo harness builds by hand (networks/methods/turbo_dmd.py); injected
+        # into reg_dims / reg_alphas after those strings are parsed, below.
+        train_adaln = _as_bool(kwargs.get("train_adaln"))
+        adaln_rank_raw = kwargs.get("adaln_rank")
+        adaln_rank = int(adaln_rank_raw) if adaln_rank_raw is not None else 0
+        adaln_alpha_raw = kwargs.get("adaln_alpha")
+        adaln_alpha = float(adaln_alpha_raw) if adaln_alpha_raw is not None else 0.0
+        if adaln_rank > 0 and not train_adaln:
+            raise ValueError("adaln_rank > 0 requires train_adaln = true")
+        if adaln_alpha > 0 and not train_adaln:
+            raise ValueError("adaln_alpha > 0 requires train_adaln = true")
+
         layer_start = kwargs.get("layer_start")
         layer_start = int(layer_start) if layer_start is not None else None
         layer_end = kwargs.get("layer_end")
@@ -712,6 +731,14 @@ class LoRANetworkCfg:
         reg_alphas = (
             _parse_kv_pairs(reg_alphas_str, is_int=False) if reg_alphas_str else None
         )
+
+        if train_adaln:
+            _adaln_pat = ".*adaln_up_.*"
+            include_patterns = (include_patterns or []) + [_adaln_pat]
+            if adaln_rank > 0:
+                reg_dims = {**(reg_dims or {}), _adaln_pat: adaln_rank}
+            if adaln_alpha > 0:
+                reg_alphas = {**(reg_alphas or {}), _adaln_pat: adaln_alpha}
 
         # DSR register tokens (LoRA + registers trained jointly). Bounds of
         # register_insert_block are validated at network build (needs n_blocks).

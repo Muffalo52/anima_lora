@@ -286,7 +286,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                                         if re.fullmatch(reg, original_name):
                                             dim = d
                                             alpha_val = alpha
-                                            logger.info(
+                                            logger.debug(
                                                 f"Module {original_name} matched with regex '{reg}' -> dim: {dim}"
                                             )
                                             break
@@ -308,7 +308,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                                     for reg, a in cfg.reg_alphas.items():
                                         if re.fullmatch(reg, original_name):
                                             alpha_val = a
-                                            logger.info(
+                                            logger.debug(
                                                 f"Module {original_name} matched with regex '{reg}' -> alpha: {a}"
                                             )
                                             break
