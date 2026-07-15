@@ -1636,6 +1636,25 @@ class Anima(nn.Module):
                 from library.datasets.buckets import token_count_range
 
                 self._dynamic_seq_range = token_count_range((1024,))
+            # Inductor's mix-order-reduction fusion (torch 2.12, default-on) is
+            # incompatible with the strict seq marks: its profitability check
+            # calls guard_or_true(Ge(nrow, 4096)) where nrow is the symbolic seq
+            # axis (it fires on backward graphs that pair a seq-axis reduction
+            # with an elementwise grad — e.g. any LoRA on a broadcast-consumed
+            # Linear like adaln_up, whose shift/scale/gate grads reduce over
+            # seq). The guard is suppressed during the backward compile but
+            # recorded in the FxGraphCache artifact, and the next cache lookup
+            # replays it into the ShapeEnv — narrowing seq to [4096, hi], which
+            # contradicts any mark range whose lo < 4096 (every multi-tier range
+            # AND the canonical 4032) → ConstraintViolationError at guard build.
+            import torch._inductor.config as _inductor_config
+
+            if _inductor_config.triton.mix_order_reduction:
+                _inductor_config.triton.mix_order_reduction = False
+                print(
+                    "Anima: inductor mix_order_reduction disabled "
+                    "(hint-derived Ge(seq, 4096) guard breaks strict dynamic-seq marks)"
+                )
 
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:

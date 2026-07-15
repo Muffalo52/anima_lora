@@ -18,6 +18,11 @@ release (see memory ``project_official_turbo_v10_eval``):
 (``adaln_up_{branch}``, checkpoint key ``adaln_modulation_{branch}.2``) — the
 largest movers in the official turbo delta. Off by default: the student does
 not target adaln yet, and stock loaders skip the keys (default exclude regex).
+``--adaln_layout comfy`` names those keys after ComfyUI's model paths
+(``lora_unet_blocks_{b}_adaln_modulation_{branch}_2``) so the file ships as a
+ComfyUI-native LoRA — core's generic key map covers every model weight,
+including adaln (``comfy/lora.py::model_lora_keys_unet``); the default
+``runtime`` layout keeps the in-repo module names for the warm-start path.
 
 Both checkpoints must be in the ``net.``-prefixed Anima layout (re-key a
 ComfyUI ``model.diffusion_model.``-prefixed release first).
@@ -128,9 +133,7 @@ def svd_truncate(
     return up, down, energy
 
 
-_LORA_NAME_RE = re.compile(
-    r"^lora_unet_blocks_(\d+)_(self_attn|cross_attn|mlp)_(.+)$"
-)
+_LORA_NAME_RE = re.compile(r"^lora_unet_blocks_(\d+)_(self_attn|cross_attn|mlp)_(.+)$")
 _ADALN_NAME_RE = re.compile(r"^lora_unet_blocks_(\d+)_(adaln_up_\w+)$")
 
 
@@ -158,6 +161,14 @@ def main() -> None:
         "--include_adaln",
         action="store_true",
         help="Also extract adaln_up_{branch} LoRAs (needs adaln targeting on load).",
+    )
+    ap.add_argument(
+        "--adaln_layout",
+        choices=("runtime", "comfy"),
+        default="runtime",
+        help="Key naming for the adaln LoRAs: 'runtime' = in-repo module names "
+        "(adaln_up_{branch}, for the turbo warm-start path), 'comfy' = ComfyUI "
+        "state-dict paths (adaln_modulation_{branch}_2, loads natively in core).",
     )
     ap.add_argument(
         "--act_scales",
@@ -214,7 +225,7 @@ def main() -> None:
             dim=0,
         )
         scale = act_scales.get(_module_path(lora_name)) if act_scales else None
-        if act_scales and scale is None:
+        if act_scales and scale is None and not _ADALN_NAME_RE.match(lora_name):
             print(f"warning: no act scale for {lora_name} — plain SVD for it")
         up, down, energy = svd_truncate(delta, args.rank, act_scale=scale)
         energies.append(energy)
@@ -225,6 +236,13 @@ def main() -> None:
 
     defuse_standard_qkv(sd)
 
+    if args.include_adaln and args.adaln_layout == "comfy":
+        # adaln_up_{branch} (runtime name) -> adaln_modulation_{branch}_2
+        # (ComfyUI state-dict path; see library/anima/weights.py::_dit_rename_hook).
+        from networks.lora_utils import relayout_adaln_runtime_to_comfy
+
+        sd = relayout_adaln_runtime_to_comfy(sd)
+
     metadata = {
         "ss_network_dim": str(args.rank),
         "ss_network_alpha": str(args.rank),
@@ -234,6 +252,7 @@ def main() -> None:
                 "tuned": Path(args.tuned).name,
                 "rank": args.rank,
                 "include_adaln": bool(args.include_adaln),
+                "adaln_layout": args.adaln_layout if args.include_adaln else None,
                 "act_scales": Path(args.act_scales).name if args.act_scales else None,
                 "act_alpha": args.act_alpha if args.act_scales else None,
                 "mean_energy": round(sum(energies) / len(energies), 4),

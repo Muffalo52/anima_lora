@@ -250,6 +250,21 @@ def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -
     from safetensors.torch import load_file
 
     weights_sd = load_file(weights_path)
+    # A ComfyUI-native adaln extract (extract_delta_lora.py --adaln_layout comfy,
+    # e.g. the shipped anima_turboV10_delta_r96_asvd_adaln) names its adaln keys
+    # adaln_modulation_{br}_2; the modules to seed are named adaln_up_{br}. Rename
+    # so the per-module lookup below matches (else the 84 adaln modules silently
+    # keep default init). Presence-gated; no-op on adaln-less / runtime-layout files.
+    from networks.lora_utils import (
+        has_comfy_adaln_keys,
+        relayout_adaln_comfy_to_runtime,
+    )
+
+    if has_comfy_adaln_keys(weights_sd):
+        weights_sd = relayout_adaln_comfy_to_runtime(weights_sd)
+        logger.info(
+            f"{label}: renamed ComfyUI-layout adaln keys → runtime names for warm start."
+        )
     if any(".lora_ups." in k or ".lora_up_weight" in k for k in weights_sd):
         raise RuntimeError(
             f"{weights_path}: MoE/step-expert layout — warm start needs a "
@@ -311,12 +326,31 @@ class TurboDMDNetwork:
         student_down_init: str = "kaiming",
         fake_down_init: str = "kaiming",
         fake_tau_banks: int = 1,
+        train_adaln: bool = False,
+        fake_adaln: bool | None = None,
         gan_feature_indices: set[int] | None = None,
         gan_disc_hidden: int | None = None,
     ) -> None:
         self.unet = unet
         self.student_rank = int(student_rank)
         self.fake_rank = int(fake_rank)
+        # Target the t-conditioned AdaLN modulation up-projections
+        # (``adaln_up_{branch}``) in addition to the default attn+MLP set. adaln
+        # is the largest mover in the official turbo delta (adaln.md), so the
+        # student gets the modulation-remap lever few-step distillation needs;
+        # the fake/critic mirrors it so its score estimate spans the same
+        # subspace. Both student and fake carry the extra 84 modules (3 branches
+        # × 28 blocks). include_patterns beats the factory's default exclude of
+        # ``adaln_up_`` (networks/lora_anima/config.py::_DEFAULT_EXCLUDE). The
+        # saved student is renamed to the ComfyUI adaln layout in save_student.
+        # ``fake_adaln`` (default: mirror ``train_adaln``) lets a VRAM-tight run
+        # drop the critic's 84 adaln modules — the fake's params+grads+AdamW
+        # states are pure overhead at save time (~0.8 GB at rank 96), at the
+        # cost of a score estimate blind to the student's adaln subspace
+        # (unbenched trade — adaln.md). Warm start tolerates the narrower
+        # module set (file keys without a module are skipped).
+        self.train_adaln = bool(train_adaln)
+        self.fake_adaln = self.train_adaln if fake_adaln is None else bool(fake_adaln)
         # τ-split critic (turbo_tau_split_critic Phase 1): 2 = a second fake
         # stack (`fake_hi`) owning the high-τ band. Which bank answers/trains is
         # the CALLER's choice via set_fake_bank (the boundary lives in the loop
@@ -370,11 +404,14 @@ class TurboDMDNetwork:
         # no-op in the factory (fp32-bottleneck path removed 2026-06-10).
         # step_expert_K rides **kwargs; >1 flips resolve_network_spec to
         # StepExpertLoRAModule for the student only (the fake never sees it).
+        _adaln_include = [".*adaln_up_.*"] if self.train_adaln else None
         _student_kwargs: dict = {}
         if self.student_step_expert_K > 1:
             _student_kwargs["step_expert_K"] = self.student_step_expert_K
         if self.student_down_init != "kaiming":
             _student_kwargs["down_init"] = self.student_down_init
+        if _adaln_include is not None:
+            _student_kwargs["include_patterns"] = _adaln_include
         self.student: LoRANetwork = create_network(
             multiplier=1.0,
             network_dim=self.student_rank,
@@ -391,6 +428,8 @@ class TurboDMDNetwork:
         _fake_kwargs: dict = {}
         if self.fake_down_init != "kaiming":
             _fake_kwargs["down_init"] = self.fake_down_init
+        if self.fake_adaln:
+            _fake_kwargs["include_patterns"] = [".*adaln_up_.*"]
 
         def _make_fake() -> LoRANetwork:
             return create_network(
@@ -658,7 +697,48 @@ class TurboDMDNetwork:
         # (training-only buffers like `_timestep_mask` are already persistent=False
         # so they never reach the state dict).
         self.student.save_weights(file, dtype, metadata)
+        if self.train_adaln:
+            self._relayout_saved_adaln_to_comfy(file)
         logger.info(f"saved student LoRA → {file}")
+
+    @staticmethod
+    def _relayout_saved_adaln_to_comfy(file: str) -> None:
+        """Rewrite a just-saved student so its adaln LoRA keys use the ComfyUI
+        state-dict layout (``adaln_modulation_{br}_2``) instead of the in-repo
+        runtime names (``adaln_up_{br}``) — ComfyUI's generic key map only
+        recognizes the former (adaln.md §Key-naming contract). The attn/MLP keys
+        already ship in the defused split layout ComfyUI expects, so only the 84
+        adaln keys move. The in-repo loader renames them back on load
+        (``create_network_from_weights`` → ``relayout_adaln_comfy_to_runtime``),
+        so the one file round-trips both ecosystems. Hashes are recomputed since
+        the key set changed.
+        """
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        from library.training.hashing import precalculate_safetensors_hashes
+        from networks.lora_utils import relayout_adaln_runtime_to_comfy
+
+        with safe_open(file, framework="pt") as f:
+            meta = dict(f.metadata() or {})
+            sd = {k: f.get_tensor(k) for k in f.keys()}
+        renamed = relayout_adaln_runtime_to_comfy(sd)
+        if renamed.keys() == sd.keys():
+            return  # no runtime adaln keys present — nothing to relayout
+        meta.pop("sshs_model_hash", None)
+        meta.pop("sshs_legacy_hash", None)
+        model_hash, legacy_hash = precalculate_safetensors_hashes(renamed, meta)
+        meta["sshs_model_hash"] = model_hash
+        meta["sshs_legacy_hash"] = legacy_hash
+        meta["ss_adaln_layout"] = "comfy"
+        save_file(renamed, file, meta)
+        n_adaln = sum(
+            1 for k in renamed if "adaln_modulation_" in k and k.endswith(".alpha")
+        )
+        logger.info(
+            f"relaid {n_adaln} adaln modules to the ComfyUI layout → {file} "
+            "(loads natively in ComfyUI; in-repo loader renames back on load)"
+        )
 
     def _save_student_step_expert(
         self,

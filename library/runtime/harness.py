@@ -447,7 +447,11 @@ def isolate_compile_cache(signature: str) -> str:
     re-deposits default-range entries between training runs. Instead, point
     ``TORCHINDUCTOR_CACHE_DIR`` at a per-signature subdir of the original cache
     root — every entry inside was compiled under the SAME seq bounds, so guard
-    replay is always consistent. Same-signature reruns keep their warm cache
+    replay is always consistent. (Caveat: inductor can also record HINT-derived
+    guards narrower than the seq bounds — e.g. mix-order-reduction fusion's
+    ``Ge(seq, 4096)`` — which poison even same-signature replay. Known sources
+    are disabled at the ``compile_blocks`` chokepoint when dynamic-seq marks are
+    active; see the ``mix_order_reduction`` kill there.) Same-signature reruns keep their warm cache
     (and unlike the wipe, switching tier sets back and forth no longer
     re-compiles from scratch each time). Inference/bench keep the default dir.
 

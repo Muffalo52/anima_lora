@@ -31,6 +31,7 @@ from library.anima.uncond import (
 )
 from library.runtime.dynamo import pin_dynamo_limit as _pin_dynamo_limit
 from library.runtime.harness import (
+    _apply_partitioner_tuning,
     compile_dit_blocks,
     compile_signature,
     enable_training_grad_ckpt,
@@ -284,6 +285,8 @@ def main():
         student_down_init=cfg.student_down_init,
         fake_down_init=cfg.fake_down_init,
         fake_tau_banks=cfg.fake_tau_banks,
+        train_adaln=cfg.train_adaln,
+        fake_adaln=cfg.fake_adaln,
         gan_feature_indices=gan_indices,
         gan_disc_hidden=cfg.gan_disc_hidden if cfg.gan_disc_hidden > 0 else None,
     )
@@ -386,6 +389,16 @@ def main():
         logger.info(
             "activation_memory_budget ignored: incompatible with grad_ckpt "
             "(and redundant under it)"
+        )
+    # Partitioner default-partition tuning (mirrors train.py's partitioner_*
+    # args; the helper owns the grad_ckpt gate + logging). Applied before
+    # compile_dit_blocks for the same reason as the budget.
+    if cfg.torch_compile:
+        _apply_partitioner_tuning(
+            recompute_views=cfg.partitioner_recompute_views,
+            aggressive_recomputation=cfg.partitioner_aggressive_recomputation,
+            grad_ckpt=cfg.grad_ckpt,
+            logger=logger,
         )
     # Isolate the persistent compile caches per compile signature: entries from
     # runs under different seq-range bounds otherwise poison this run's wider
@@ -1286,6 +1299,10 @@ def main():
                 "ss_turbo_gan_weight_gen": str(cfg.gan_loss_weight_gen),
                 "ss_turbo_f_div": cfg.f_div,
             }
+            if cfg.train_adaln:
+                # The student targets adaln_up_{branch}; save_student ships the
+                # adaln keys in the ComfyUI layout (adaln.md).
+                metadata["ss_turbo_train_adaln"] = "1"
             if cfg.student_init_weights:
                 # Provenance only — the warm start distills to a normal LoRA.
                 metadata["ss_turbo_student_init_weights"] = os.path.basename(

@@ -351,6 +351,24 @@ def create_network_from_weights(
     # Strip torch.compile '_orig_mod_' from old checkpoint keys
     weights_sd = LoRANetwork._strip_orig_mod_keys(weights_sd)
 
+    # ComfyUI-native adaln LoRAs (e.g. a turbo student trained with train_adaln)
+    # carry adaln keys in the comfy layout (adaln_modulation_{br}_2). Rename them
+    # to the in-repo runtime module names (adaln_up_{br}) so create_modules
+    # attaches them to the DiT's adaln Linears. Presence-gated → no effect on
+    # adaln-less checkpoints. The load path applies no exclude regex, so the
+    # renamed modules build directly from modules_dim. See adaln.md.
+    from networks.lora_utils import (
+        has_comfy_adaln_keys,
+        relayout_adaln_comfy_to_runtime,
+    )
+
+    if has_comfy_adaln_keys(weights_sd):
+        weights_sd = relayout_adaln_comfy_to_runtime(weights_sd)
+        logger.info(
+            "Renamed ComfyUI-layout adaln LoRA keys to in-repo runtime names "
+            "(adaln_modulation_{br}_2 → adaln_up_{br}) for loading."
+        )
+
     # MoE files: stack per-expert ups (and downs, for StackedExperts) and fuse
     # split q/k/v first so the attention refuser + detection loop see fused
     # runtime keys. Chimera dual-A files have their own per-pool ups

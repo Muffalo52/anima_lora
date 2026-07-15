@@ -484,6 +484,22 @@ class TurboConfig:
     # down_init="weight_svd" (those parameterize or seed what this overwrites).
     student_init_weights: str
     fake_init_weights: str
+    # Target the AdaLN modulation up-projections (adaln_up_{branch}) on both the
+    # student and fake. The student's shipped LoRA is saved in the ComfyUI adaln
+    # layout so it loads natively there and in-repo (adaln.md).
+    train_adaln: bool
+    # Mirror adaln targets on the fake/critic (default: train_adaln). false =
+    # VRAM lever — drops the critic's 84 adaln modules (~0.8 GB of fp32
+    # params+grads+AdamW states at rank 96) at the cost of a score estimate
+    # blind to the student's adaln subspace (unbenched trade).
+    fake_adaln: bool
+    # AOT min-cut partitioner tuning (mirrors train.py's partitioner_* args):
+    # change what the default partition is willing to recompute, on top of
+    # activation_memory_budget. Ignored under --grad_ckpt (same gate as the
+    # budget). aggressive_recomputation is THE settled memory lever
+    # ([[project_partitioner_flags_phase0]]).
+    partitioner_recompute_views: bool
+    partitioner_aggressive_recomputation: bool
 
     # Masked loss
     use_masked_loss: bool
@@ -710,6 +726,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
 
     student_init_weights = str(_flatten(cfg, "network.student_init_weights", ""))
     fake_init_weights = str(_flatten(cfg, "network.fake_init_weights", ""))
+    train_adaln = bool(_flatten(cfg, "network.train_adaln", False))
+    fake_adaln = bool(_flatten(cfg, "network.fake_adaln", train_adaln))
     for name, path, conflicts in (
         (
             "student",
@@ -1021,6 +1039,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         fake_down_init=fake_down_init,
         student_init_weights=student_init_weights,
         fake_init_weights=fake_init_weights,
+        train_adaln=train_adaln,
+        fake_adaln=fake_adaln,
         use_masked_loss=use_masked_loss,
         mask_dir=mask_dir,
         k_anchor=k_anchor,
@@ -1076,6 +1096,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         dynamo_recompile_limit=int(_flatten(cfg, "dynamo_recompile_limit", 64)),
         activation_memory_budget=float(
             _pick(args.activation_memory_budget, cfg, "activation_memory_budget", 1.0)
+        ),
+        partitioner_recompute_views=bool(
+            _flatten(cfg, "partitioner_recompute_views", False)
+        ),
+        partitioner_aggressive_recomputation=bool(
+            _flatten(cfg, "partitioner_aggressive_recomputation", False)
         ),
     )
 

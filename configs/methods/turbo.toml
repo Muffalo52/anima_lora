@@ -25,6 +25,11 @@ use_masked_loss = true
 channel_scaling_alpha = 0.0 # channel scaling alpha harmed training
 compile_dynamic_seq = true
 activation_memory_budget = 0.99
+# partitioner_aggressive_recomputation = true  # further VRAM lever on top of the
+#                                              # budget (the settled one — lets the
+#                                              # default partition recompute banned
+#                                              # op classes). Ignored under --grad_ckpt.
+# partitioner_recompute_views = true           # stop saving view ops (pins bases alive)
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
@@ -37,6 +42,18 @@ student_alpha = 212
 fake_rank = 96
 fake_alpha = 212
 attn_mode = "flash"
+# Train the AdaLN modulation up-projections (adaln_up_{self_attn,cross_attn,mlp})
+# alongside attn+MLP — the largest movers in the official turbo delta, and the
+# σ→behavior remap few-step distillation actually changes (adaln.md). The fake/
+# critic mirrors the targets. The shipped student is saved in the ComfyUI adaln
+# layout (adaln_modulation_{br}_2), so it loads natively in ComfyUI AND in-repo
+# (the loader renames back on load). +84 modules on student and fake.
+# Set false for the no-adaln A/B — rank the two by the rendered 4-step grid.
+train_adaln = true
+# fake_adaln = false     # VRAM lever (default mirrors train_adaln): drop the
+#                        # critic's 84 adaln modules (~0.8 GB params+grads+AdamW
+#                        # at rank 96); the score estimate goes blind to the
+#                        # student's adaln subspace (unbenched trade).
 # τ-split critic (docs/proposal/turbo_tau_split_critic.md, Phase-0 gate FIRED
 # 2026-07-14 on the superturbo_B bundle): 2 = dual fake LoRAs, bank 0 owning
 # τ < fake_tau_boundary, bank 1 the rest. Both the fake updates AND the DMD
