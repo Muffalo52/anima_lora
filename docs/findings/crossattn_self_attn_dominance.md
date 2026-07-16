@@ -174,6 +174,80 @@ by-eye legibility — which Anima has no quality reward to anchor
 "confirms the text wall (EN + KO), via re-routing + the category-vs-content gap", not
 as a rendering-quality number.
 
+## Result 5 — a glyph to render extends text drive into the feature-commit band; mass couldn't see it, the velocity delta can
+
+Result 4 left "is there a glyph proxy here at all?" open on the *mass* axis. There is
+one on the **velocity** axis. Same production CfgDelta probe as Result 1's companion
+(`ANIMA_CFG_DELTA_LOG`), base DiT, 14 real captions × 2 seeds × 5 arms, 1024/28/cfg 4,
+paired by (caption, seed). Probe: `bench/frontload_text_boost/glyph_delta_probe.py`,
+run `results/20260716-2207-glyph-delta/`.
+
+Each arm appends a clause to the same real caption. A vs C alone confounds three
+things — a clause was appended, it is longer, it carries a glyph — so the controls
+split them (T5 tokens of the clause in parens; the cond rows are T5 positions):
+
+| arm | appended clause | tok |
+|---|---|---|
+| `A_bare` | — | 0 |
+| `B_category` | `, there is a speech bubble` | 6 |
+| `C_glyph` | `, … that reads "say hello from anima_lora"` | 20 |
+| `D_glyph_id` | `, … that reads "But it was fast"` | 15 |
+| `E_nonglyph` | `, … that is round and white and slightly tilted` | 16 |
+
+**Read the PAIRED delta, never the per-arm means.** Cross-prompt std of `ratio` is
+~0.078 at σ=1 and swamps a ~0.004 effect — which is exactly why the original probe
+concluded "prompts are near-indistinguishable in drive below σ≈0.7". That was a
+*cross-prompt* read; paired, the std drops to ~0.0025 and the effect resolves. Read
+`rel_dDelta` (the numerator ‖v_cond − v_uncond‖), not `ratio`: a ratio move could
+come from the ‖v_cond‖ denominator instead. It doesn't here — `rel_dVcond` stays
+within ±0.6% on every pair below.
+
+Band = σ ∈ [0.5, 0.8], the feature-commit band (n=28 cells):
+
+| pair | what it isolates | rel Δ‖delta‖ | n_pos |
+|---|---|---|---|
+| `B − A` | a category clause at all | +1.71% | 15/28 — **null** |
+| `E − B` | pure token count (+10 tok, no glyph) | −1.18% | 13/28 — **null** |
+| **`D − E`** | **length-matched glyph vs non-glyph (15 vs 16 tok)** | **+6.77%** | **25/28** |
+| `D − B` | plain-word glyph | +5.23% | 26/28 |
+| `C − B` | OOD glyph | +8.55% | 25/28 |
+| `C − D` | OOD token axis (both glyphs) | +3.14% | 22/28 |
+
+- **The front-loaded peak is untouched.** At σ=1.0 every arm sits at ratio
+  0.275–0.280, min cos 0.955–0.957. A glyph changes nothing at the top.
+- **A new mid-σ bump appears, σ≈0.8→0.45, peaking at σ≈0.66** (ratio: bare 0.0352 →
+  `D` 0.0380 → `C` 0.0393). `C − A` is 28/28 sign-consistent at σ=0.66 and 0.625.
+- **It is not length.** `E` adds 10 tokens over `B` and produces a coin flip
+  (−1.18%, 13/28). The `D − E` contrast is therefore load-bearing: at matched
+  length, only the glyph arm drives. Note `E` is a *conservative* control — "round
+  and white and slightly tilted" carries visual-attribute demand of its own — so
+  +6.77% understates the glyph effect.
+- **It is glyph-generic, not `anima_lora`-specific.** `D` reproduces the bump with
+  four plain English words. The effect decomposes near-additively:
+  `C − B` (+8.55%) ≈ `D − B` (+5.23%, glyph-generic) + `C − D` (+3.14%, OOD). The
+  OOD term is *also* not length (`E − B` is null at +10 tok while `C − D` is +3.14%
+  at +5 tok) — `anima_lora` shredding into `▁/anim/a/_/lor/a` demands more drive than
+  in-distribution words do.
+- **Still rescale, not rotate.** Band cos is 0.9991–0.9992 across every arm. The
+  glyph makes text drive *harder* in the band; it does not rotate the velocity away
+  from the base prior, so CFG's linear extrapolation still spans it. The "rotational
+  headroom lives only in the first 2–3 steps" verdict stands — a bigger collinear
+  push is what CFG already does.
+
+**Why this matters for the localized lever.** `bench/frontload_text_boost`'s Phase-1
+verdict gated the *localized feature-commit-band* boost on finding "a regime that
+demonstrably DROPS small features". Glyphs are that regime, and this says the model
+is already spending extra drive there — the deficit is not that text goes quiet in
+the band. Combined with the collinearity, that argues the missing piece is upstream
+(the early low-freq plan never encodes the glyph), consistent with the Interpretation
+below — not something a band-localized gain multiplies into existence.
+
+**Caveat — the probe is direction-blind *between arms*.** It records ‖v_cond −
+v_uncond‖ and cos(v_cond, v_uncond), both reads against *uncond*, never
+cos(Δ_armX, Δ_armY). So "`B − A` is null" means the category clause doesn't change
+how *hard* text drives — obviously it changes *where* (a bubble appears). Comparing
+arm directions needs the delta vectors, not their norms.
+
 ## Interpretation — coarse-to-fine division of labor
 
 Flow-matching denoising is coarse→fine in frequency: high σ sets low-frequency
@@ -182,7 +256,11 @@ structure (layout, identity, color blocks), low σ fills high-frequency detail
 
 - **Cross-attn writes the low-frequency plan early.** Text influence (velocity
   delta, re-routing rate, and contribution share) all peak at high σ and fade. By
-  mid-σ the cond/uncond velocities are near-parallel — text only rescales.
+  mid-σ the cond/uncond velocities are near-parallel — text only rescales. Result 5
+  refines the *magnitude* of that rescale without touching the direction: it is
+  content-dependent, and a glyph to render buys ~+7% of extra drive through the
+  feature-commit band (cos still 0.999). "Text goes quiet at mid-σ" is a
+  cross-prompt average; paired, prompts are distinguishable there.
 - **Self-attn + MLP elaborate the plan into high-frequency detail late.** Their
   contribution grows as detail forms; a late-emerging detail's *cause* was committed
   early by text, but its low-σ *velocity* is computed by self/MLP. Emergence-time ≠
@@ -228,6 +306,13 @@ PYTHONPATH=. uv run python _archive/bench/cross_attn_drive/attn_evolution.py --p
   --captions 8 --seeds 2 --label glyph_ko_en
 # NB read mass PER TOKEN (divide by tag token count); flat-high mass + low re-route
 # rate = attention sink, not rendering fidelity (see Result 4 context-flip).
+
+# Result 5 — glyph vs the CFG-delta. This one is LIVE (it feeds that bench's open
+# localized-boost gate) and rides the production CfgDelta probe, no hooks:
+uv run python bench/frontload_text_boost/glyph_delta_probe.py --label glyph-delta
+uv run python bench/frontload_text_boost/glyph_delta_probe.py --check-tokens   # asserts D/E stay length-matched
+# Re-analyze an existing log without regenerating (~28 min of GPU otherwise):
+uv run python bench/frontload_text_boost/glyph_delta_probe.py --log <cfg_delta.json>
 ```
 
 Results: `_archive/bench/cross_attn_drive/results/*-contrib_{base,sincos}/` (+ `attn_contribution.png`),

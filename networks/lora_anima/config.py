@@ -164,7 +164,9 @@ def _parse_kv_pairs(kv_pair_str: str, *, is_int: bool) -> Dict[str, Any]:
 
 
 # Default exclude regex appended to user-supplied excludes in `from_kwargs`.
-# Skips embedders / norms / modulation projectors that are never adapted.
+# Skips embedders / norms / modulation projectors. NB `adaln_up_` is rescued
+# back into the target set by `train_adaln` (on by default in base.toml) via
+# include_patterns, so it is excluded here but adapted on a stock run.
 _DEFAULT_EXCLUDE = (
     r".*(_modulation|_norm|_embedder|final_layer|adaln_fused_down|adaln_up_|"
     r"pooled_text_proj).*"

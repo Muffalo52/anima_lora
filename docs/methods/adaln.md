@@ -1,8 +1,12 @@
 # AdaLN LoRA — training → ComfyUI-compatible shipping
 
-Status: **extraction path shipped & verified; training path plumbed but unbenched.**
-Any train-side default change is bench-gated (Tier 1.5/2 per `../../CONTRIBUTING.md`) — this
-doc is the map, not the verdict.
+Status: **extraction path shipped & verified; training path plumbed and DEFAULT-ON
+(`train_adaln = true` in `configs/base.toml`, 2026-07-16) but still unbenched.**
+The flip aligns us with diffusion-pipe rather than resting on a Phase-0 result — no
+bench script or invariant test covers the train-side default for the LoRA family, so
+the CONTRIBUTING Tier 1.5 gate is outstanding, not satisfied. Treat the default as
+provisional: if you are A/B-ing anything else, pin `train_adaln` explicitly on both
+arms rather than letting it ride.
 
 ## What adaln is in this architecture
 
@@ -37,7 +41,11 @@ detection does the same (`comfy/model_detection.py:801`).
 |---|---|---|
 | **diffusion-pipe** (Anima author's trainer) | **YES** — targets *every* `nn.Linear` under `Block`/`TransformerBlock`, no exclusions and no config filter | `models/base.py::configure_adapter` (~line 219) |
 | **sd-scripts** (official kohya, upstream Anima support) | **NO by default** — appends `.*(_modulation\|_norm\|_embedder\|final_layer).*`; opt-in via `include_patterns` (include beats exclude, same mechanism as ours) | `sd-scripts/networks/lora_anima.py:254` |
-| **this repo** | **NO** — `_DEFAULT_EXCLUDE` blocks `adaln_up_` | `networks/lora_anima/config.py:168` |
+| **this repo** | **YES since 2026-07-16** — `_DEFAULT_EXCLUDE` still blocks `adaln_up_`, but `train_adaln = true` in `configs/base.toml` rescues it via `include_patterns` on every LoRA-family method | `networks/lora_anima/config.py` (`_DEFAULT_EXCLUDE`, `from_kwargs`) |
+
+We were the outlier; we no longer are. Both other trainers reach adaln by default
+(diffusion-pipe unconditionally, sd-scripts via the same include-beats-exclude
+opt-in we now enable), so a stock run here is closer to the reference behaviour.
 
 Our exclusion is **inherited verbatim from kohya's `lora_anima.py`** (ours extends
 the same regex with the runtime rename names) — a conservative
@@ -112,16 +120,36 @@ Delta facts (official turbo vs base) that motivated this:
 - Adding adaln lifted mean captured energy **0.803 → 0.860** vs the adaln-less
   r96 ASVD file (min stays 0.423, a non-adaln module).
 
-## Path 2 — training (PLUMBED, NOT BENCHED)
+## Path 2 — training (DEFAULT-ON, NOT BENCHED)
 
 No new machinery needed to *train* adaln: `include_patterns` beats the default
 exclude (`networks/lora_anima/network.py` ~line 245: `if excluded and not
 included: continue`), and runtime `adaln_up_{br}` is a plain `nn.Linear`.
 
 ```toml
-# method TOML
+# method TOML — the raw primitive; `train_adaln = true` is the sugar for it
 include_patterns = [".*adaln_up_.*"]
 ```
+
+### The `train_adaln` surface (LoRA family, default-on)
+
+`train_adaln` / `adaln_rank` / `adaln_alpha` are read by
+`LoRANetworkCfg.from_kwargs` (`networks/lora_anima/config.py`) and desugar to
+exactly the primitives above: `include_patterns += [".*adaln_up_.*"]`, plus
+`network_reg_dims` / `network_reg_alphas` entries on the same pattern when a rank
+or alpha is given. Rank/alpha default to the network's. `adaln_rank` /
+`adaln_alpha` without `train_adaln` raise.
+
+They reach the network as **top-level TOML keys**, not `network_args` — the
+allowlist is AST-derived from the `kwargs.get()` reads (`networks/__init__.py::
+_derive_network_kwargs`) and `train.py::resolve_network_kwargs` forwards them. So
+`configs/base.toml`'s `train_adaln = true` applies to every LoRA-family method
+(lora / chimera / soup / byg) with no per-method opt-in. Verify a merge with
+`make print-config METHOD=<m> PRESET=<p>`.
+
+**Inert on the frozen-DiT methods.** `soft_tokens` and `easycontrol` use their own
+`network_module`s; they take `**kwargs` and ignore the adaln keys, so the base
+default is silently a no-op there rather than an error.
 
 Turbo knobs (2026-07-15): `network.train_adaln` wires the include on student+fake;
 `network.fake_adaln = false` builds an adaln-less critic (VRAM lever);

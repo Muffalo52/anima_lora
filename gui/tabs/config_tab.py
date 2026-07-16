@@ -104,6 +104,10 @@ _FIELD_ORDER = {
     # Keep repa_target_dog pinned directly under the use_repa switch it modifies.
     "use_repa": 90,
     "repa_target_dog": 91,
+    # Same for the adaln rank/alpha overrides under the train_adaln switch.
+    "train_adaln": 92,
+    "adaln_rank": 93,
+    "adaln_alpha": 94,
     "sample_prompts": 10,
     "sample_every_n_epochs": 11,
     "sample_at_first": 12,

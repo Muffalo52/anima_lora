@@ -77,9 +77,16 @@ persistent_data_loader_workers= true
 use_cmmd = false
 channel_scaling_alpha = 0.5
 gradient_accumulation_steps=1
+# Adapt the per-block adaln_up_{branch} modulation projectors too. They sit in
+# the network's _DEFAULT_EXCLUDE; this rescues them via include_patterns (an
+# exclude-override, not a whitelist — the default attn+MLP set is untouched).
+# Matches diffusion-pipe (the Anima author's trainer), which targets every
+# Linear under Block. Rank/alpha default to the network's; adaln_rank /
+# adaln_alpha override (in-dim is 256, so r32 already keeps ~98% of the ΔW
+# energy). Inert on the frozen-DiT methods (soft_tokens / easycontrol).
+train_adaln = true
 
 use_repa = false
-train_adaln = false
 
 [general]
 [[datasets]]

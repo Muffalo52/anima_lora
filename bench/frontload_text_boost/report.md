@@ -345,3 +345,37 @@ so the mean drops while peaks brighten; judge tone by eyeball. (2) compiled
 renders are NOT bit-stable across processes (inductor autotune + er_sde
 amplification) — same-seed cross-run comparisons are family-level, not
 pixel-matched; within-run columns are exact.
+
+---
+
+# Glyph × CFG-delta measurement probe (2026-07-16, run `results/20260716-2207-glyph-delta/`)
+
+Script: `glyph_delta_probe.py`. Not a boost arm — a **measurement** feeding this
+bench's one remaining open gate. Phase-1 left the *localized feature-commit-band*
+boost gated on finding "a regime that demonstrably DROPS small features"; rendered
+glyphs are that regime, so the prior question is whether the model puts any extra
+text drive into the band when a glyph is present.
+
+**It does — and the effect is glyph-specific, not a length artifact.** Base DiT,
+14 real captions × 2 seeds × 5 arms, paired, production `ANIMA_CFG_DELTA_LOG`
+probe (no hooks). Band σ∈[0.5,0.8], rel Δ‖v_cond − v_uncond‖:
+
+| pair | isolates | rel Δ | n_pos |
+|---|---|---|---|
+| `E_nonglyph − B_category` | +10 tok, no glyph | −1.18% | 13/28 — null |
+| **`D_glyph_id − E_nonglyph`** | **glyph vs not, 15 vs 16 tok** | **+6.77%** | **25/28** |
+| `C_glyph − B_category` | OOD glyph | +8.55% | 25/28 |
+| `C_glyph − D_glyph_id` | OOD token axis | +3.14% | 22/28 |
+
+The high-σ peak is untouched (all arms ratio 0.275–0.280 at σ=1); the bump is new,
+σ≈0.8→0.45, peaking σ≈0.66. Band cos stays 0.9991–0.9992 — **harder, not rotated**,
+so CFG already spans it.
+
+**Consequence for the gate:** text does *not* go quiet in the band on glyph prompts —
+the model is already spending extra (collinear) drive there. That argues the glyph
+deficit is upstream (the early low-freq plan never encodes it), not something a
+band-localized gain multiplies into existence. Weakens, not strengthens, the case for
+building the localized arm.
+
+Full read + the caveats (probe is direction-blind *between* arms; `E` is a
+conservative control): `docs/findings/crossattn_self_attn_dominance.md` Result 5.

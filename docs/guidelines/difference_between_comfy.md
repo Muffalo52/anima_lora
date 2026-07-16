@@ -66,6 +66,12 @@ _DEFAULT_EXCLUDE = (
 )
 ```
 
+Read that regex as the *default* target set, not the final one: since 2026-07-16
+`train_adaln = true` in `configs/base.toml` rescues `adaln_up_` back out of it via
+`include_patterns` on every LoRA-family run (see
+[`../methods/adaln.md`](../methods/adaln.md)). `pooled_text_proj` — the subject of
+this section — has no such escape hatch and stays untrained.
+
 **comfy** — `grep -rn pooled_text_proj comfy/` returns no matches under `comfy/comfy/ldm/`. The vanilla ComfyUI forward at `comfy/comfy/ldm/cosmos/predict2.py:860-861` computes `t_embedding_norm` and passes directly to the block stack with no intermediate pooled-text addition:
 
 ```python

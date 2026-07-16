@@ -215,6 +215,9 @@ _GROUPS = {
         "sigma_bucket_boundaries",
         "use_repa",
         "repa_target_dog",
+        "train_adaln",
+        "adaln_rank",
+        "adaln_alpha",
         "network_train_unet_only",
     },
     "Paths": {

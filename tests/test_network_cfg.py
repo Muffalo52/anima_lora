@@ -299,6 +299,66 @@ def test_reg_dims_and_reg_lrs_kv_pairs():
     assert cfg.reg_lrs == {"blocks\\.0.*": 1e-4, "blocks\\.1.*": 2e-4}
 
 
+def test_train_adaln_desugars_to_include_pattern():
+    """``train_adaln`` is an exclude-override, not a whitelist: it appends the
+    adaln include and leaves the default attn+MLP target set alone."""
+    cfg = LoRANetworkCfg.from_kwargs(
+        {"train_adaln": "true"},
+        network_dim=4,
+        network_alpha=1.0,
+        neuron_dropout=None,
+        module_class=LoRAModule,
+    )
+    assert ".*adaln_up_.*" in cfg.include_patterns
+    # the default exclude still lists adaln_up_ — the include is what beats it
+    assert any("adaln_up_" in p for p in cfg.exclude_patterns)
+    # rank/alpha inherit the network's unless overridden
+    assert not cfg.reg_dims
+    assert not cfg.reg_alphas
+
+
+def test_train_adaln_off_leaves_include_patterns_untouched():
+    cfg = LoRANetworkCfg.from_kwargs(
+        {"include_patterns": "['baz.*']"},
+        network_dim=4,
+        network_alpha=1.0,
+        neuron_dropout=None,
+        module_class=LoRAModule,
+    )
+    assert cfg.include_patterns == ["baz.*"]
+
+
+def test_adaln_rank_and_alpha_ride_the_reg_overrides():
+    """``adaln_rank`` / ``adaln_alpha`` desugar onto the same pattern via
+    reg_dims / reg_alphas, merging with any user-supplied entries."""
+    cfg = LoRANetworkCfg.from_kwargs(
+        {
+            "train_adaln": "true",
+            "adaln_rank": "32",
+            "adaln_alpha": "128",
+            "network_reg_dims": "blocks\\.0.*=8",
+        },
+        network_dim=4,
+        network_alpha=1.0,
+        neuron_dropout=None,
+        module_class=LoRAModule,
+    )
+    assert cfg.reg_dims == {"blocks\\.0.*": 8, ".*adaln_up_.*": 32}
+    assert cfg.reg_alphas == {".*adaln_up_.*": 128.0}
+
+
+@pytest.mark.parametrize("key, value", [("adaln_rank", "32"), ("adaln_alpha", "128")])
+def test_adaln_rank_alpha_require_train_adaln(key, value):
+    with pytest.raises(ValueError, match="train_adaln"):
+        LoRANetworkCfg.from_kwargs(
+            {key: value},
+            network_dim=4,
+            network_alpha=1.0,
+            neuron_dropout=None,
+            module_class=LoRAModule,
+        )
+
+
 def _moe_stamps(router_source: str = "sigma") -> dict:
     """Three-axis stamps mimicking ``LoRANetwork.save_weights`` for a Hydra
     checkpoint. plan2 task #6 retired the legacy ``ss_use_hydra`` /
