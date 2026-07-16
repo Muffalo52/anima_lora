@@ -11,8 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-# output_name = "anima_turbo_T2"
-output_name = "anima_superturbo_C"
+output_name = "anima_turbo_U"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -31,92 +30,30 @@ activation_memory_budget = 0.99
 #                                              # op classes). Ignored under --grad_ckpt.
 # partitioner_recompute_views = true           # stop saving view ops (pins bases alive)
 
-# Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
-# "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
-# student, which dpdmd structurally can't produce).
 base_loss = "dpdmd"
 
 [network]
-student_rank = 96
-student_alpha = 212
-fake_rank = 96
-fake_alpha = 212
+student_rank = 80
+student_alpha = 192
+fake_rank = 80
+fake_alpha = 192
 attn_mode = "flash"
-# Train the AdaLN modulation up-projections (adaln_up_{self_attn,cross_attn,mlp})
-# alongside attn+MLP — the largest movers in the official turbo delta, and the
-# σ→behavior remap few-step distillation actually changes (adaln.md). The fake/
-# critic mirrors the targets. The shipped student is saved in the ComfyUI adaln
-# layout (adaln_modulation_{br}_2), so it loads natively in ComfyUI AND in-repo
-# (the loader renames back on load). +84 modules on student and fake.
-# Set false for the no-adaln A/B — rank the two by the rendered 4-step grid.
+
 train_adaln = true
-# fake_adaln = false     # VRAM lever (default mirrors train_adaln): drop the
-#                        # critic's 84 adaln modules (~0.8 GB params+grads+AdamW
-#                        # at rank 96); the score estimate goes blind to the
-#                        # student's adaln subspace (unbenched trade).
-# adaln_rank = 64        # build the adaln modules at their own rank (0/absent =
-#                        # network rank). adaln in-dim is 256 — r64 keeps ~99.5%
-#                        # of the r96 ΔW energy, so lower rank there is ~free
-#                        # VRAM. Requires train_adaln.
-# adaln_alpha = 141.3    # their own alpha (0/absent = network alpha, which runs
-#                        # rank/adaln_rank hotter when adaln_rank is set).
-#                        # Scale-preserving: student_alpha × adaln_rank/rank
-#                        # (212 × 64/96 here). Warm start folds scale either way.
-# τ-split critic (docs/proposal/turbo_tau_split_critic.md, Phase-0 gate FIRED
-# 2026-07-14 on the superturbo_B bundle): 2 = dual fake LoRAs, bank 0 owning
-# τ < fake_tau_boundary, bank 1 the rest. Both the fake updates AND the DMD
-# queries route by the drawn τ, so total critic compute is unchanged — the
-# existing updates are partitioned, not added. Memory: +1 fake LoRA's
-# params/grads/Adam moments (read `n_fake` from the startup log); one extra
-# dynamo graph specialization per block. Requires batch_size = 1. With banks=2
-# consider fake_warmup_steps 200 → 400 (each bank gets ~half the head-start).
-# 1 = the second stack is never constructed → byte-identical shipped loop.
+# fake_adaln = false
+adaln_rank = 48
+adaln_alpha = 128
 fake_tau_banks = 1
 fake_tau_boundary = 0.5
-# Per-step expert: split the student into K = student_steps up-heads off a
-# shared down-proj, head k serving denoise step k. Removes the diversity↔quality
-# tug-of-war (step 0 vs steps 1..N) in shared up-weights. Default off — the
-# single-head student stays the shipped path. NOTE: output is NOT a plain LoRA
-# (kept-live only; `make merge` refuses it, stock ComfyUI LoRA loaders can't
-# drive per-step head selection — use AnimaTurboPerStepExpertLoader).
+
 per_step_expert = false
 
-# SVD-Down (down_init="weight_svd") — an alternative cold start for the student:
-# keeps plain LoRA's full first-step tangent but seeds lora_down from W0's top-r
-# right singular vectors (scale-matched, so it is NOT a larger step; see
-# docs/proposal/svd_down_lora_init.md). Distills to a plain mergeable LoRA exactly
-# like the default. Needs the plain LoRAModule, so it is off under per_step_expert,
-# and it is moot under the warm start below (which overwrites the seed anyway).
-# student_down_init = "weight_svd"
-# fake_down_init = "weight_svd"   # same lever on the fake/critic
-
-# Warm start — seed the stack's ΔW from a plain LoRA checkpoint, SVD-truncated
-# to the stack's rank (networks/methods/turbo_dmd.py::warm_start_plain_lora).
-# Built for the official anima_turboV10 delta (extract with
-# scripts/extract_delta_lora.py; eval + rationale: memory
-# project_official_turbo_v10_eval — official is polished but mode-collapsed, so
-# start there and let the DP-DMD diversity objective re-expand the modes).
-# Incompatible with per_step_expert / down_init="weight_svd" —
-# set student_down_init = "kaiming" when enabling. fake_init_weights (same
-# lever on the critic) usually points at the same file: at init the student IS
-# the warm-start distribution, so a matched critic starts calibrated.
-# The _asvd file is the activation-whitened extraction (--act_scales; ASVD-style
-# functional truncation) — same rank/size, strictly better capture (≡ plain r128).
-# superturbo_C: warm-start from our own from-zero NFE=4 keeper instead of the
-# official turboV10 delta. Analytic rationale (2026-07-14 subspace probe):
-# cos(S, turboV10) = 0.002 and cos(S, superturbo_B) = 0.007 — orthogonal DMD
-# solutions; 4k NFE=2 steps from the turboV10 init never rotated toward the
-# S-family mode, so the init picks the mode and this is the one discriminating
-# arm for "NFE=2 objective ceiling" vs "turboV10 mode selection".
-student_init_weights = "output/ckpt/turbo/anima_turbo_S.safetensors"
-fake_init_weights = "output/ckpt/turbo/anima_turbo_S.safetensors"
-# student_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"  # A/B/B2 init
-# fake_init_weights = "models/extracted/anima_turboV10_delta_r96_asvd.safetensors"
+student_init_weights = "output/ckpt/turbo/anima_turboV10_delta_r80_asvd.safetensors"
+fake_init_weights = "output/ckpt/turbo/anima_turboV10_delta_r80_asvd.safetensors"
 
 # DMD schedule.
 [dmd]
-student_steps = 2
-# student_steps = 4
+student_steps = 4
 teacher_cfg = 4
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
@@ -124,15 +61,8 @@ grad_step = "random"
 
 # Optimization.
 [optim]
-# student_lr = 5e-5   # T2: overshoots early — the 1k ckpt was voided, healed only by 2k
-# fake_lr = 5e-5
-student_lr = 3e-5
-fake_lr = 3e-5
-# LR shape is warmup → cosine to 0.1·lr, no longer configurable: the
-# lr_schedule="constant" knob was removed 2026-07-14 after the B (cosine) vs
-# B2 (constant) A/B — B2 never destabilized but never settled either (grad RMS
-# stayed at full magnitude → ~5-10x per-step weight displacement in the tail,
-# noise-ball) and rendered worse. The cosine tail is settling, not dead time.
+student_lr = 5e-5
+fake_lr = 5e-5
 fake_steps_per_student_step = 4
 fake_warmup_steps = 200
 weight_decay = 0.0
@@ -155,20 +85,7 @@ sigmoid_scale = 1.0
 flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
 
 # DMD2 teacher-feature GAN (FastGen idea 1; _archive/proposals/turbo_gan.md).
-#
-# Adds the missing adversarial machinery to DP-DMD (which is "DMD2 with the GAN
-# amputated"). A tiny pooled-token discriminator reads the FROZEN teacher DiT's
-# intermediate block activations — no separate network, only the disc head is new
-# trainable weight, trained on the fake/critic cadence with its own optimizer.
-# The student output stays a plain LoRA (the disc is discarded at save, like the
-# fake). weight_gen = 0 keeps the whole path OFF → byte-identical DP-DMD.
-#
-# FastGen QwenImage (the closest net to Anima) uses gan_loss_weight_gen=0.03,
-# gan_use_same_t_noise=true, feature_indices=middle, disc_lr=1e-5. Cost: +1
-# grad-bearing teacher forward in the student step + 2 no_grad teacher forwards
-# per disc step. The grad-bearing one retains ~half the DiT's block activations
-# (~3 GB) only to backprop into x_pred; `grad_ckpt` below recomputes them in
-# backward instead, so the GAN term costs ~one half-depth forward, not ~3 GB.
+
 [gan]
 weight_gen = 0.03               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
@@ -197,22 +114,7 @@ bin_num = 10
 ratio_normalization = true      # per-τ histogram normalization of r
 
 # Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1).
-#
-# Phase 0 measured that DP-DMD distillation degrades the teacher's caption
-# discriminability, concentrated exactly at the step-0 state (σ→1): at σ=1.0 a
-# quarter of anchors lose to a RANDOM caption (rank@1 0.750 vs base 0.958). This
-# term fixes it at the source — at the DP-DMD step-0 diversity anchor, k extra
-# no_grad student forwards re-run the SAME (ε, t=1) with another pool sample's
-# caption, and a bounded listwise soft-RANK loss pushes the matched caption to
-# explain the anchor (v_target) better than the mismatched ones. Grad flows
-# through the matched forward only (negatives detached); bounded by construction
-# (L→0 as the matched caption wins). Requires base_loss="dpdmd" + blocks_to_swap=0.
-# weight=0 keeps the whole path OFF → byte-identical DP-DMD (no extra forwards).
-#
-# Negatives come from a cross-step caption POOL (not the current batch), so the
-# term fires at batch_size=1. The pool holds the last `pool_size` captions (~1 MiB
-# each on GPU → pool_size MiB VRAM) and must fill to `warmup_ratio` of capacity
-# before firing (negatives = a representative shuffle, not just the last few).
+
 [softrank]
 weight = 0.0                    # λ on the soft-rank loss. 0 = off; first live value 0.05
 k = 2                           # shuffled-caption negatives per firing (chance 1/3 at k=2)

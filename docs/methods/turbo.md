@@ -300,6 +300,22 @@ the teacher anchor. The live TB scalars:
 | `x_pred_std` / `v_student_rms` | collapse → 0 or runaway up = student exploding (`v_student_rms` leads). |
 | `gan_gen_loss` / `gan_disc_loss` | softplus-hinge generator / discriminator losses (pre-weight); 0 when the GAN is off. |
 
+### Where to read them from
+
+Three surfaces, cheapest first — none of them need a TensorBoard export:
+
+- **`make run-status`** — `step N/total`, it/s, ETA, last losses, last checkpoint,
+  and whether the run is `RUNNING` / `OK` / `ERROR` / `DEAD` (no `run_end` and the
+  pid is gone). Defaults to the newest run; `RUN=<output_name>` picks one,
+  `ARGS="--list"` reports all, `ARGS="--json"` for a machine-readable digest. It
+  reads `output/logs/<output_name>.progress.jsonl` — the same structured stream
+  the GUI and daemon tail (`--no_log` disables it).
+- **The console** — the tqdm postfix on a TTY; redirected or daemon-headless, the
+  same numbers come out as a greppable `step N/total … it/s … ETA` line at
+  `log_interval` cadence (`grep '^.*step ' run.log`).
+- **`make export-logs RUN=output/logs/<run> SUMMARY=1`** — max step + last value
+  per TB tag, when you want every scalar rather than the loop's headline set.
+
 ## GAN + f-distill (FastGen levers)
 
 DP-DMD is structurally **DMD2 with the GAN amputated**. Two levers port the missing

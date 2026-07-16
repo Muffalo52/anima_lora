@@ -15,6 +15,9 @@ from scripts.distill_turbo.metrics import (
     FlushedMetrics,
     TauBinCriticLoss,
     TurboMetrics,
+    console_step_line,
+    tqdm_postfix,
+    tqdm_rate,
 )
 
 DEVICE = torch.device("cpu")
@@ -154,3 +157,47 @@ def test_reset_zeroes_then_reaccumulates():
     # Accumulators are reusable after reset.
     m.accumulate_per_step(**_step_inputs(2.0))
     assert m.flush(log_interval=1).fake == pytest.approx(2.0)
+
+
+# --- console step line (issue #2: tqdm's \r line is invisible in a redirected
+# log, so the same metrics are mirrored as a greppable logger.info line) ---
+
+
+def _metrics(**over) -> FlushedMetrics:
+    base = dict.fromkeys((f.name for f in fields(FlushedMetrics)), 0.0)
+    base.update(fake=0.034, grad=1.2e-3, rel_gap=0.142, cos=0.988, xpred=0.98)
+    base.update(over)
+    return FlushedMetrics(**base)
+
+
+def test_console_step_line_is_greppable_and_carries_postfix_stats():
+    line = console_step_line(_metrics(), step=3500, total=8000, rate=2.0)
+    # `grep "step "` on a redirected log must find the step + total.
+    assert line.startswith("step 3500/8000 (43.8%)")
+    # every tqdm postfix stat is mirrored, so the file loses nothing vs the TTY
+    for key, val in tqdm_postfix(_metrics()).items():
+        assert f"{key}={val}" in line
+    assert "2.00 it/s" in line
+    assert "ETA 37:30" in line  # (8000-3500)/2 s
+
+
+def test_console_step_line_without_a_rate_yet():
+    line = console_step_line(_metrics(), step=10, total=8000, rate=None)
+    assert "? it/s | ETA ?" in line
+
+
+def test_tqdm_rate_falls_back_to_run_average_before_the_ema_warms():
+    class _Bar:
+        format_dict = {"rate": None, "elapsed": 4.0, "n": 120, "initial": 100}
+
+    assert tqdm_rate(_Bar()) == pytest.approx(5.0)  # 20 steps / 4s
+
+    class _Ema(_Bar):
+        format_dict = {"rate": 3.0, "elapsed": 4.0, "n": 120, "initial": 100}
+
+    assert tqdm_rate(_Ema()) == pytest.approx(3.0)  # EMA wins when present
+
+    class _Cold(_Bar):
+        format_dict = {"rate": None, "elapsed": 0.0, "n": 100, "initial": 100}
+
+    assert tqdm_rate(_Cold()) is None  # no division by zero on the first line

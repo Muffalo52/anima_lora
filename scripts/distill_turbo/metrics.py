@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 
 import torch
+from tqdm import tqdm
 
 from library.training.accumulator import ScalarAccumulator
 
@@ -223,6 +224,40 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
         # per-firing matched-caption soft rank (→ 0 as discrimination recovers),
         # regardless of the every_n amortization.
         writer.add_scalar("train/softrank_loss", m.softrank / m.softrank_active, step)
+
+
+def tqdm_rate(bar: tqdm) -> float | None:
+    """Steps/sec off a tqdm bar: its EMA rate, or the run average as a fallback.
+
+    ``format_dict['rate']`` is ``None`` until the bar has recorded an EMA
+    interval, so fall back to (steps done / elapsed) rather than reporting no
+    rate at all — the caller wants an ETA on the very first log line too.
+    """
+    fd = bar.format_dict
+    rate = fd.get("rate")
+    if rate:
+        return rate
+    elapsed = fd.get("elapsed") or 0.0
+    done = (fd.get("n") or 0) - (fd.get("initial") or 0)
+    return done / elapsed if elapsed > 0 and done > 0 else None
+
+
+def console_step_line(
+    m: FlushedMetrics, *, step: int, total: int, rate: float | None
+) -> str:
+    """Greppable one-line step summary for redirected / headless logs.
+
+    Same numbers as :func:`tqdm_postfix`, but as a plain line: tqdm repaints a
+    single ``\\r`` line on stderr, which leaves a redirected log with no
+    periodic step record between the (500/1000-step) ckpt and val lines.
+    """
+    pct = f" ({100.0 * step / total:.1f}%)" if total else ""
+    stats = " ".join(f"{k}={v}" for k, v in tqdm_postfix(m).items())
+    if rate:
+        speed = f"{rate:.2f} it/s | ETA {tqdm.format_interval((total - step) / rate)}"
+    else:
+        speed = "? it/s | ETA ?"
+    return f"step {step}/{total}{pct} | {stats} | {speed}"
 
 
 def tqdm_postfix(m: FlushedMetrics) -> dict:

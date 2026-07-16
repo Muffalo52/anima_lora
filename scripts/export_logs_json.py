@@ -28,6 +28,10 @@ Note the two gotchas:
 
 ``--jsonl`` flattens to one ``{tag, step, wall_time, value}`` object per
 line, which sidesteps both gotchas if you're piping to ``jq`` / pandas.
+
+For the 90%-case "where is this run at?" query, skip the parse entirely:
+``--summary`` prints the last value (and its step) per tag, plus the run's max
+step. Add ``--stdout`` for the same thing as JSON.
 """
 
 from __future__ import annotations
@@ -70,6 +74,38 @@ def _run_payload(run_root: Path) -> dict:
     return {"run": str(run_root), "tags": tags}
 
 
+def _summary_payload(payload: dict) -> dict:
+    """Collapse a run payload to last-value-per-tag + max step.
+
+    The "where is this run at" query, answered without the caller
+    reimplementing the ``[step, wall_time, value]`` parse.
+    """
+    tags = {}
+    for tag, series in sorted(payload["tags"].items()):
+        if not series:
+            continue
+        step, wall_time, value = series[-1]
+        tags[tag] = {
+            "step": step,
+            "wall_time": wall_time,
+            "value": value,
+            "points": len(series),
+        }
+    return {
+        "run": payload["run"],
+        "max_step": max((t["step"] for t in tags.values()), default=0),
+        "tags": tags,
+    }
+
+
+def _print_summary(summary: dict) -> None:
+    n_tags = len(summary["tags"])
+    print(f"{summary['run']}  (max step {summary['max_step']}, {n_tags} tags)")
+    width = max((len(t) for t in summary["tags"]), default=0)
+    for tag, last in summary["tags"].items():
+        print(f"  {tag:<{width}}  step {last['step']:>8}  {last['value']:>12.6g}")
+
+
 def _dump(payload: dict, out: Path, jsonl: bool) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     if jsonl:
@@ -93,7 +129,10 @@ def _dump(payload: dict, out: Path, jsonl: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument(
         "runs",
         nargs="+",
@@ -122,6 +161,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print a single JSON array of run payloads to stdout and exit.",
     )
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help="print max-step + last value per tag instead of exporting the full "
+        "series (combine with --stdout for the same digest as JSON).",
+    )
     args = p.parse_args(argv)
 
     run_dirs: list[Path] = []
@@ -140,6 +185,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("no runs to export.")
 
     payloads = [_run_payload(r) for r in run_dirs]
+
+    if args.summary:
+        summaries = [_summary_payload(p) for p in payloads]
+        if args.stdout:
+            json.dump(
+                summaries if len(summaries) > 1 else summaries[0], sys.stdout, indent=2
+            )
+            sys.stdout.write("\n")
+        else:
+            for i, summary in enumerate(summaries):
+                if i:
+                    print()
+                _print_summary(summary)
+        return 0
 
     if args.stdout:
         json.dump(payloads if len(payloads) > 1 else payloads[0], sys.stdout, indent=2)

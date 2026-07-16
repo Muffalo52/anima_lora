@@ -352,7 +352,13 @@ COMMANDS = {
     "test-unit": (utilities.cmd_test_unit, "Run smoke/unit tests (pytest tests/)"),
     "export-logs": (
         utilities.cmd_export_logs,
-        "Dump TB scalar logs to JSON (RUN=<dir>, ALL=1 for every subrun, JSONL=1 for line-delimited)",
+        "Dump TB scalar logs to JSON (RUN=<dir>, ALL=1 for every subrun, JSONL=1 for "
+        "line-delimited, SUMMARY=1 for max-step + last value per tag)",
+    ),
+    "run-status": (
+        utilities.cmd_run_status,
+        "Step/ETA/last-ckpt one-liner for a run from its progress.jsonl "
+        "(RUN=<output_name|path>, default newest; ARGS='--list|--json')",
     ),
     "print-config": (
         utilities.cmd_print_config,
