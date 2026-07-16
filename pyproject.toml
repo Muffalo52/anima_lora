@@ -38,7 +38,8 @@ dependencies = [
     "albumentations>=1.4.0",
     "packaging",
     "pycocotools>=2.0.11",
-    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3+cu132torch2.12-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux'",
+    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3+cu132torch2.12-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.22/flash_attn-2.8.3+cu132torch2.12-cp313-cp313-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.25/flash_attn-2.8.3+cu132torch2.12-cp313-cp313-win_amd64.whl ; sys_platform == 'win32'",
     "triton-windows>=3.7.0,<3.8.0 ; sys_platform == 'win32'",
     "pyside6>=6.11.0",
@@ -65,7 +66,9 @@ dependencies = [
     "scikit-learn>=1.9.0",
     "datasets>=4.8.5",
     "send2trash>=2.1.0",
-    "onnxruntime-gpu>=1.27.0",
+    "onnxruntime-gpu>=1.27.0; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'win32'",
+    # PyPI onnxruntime-gpu has no aarch64 wheels; Microsoft ships CUDA-13 builds for ARM64.
+    "onnxruntime-gpu @ https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-13/pypi/download/onnxruntime-gpu/1.26.0/onnxruntime_gpu-1.26.0-cp313-cp313-manylinux_2_34_aarch64.whl ; platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -77,6 +80,11 @@ dev = [
 ]
 
 [tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'win32'",
+]
 index-strategy = "unsafe-best-match"
 # Both wheels are looked up from these indexes — the version pin in
 # `dependencies` (active vs. commented) decides which one resolves.
