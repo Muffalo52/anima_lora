@@ -1,12 +1,11 @@
 # CDM — continuous-time distribution matching for the turbo loop
 
 Status: **PHASE 0 (dynamic schedule) WIRED 2026-07-17, ON by default in
-`configs/methods/turbo.toml` — 500-step smoke A/B passed all three gate axes
-(same day, arms verified via `ss_turbo_dynamic_schedule`): dynamic wins NFE=4
-color/detail on all 3 eval styles, the fixed-grid arm craters off-grid
-(NFE=3/2 washout — note the eval sampler `er_sde_cns` puts even NFE=4 slightly
-off-grid for arm A), glyphs dynamic ≥ fixed. 2k full read queued (`queued.md`);
-Phases 1–3 stay gated on it.**
+`configs/methods/turbo.toml` — 500-step smoke A/B was a decisive dynamic win:
+every gate axis, every eval style, visible at a glance (details in the Phase 0
+section). The verdict-grade 2k read is queued (`queued.md`); Phases 1–3 stay
+gated on it, but the smoke also validated the line's core thesis — see "Why
+this line".**
 
 - **Phase 0 shipped**: `dmd.dynamic_schedule` — per-iteration random continuous
   rollout grid (`primitives.sample_dynamic_sigmas`, consumed as `sigmas_it` /
@@ -19,10 +18,11 @@ Phases 1–3 stay gated on it.**
 - **Untouched by design**: the DP diversity anchor (t₁ = 1 stays pinned, so
   `v_target` math is unchanged), the diversity validation and inference (both
   stay on the static `flow_shift` grid), the GAN, `teacher_cfg=4`.
-- **Next**: the Phase-0 A/B below (fixed vs dynamic grid, everything else
-  matched), read at 2k steps — 750 is a smoke peek only
-  ([[project_turbo_T_sweep_verdict]]: the 1k ckpt of T2 was voided and healed
-  by 2k; never judge a single early checkpoint).
+- **Next**: the verdict-grade 2k A/B (fresh both arms — the 500-step runs
+  wrote no resume bundle, final-step skip). The 500-step smoke already went
+  decisively to dynamic (see Phase 0), but a single early checkpoint is never
+  a verdict ([[project_turbo_T_sweep_verdict]]: the 1k ckpt of T2 was voided
+  and healed by 2k).
 
 ## What CDM is
 
@@ -79,6 +79,16 @@ reward model**.
   score is CFG-guided at `teacher_cfg=4` (`_teacher_cfg_velocity`), i.e. our
   "DM" is an implicitly-weighted CA+DM with the ratio tied to α. The paper's
   decoupling gives alignment pressure its own weight and its own τ draw.
+- **Phase 0 validated the line's core thesis** (added 2026-07-17, post-smoke).
+  The smoke A/B showed empirically that the student's field is only good where
+  supervision lands, *actively drifts* where it doesn't, and the sampler
+  visits the drift region — proven on the t-axis, at a 500-step dose, visible
+  to the naked eye. L_CDM is the identical argument on the x-axis: dynamic
+  rollouts still only visit self-trajectory states, while few-step Euler's
+  large strides traverse off-manifold points that remain unsupervised after
+  Phase 0. Circumstantial pointer: the dynamic arm's one residual defect at
+  NFE=2 is text garble while image quality holds — the largest-stride,
+  maximal-truncation-drift regime, i.e. exactly where L_CDM aims.
 
 ### Map: paper term → our loop
 
@@ -93,11 +103,44 @@ reward model**.
 | GAN / reward aux | teacher-feature GAN + f-distill | Phase 2 removes if L_CDM covers it |
 | Diversity mechanism | DP first-step teacher anchor | **kept — ours is stronger** ([[project_official_turbo_v10_eval]]: V10 mode-collapsed vs ours). CDM has no equivalent; never trade the anchor for L_CDM. |
 
-## Phase 0 — dynamic schedule A/B (wired, running next)
+## Phase 0 — dynamic schedule A/B (500-step smoke: decisive dynamic win)
 
 One variable. Arm A = `dynamic_schedule=false` (legacy fixed grid), Arm B =
 `true`. Same V10 warm start, same GAN, same `div_weight`, same seed/data. Arm B
 is ~25% cheaper per iteration (mean rollout length 3 vs 4).
+
+### Smoke read — 2026-07-17, 500 steps, seed 42, V10 adaln warm start
+
+Arms verified via `ss_turbo_dynamic_schedule` ckpt metadata (the first attempt
+trained two identical fixed-grid arms — a `[network]`-vs-`[dmd]` sectioned-
+config misplacement; those grids survive as the matched-config noise floor).
+**Dynamic won every axis, and not narrowly:**
+
+- *NFE=4* (12 matched pairs, 3 artist styles): dynamic keeps saturation,
+  background detail (waves / sand / foliage / signatures) and per-style
+  separation; the fixed-grid arm is systematically washed out across all 12
+  pairs — well above the noise floor, which flips content (bikini colors,
+  bubble garble), never global saturation.
+- *Off-grid ladder (NFE=3/2)*: the fixed arm craters exactly as grid-locking
+  predicts — fog, translucent bubbles, Japanese glyph soup on @sincos.
+  Dynamic degrades gracefully: at NFE=2 image quality is nearly intact, only
+  the glyphs garble. (NFE=2 pairs were artist-mismatched — qualitative only.)
+- *Glyphs*: dynamic ≥ fixed at every NFE. *Diversity*: seed spread comparable,
+  no collapse signature.
+
+**Mechanism read**: the delta is less "dynamic improved" than **"fixed-grid
+training actively degrades the field off its 4 supervised t's"** — shared
+LoRA weights mean on-grid updates are unconstrained everywhere else. The eval
+sampler amplified this honestly: `er_sde_cns`'s σ grid ≠ the flow_shift-3.0
+training grid, so even NFE=4 is slightly off-grid for arm A. That mismatch is
+the deployment condition, not a bench artifact — Comfy users run arbitrary
+samplers/schedules, so schedule-independence is real-world robustness.
+
+**Still pending for the verdict**: the 2k read below — 500 steps / one
+training seed per arm is a smoke peek. The step-trend to watch: if arm A's
+off-grid degradation deepens 500 → 2000, the mechanism read is confirmed
+directly. Render gaps to fill next pass: dynamic @channel NFE=3, and
+matched-artist NFE=2 pairs.
 
 **Protocol**: 2k steps, ckpts at 500/1000/2000, compared at matched steps.
 - *Primary*: rendered 4-step grids at `--cfg 1.0` (`make gen`), fixed prompt
