@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file
 
 import networks as _networks_pkg
@@ -243,6 +244,51 @@ def test_save_standard_lora_roundtrip(tmp_path: Path):
         assert loaded[f"{base}_{suffix}.lora_up.weight"].shape == (out_dim, r)
     # fused key must be gone
     assert f"{prefix}.lora_down.weight" not in loaded
+
+
+def _make_adaln_lora_sd(prefix: str, r: int, in_dim: int, out_dim: int) -> dict:
+    """Fake adaln_up_{branch} LoRA entry in the runtime layout."""
+    return {
+        f"{prefix}.lora_down.weight": torch.randn(r, in_dim),
+        f"{prefix}.lora_up.weight": torch.randn(out_dim, r),
+        f"{prefix}.alpha": _alpha(r),
+    }
+
+
+def test_save_relays_adaln_to_comfy_layout(tmp_path: Path):
+    """Trained adaln keys must ship in the ComfyUI layout — ComfyUI's generic
+    key map only knows ``adaln_modulation_{br}_2`` and silently drops the
+    runtime ``adaln_up_{br}`` names (adaln.md §Key-naming contract)."""
+    r, in_dim, out_dim = 4, 8, 12
+    sd = _make_std_lora_sd("lora_unet_blocks_0_self_attn_qkv_proj", r, 8, out_dim)
+    for branch in ("self_attn", "cross_attn", "mlp"):
+        sd |= _make_adaln_lora_sd(
+            f"lora_unet_blocks_0_adaln_up_{branch}", r, in_dim, 3 * out_dim
+        )
+
+    loaded = _save_and_reload(sd, tmp_path, save_variant="standard")
+
+    for branch in ("self_attn", "cross_attn", "mlp"):
+        comfy = f"lora_unet_blocks_0_adaln_modulation_{branch}_2"
+        assert f"{comfy}.lora_down.weight" in loaded
+        assert f"{comfy}.lora_up.weight" in loaded
+        assert f"{comfy}.alpha" in loaded
+    assert not any("adaln_up_" in k for k in loaded)
+    # the non-adaln keys still take the normal defuse path
+    assert "lora_unet_blocks_0_self_attn_q_proj.lora_down.weight" in loaded
+
+    with safe_open(str(tmp_path / "out.safetensors"), framework="pt") as f:
+        assert f.metadata()["ss_adaln_layout"] == "comfy"
+
+
+def test_save_adaln_relayout_inert_without_adaln(tmp_path: Path):
+    """An adaln-less checkpoint is untouched — no stamp, no renames."""
+    sd = _make_std_lora_sd("lora_unet_blocks_0_self_attn_qkv_proj", 4, 8, 12)
+
+    _save_and_reload(sd, tmp_path, save_variant="standard")
+
+    with safe_open(str(tmp_path / "out.safetensors"), framework="pt") as f:
+        assert "ss_adaln_layout" not in f.metadata()
 
 
 def test_save_ortho_roundtrip(tmp_path: Path):

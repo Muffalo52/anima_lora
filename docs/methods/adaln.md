@@ -173,10 +173,16 @@ marks are active — full mechanism in
 [[project_inductor_mix_order_reduction_guard]]. Applies to ANY LoRA on a
 broadcast-consumed Linear, not just adaln.
 
-**Missing piece for shipping trained adaln**: the trainer saves runtime-layout
-keys. A comfy-layout rename at export (same mapping as the extractor's
-`--adaln_layout comfy` pass) is needed — either a small post-export utility or a
-save-time option. Until then, trained adaln LoRAs work in-repo but not in ComfyUI.
+**Shipping trained adaln**: the save pipeline relays runtime-layout keys to the
+comfy layout for you — `lora_save.py::_relayout_adaln_to_comfy` runs on the
+standard write path (after the qkv defuse, before hashing), stamps
+`ss_adaln_layout = "comfy"`, and is presence-gated so adaln-less checkpoints are
+untouched. The in-repo loader renames back on load
+(`create_network_from_weights` → `relayout_adaln_comfy_to_runtime`), so one file
+round-trips both ecosystems. Every method on the standard path is covered,
+turbo included; the MoE/chimera `_moe` siblings are not ComfyUI-loadable
+regardless, and the turbo per-step-expert layout (`step_expert_K > 1`) writes
+verbatim and stays runtime-layout.
 
 ### What adaln can and can't learn
 
@@ -279,7 +285,7 @@ compensate through attn/MLP; see caveat below.
 - [x] Extractor: `--include_adaln` + `--adaln_layout comfy` (rename at save)
 - [x] Shipped comfy-layout extraction artifact (r96 ASVD + adaln)
 - [x] Verified against ComfyUI's own `load_lora` (all 364 targets matched)
-- [ ] Comfy-layout export step for *trained* checkpoints
+- [x] Comfy-layout export step for *trained* checkpoints (save-time, all methods)
 - [ ] Bench arm 3 (stacking probe — no training)
 - [ ] Bench arm 1 (turbo student + adaln, warm-started)
 - [ ] Bench arm 2 (style LoRA ± adaln)

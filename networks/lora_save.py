@@ -30,6 +30,11 @@ checks both dims explicitly so the matchers never overlap on the same
 prefix. Step 5 handles legacy checkpoints from
 ``lora_deprecated.OrthoLoRAModule``; current training never emits those
 keys, but the converter is kept so old artifacts remain re-bakeable.
+
+The standard write path then relays adaln keys from the runtime names to
+the ComfyUI layout (``_relayout_adaln_to_comfy``), after the qkv defuse and
+before hashing — so the shipped file is ComfyUI-native end to end. The MoE
+variants return early and are not ComfyUI-loadable regardless.
 """
 
 from __future__ import annotations
@@ -128,6 +133,44 @@ def _convert_legacy_ortho_to_lora(
             state_dict[f"{prefix}.alpha"] = alpha
 
 
+def _relayout_adaln_to_comfy(
+    state_dict: Dict[str, torch.Tensor], metadata: Optional[Dict[str, str]]
+) -> Optional[Dict[str, str]]:
+    """Rename adaln LoRA keys from the in-repo runtime names
+    (``adaln_up_{br}``) to the ComfyUI state-dict layout
+    (``adaln_modulation_{br}_2``) so the file loads natively in ComfyUI —
+    its generic key map only knows the latter, and runtime-named keys are
+    silently dropped (adaln.md §Key-naming contract). The attn/MLP keys
+    already ship in the defused split layout ComfyUI expects, so only the
+    adaln keys move. The in-repo loader renames them back on load
+    (``create_network_from_weights`` → ``relayout_adaln_comfy_to_runtime``),
+    so one file round-trips both ecosystems.
+
+    Presence-gated — an adaln-less checkpoint is untouched, metadata and
+    all. Mutates ``state_dict`` in place; returns the metadata to write
+    (a dict is allocated if the stamp needs one and none was passed).
+    """
+    from networks.lora_utils import relayout_adaln_runtime_to_comfy
+
+    renamed = relayout_adaln_runtime_to_comfy(state_dict)
+    if renamed.keys() == state_dict.keys():
+        return metadata  # no runtime adaln keys present — nothing to relayout
+
+    state_dict.clear()
+    state_dict.update(renamed)
+    if metadata is None:
+        metadata = {}
+    metadata["ss_adaln_layout"] = "comfy"
+    n_adaln = sum(
+        1 for k in renamed if "adaln_modulation_" in k and k.endswith(".alpha")
+    )
+    logger.info(
+        f"relaid {n_adaln} adaln modules to the ComfyUI layout "
+        "(loads natively in ComfyUI; in-repo loader renames back on load)"
+    )
+    return metadata
+
+
 # Back-compat shim: tests/test_global_router.py imports this name directly
 # to exercise the StackedExperts MoE writer in isolation.
 
@@ -211,6 +254,7 @@ def save_network_weights(
 
     # Standard (lora / ortho) write path.
     defuse_and_bake_standard(state_dict)
+    metadata = _relayout_adaln_to_comfy(state_dict, metadata)
 
     if dtype is not None:
         for key in list(state_dict.keys()):

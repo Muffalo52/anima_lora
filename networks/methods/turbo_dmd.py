@@ -736,49 +736,10 @@ class TurboDMDNetwork:
         # distill step ever sees them, emitting an alpha-only checkpoint
         # (training-only buffers like `_timestep_mask` are already persistent=False
         # so they never reach the state dict).
+        # `save_network_weights` relays adaln keys to the ComfyUI layout on the
+        # standard write path, so no post-hoc rewrite is needed here.
         self.student.save_weights(file, dtype, metadata)
-        if self.train_adaln:
-            self._relayout_saved_adaln_to_comfy(file)
         logger.info(f"saved student LoRA → {file}")
-
-    @staticmethod
-    def _relayout_saved_adaln_to_comfy(file: str) -> None:
-        """Rewrite a just-saved student so its adaln LoRA keys use the ComfyUI
-        state-dict layout (``adaln_modulation_{br}_2``) instead of the in-repo
-        runtime names (``adaln_up_{br}``) — ComfyUI's generic key map only
-        recognizes the former (adaln.md §Key-naming contract). The attn/MLP keys
-        already ship in the defused split layout ComfyUI expects, so only the 84
-        adaln keys move. The in-repo loader renames them back on load
-        (``create_network_from_weights`` → ``relayout_adaln_comfy_to_runtime``),
-        so the one file round-trips both ecosystems. Hashes are recomputed since
-        the key set changed.
-        """
-        from safetensors import safe_open
-        from safetensors.torch import save_file
-
-        from library.training.hashing import precalculate_safetensors_hashes
-        from networks.lora_utils import relayout_adaln_runtime_to_comfy
-
-        with safe_open(file, framework="pt") as f:
-            meta = dict(f.metadata() or {})
-            sd = {k: f.get_tensor(k) for k in f.keys()}
-        renamed = relayout_adaln_runtime_to_comfy(sd)
-        if renamed.keys() == sd.keys():
-            return  # no runtime adaln keys present — nothing to relayout
-        meta.pop("sshs_model_hash", None)
-        meta.pop("sshs_legacy_hash", None)
-        model_hash, legacy_hash = precalculate_safetensors_hashes(renamed, meta)
-        meta["sshs_model_hash"] = model_hash
-        meta["sshs_legacy_hash"] = legacy_hash
-        meta["ss_adaln_layout"] = "comfy"
-        save_file(renamed, file, meta)
-        n_adaln = sum(
-            1 for k in renamed if "adaln_modulation_" in k and k.endswith(".alpha")
-        )
-        logger.info(
-            f"relaid {n_adaln} adaln modules to the ComfyUI layout → {file} "
-            "(loads natively in ComfyUI; in-repo loader renames back on load)"
-        )
 
     def _save_student_step_expert(
         self,
