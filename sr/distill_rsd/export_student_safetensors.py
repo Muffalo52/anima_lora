@@ -47,6 +47,11 @@ def main():
     meta = {
         "noise_mode": str(sd.get("noise_mode", "concat")),
         "noise_channels": str(sd.get("noise_channels", 1)),
+        # Which `lq` conditioning the student was distilled under (rsd_models.make_cond_lq).
+        # Absent from pre-2026-07-11 ckpts -> latent, matching the loader's own fallback.
+        # Feeding the wrong one is off-manifold and renders neon green, so it must ride
+        # along with the weights rather than be guessed by the consumer.
+        "cond_lq": str(sd.get("cond_lq", "latent")),
         "step": str(sd.get("step", "")),
         "branch": args.branch,
         "arch": "resshift_swinunet_stochastic",

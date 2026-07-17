@@ -100,7 +100,7 @@ def cmd_sr_rsd_train(extra):
     if version and not any(a == "--version" or a.startswith("--version=") for a in argv):
         argv = ["--version", version, *argv]
     if not any(a == "--src" or a.startswith("--src=") for a in argv):
-        cache = SR / "data" / "rsd_hr_cap2048"
+        cache = SR / "data" / "rsd_hr_cap4096"
         if cache.is_dir():
             print(f"[sr-rsd-train] defaulting --src to {cache} (pass --src to override)")
             argv = ["--src", str(cache), *argv]
