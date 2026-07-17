@@ -449,9 +449,12 @@ def isolate_compile_cache(signature: str) -> str:
     root — every entry inside was compiled under the SAME seq bounds, so guard
     replay is always consistent. (Caveat: inductor can also record HINT-derived
     guards narrower than the seq bounds — e.g. mix-order-reduction fusion's
-    ``Ge(seq, 4096)`` — which poison even same-signature replay. Known sources
+    4096-boundary guard — which poison even same-signature replay. Known sources
     are disabled at the ``compile_blocks`` chokepoint when dynamic-seq marks are
-    active; see the ``mix_order_reduction`` kill there.) Same-signature reruns keep their warm cache
+    active, via ``pin_inductor_flag`` — a plain config assignment is a
+    thread-local ContextVar override that reverts in the backward-compile
+    context. Dirs poisoned before the pin self-heal: the config is part of the
+    FxGraphCache key, so stale entries miss.) Same-signature reruns keep their warm cache
     (and unlike the wipe, switching tier sets back and forth no longer
     re-compiles from scratch each time). Inference/bench keep the default dir.
 

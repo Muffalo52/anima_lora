@@ -1642,18 +1642,24 @@ class Anima(nn.Module):
             # axis (it fires on backward graphs that pair a seq-axis reduction
             # with an elementwise grad — e.g. any LoRA on a broadcast-consumed
             # Linear like adaln_up, whose shift/scale/gate grads reduce over
-            # seq). The guard is suppressed during the backward compile but
-            # recorded in the FxGraphCache artifact, and the next cache lookup
-            # replays it into the ShapeEnv — narrowing seq to [4096, hi], which
-            # contradicts any mark range whose lo < 4096 (every multi-tier range
-            # AND the canonical 4032) → ConstraintViolationError at guard build.
+            # seq). The recorded guard (either branch: Ge(seq, 4096) or its
+            # negation seq <= 4095, per the first-traced hint) contradicts any
+            # mark range straddling 4096 → ConstraintViolationError at guard
+            # build. MUST be pinned via pin_inductor_flag, not plain assignment:
+            # inductor config overrides are thread-local ContextVars, and the
+            # grad-enabled step-0 compile (grad-ckpt recompute / AOT backward
+            # path) schedules in a context where a plain override is absent and
+            # the read falls back to the env-derived default True — the exact
+            # regression that hit v1.14.0 (adaln default-on) users.
             import torch._inductor.config as _inductor_config
 
             if _inductor_config.triton.mix_order_reduction:
-                _inductor_config.triton.mix_order_reduction = False
+                from library.runtime.dynamo import pin_inductor_flag
+
+                pin_inductor_flag("triton.mix_order_reduction", False)
                 print(
-                    "Anima: inductor mix_order_reduction disabled "
-                    "(hint-derived Ge(seq, 4096) guard breaks strict dynamic-seq marks)"
+                    "Anima: inductor mix_order_reduction disabled — default pinned "
+                    "(hint-derived 4096-boundary guard breaks strict dynamic-seq marks)"
                 )
 
         compile_kwargs = {"backend": backend, "dynamic": False}
