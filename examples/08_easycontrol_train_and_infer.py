@@ -25,9 +25,9 @@ text-only LoRA flows, it has two halves worth showing together:
 
 Three parts, each opt-in so the cheap one runs by default:
 
-    python examples/09_easycontrol_train_and_infer.py                  # part 1: print config
-    python examples/09_easycontrol_train_and_infer.py --train --max_train_epochs 6
-    python examples/09_easycontrol_train_and_infer.py --infer --ref path/to/ref.png
+    python examples/08_easycontrol_train_and_infer.py                  # part 1: print config
+    python examples/08_easycontrol_train_and_infer.py --train --max_train_epochs 6
+    python examples/08_easycontrol_train_and_infer.py --infer --ref path/to/ref.png
 
 Part 2 prereq: `make download-models` + put paired data in `easycontrol-dataset/`
 then `make preprocess` (training reads only the cached latents/embeddings). Part 3

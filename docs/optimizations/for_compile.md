@@ -125,21 +125,35 @@ inductor fusion pass:
 
 ```python
 # compile_blocks, when dynamic-seq marks are active
-torch._inductor.config.triton.mix_order_reduction = False
+pin_inductor_flag("triton.mix_order_reduction", False)  # library/runtime/dynamo.py
 ```
 
 **Why.** `mix_order_reduction` (torch 2.12, default-on) guards its profitability
-check as `Ge(seq, 4096)` **at the compile hint** and records that guard in the
-FxGraphCache artifact. The *next* cache lookup replays the recorded guard into
-the `ShapeEnv`, which contradicts the strict `[lo, 4200]` `mark_dynamic` range
-and raises `ConstraintViolationError: … 4096 <= seq <= 4200`. The failure only
-surfaces once a **backward gains a seq-axis reduction** — e.g. an adaln LoRA
-makes shift/scale/gate require grad, so the modulation grads reduce over the seq
-axis (broadcast-backward). It therefore hits *any* LoRA on a broadcast-consumed
-Linear, not just adaln, and only under dynamic-seq. Disabling the fusion when
-dynamic-seq marks are live is the fix; see also the caveat on
-`isolate_compile_cache` (stale-guard poisoning across cache reuse). Discovered
-fixing the adaln training path (2026-07-15) — `docs/methods/adaln.md` §Path 2.
+check at the 4096 boundary **at the compile hint** — recording `Ge(seq, 4096)`
+or its negation `seq <= 4095` depending on which batch traced first — and that
+guard contradicts any strict `mark_dynamic` range straddling 4096, raising
+`ConstraintViolationError` at guard build (live, or replayed from the
+FxGraphCache artifact on a later lookup). The failure only surfaces once a
+**backward gains a seq-axis reduction** — e.g. an adaln LoRA makes
+shift/scale/gate require grad, so the modulation grads reduce over the seq axis
+(broadcast-backward). It therefore hits *any* LoRA on a broadcast-consumed
+Linear, not just adaln, and only under dynamic-seq.
+
+**Why `pin_inductor_flag` and not plain assignment.** Inductor config
+`user_override`s are **thread-local ContextVars** (torch 2.12). A plain
+`config.triton.mix_order_reduction = False` only exists in the thread that ran
+it; the grad-enabled step-0 compile (grad-ckpt recompute / AOT backward path)
+schedules in a different context where the override is absent and the read falls
+back to the entry's **default** — env-derived True — so the kill silently
+reverted and the fusion still recorded the guard. This shipped broken in
+v1.14.0 (same commit as adaln default-on) and crashed community `make lora`
+runs at step 0 under the grad-ckpt presets. The pin sets the entry's
+`.default` too (same pattern as `pin_dynamo_limit` for `recompile_limit`), which
+every context reads. Poisoned per-signature cache dirs from crashed runs
+self-heal: the config is part of the FxGraphCache key, so stale entries miss.
+See also the caveat on `isolate_compile_cache` (stale-guard poisoning across
+cache reuse). Discovered fixing the adaln training path (2026-07-15); ContextVar
+regression root-caused 2026-07-17 — `docs/methods/adaln.md` §Path 2.
 
 > **sd-scripts**: no dynamic-seq path, no free-fit, no per-block compile — none
 > of this machinery exists upstream. The legacy `set_static_token_count(count, pad=True)` path zero-padded every bucket up to a single shape, but it leaked padded tokens into flash self-attention (AdaLN shift + Q/K/V bias make zero-input padded rows emit non-trivial K/V; up to ~6.5% rel-L2 on the 4032 buckets) and couldn't even run the shipped table (4200 > the legacy 4096 target → truncation). It was removed 2026-05-24 along with `compile_core` / `--compile_mode full`, `static_token_count`, `static_pad`, and the flex self-attn pad-mask.

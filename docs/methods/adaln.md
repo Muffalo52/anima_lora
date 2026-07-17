@@ -165,10 +165,14 @@ init is exact). The extractor mirrors it as `--adaln_rank`. Guards in
 `compile_dynamic_seq` initially crashed at the first grad-bearing forward with a
 `ConstraintViolationError` on the marked seq range. The adaln LoRA makes
 shift/scale/gate require grad, so the backward gains a seq-axis reduction whose
-inductor mix-order-reduction fusion records a `Ge(seq, 4096)` guard that
-FxGraphCache replays into the ShapeEnv — contradicting the strict `mark_dynamic`
-bound. Fixed by disabling `triton.mix_order_reduction` whenever dynamic-seq
-marks are active — full mechanism in
+inductor mix-order-reduction fusion records a 4096-boundary guard (`Ge(seq, 4096)`
+or `seq <= 4095`, per the first-traced hint) — contradicting the strict
+`mark_dynamic` bound. Fixed by disabling `triton.mix_order_reduction` whenever
+dynamic-seq marks are active, **via `pin_inductor_flag` (2026-07-17)** — the
+initial plain-assignment kill was context-local (inductor config overrides are
+thread-local ContextVars) and reverted in the grad-enabled compile context,
+which is what crashed v1.14.0 `make lora` runs under grad-ckpt presets. Full
+mechanism in
 [`../optimizations/for_compile.md`](../optimizations/for_compile.md) §2.6 and
 [[project_inductor_mix_order_reduction_guard]]. Applies to ANY LoRA on a
 broadcast-consumed Linear, not just adaln.

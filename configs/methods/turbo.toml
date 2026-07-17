@@ -55,6 +55,13 @@ fake_init_weights = "output/ckpt/turbo/anima_turboV10_delta_r80_asvd.safetensors
 [dmd]
 student_steps = 4
 teacher_cfg = 4
+# CDM dynamic continuous schedule (arXiv:2605.06376): re-sample the student
+# rollout grid every iteration — N ~ U{2..student_steps} (dpdmd; {1..} for plain
+# dmd), interior anchors continuous-uniform, t1=1 pinned so the DP diversity
+# anchor composes unchanged. Trains v_θ over continuous t instead of only the 4
+# inference points. false → bit-identical legacy fixed-grid loop. Validation
+# renders and inference always use the static flow_shift grid.
+dynamic_schedule = true
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
 grad_step = "random"

@@ -46,8 +46,8 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _common import REPO_ROOT, make_run_dir, write_result  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from bench._common import REPO_ROOT, make_run_dir, write_result  # noqa: E402
 
 # Training bar only: library/training/loop.py builds it with desc="steps",
 # so anchor on that prefix — the startup bars (image-size scan, cache checks)
