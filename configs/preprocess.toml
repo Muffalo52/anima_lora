@@ -34,7 +34,7 @@ caption_tag_randomize_rate = 0.0
 # Preprocess input filter. drop_lowres_images = false keeps every image; otherwise
 # images under min_pixels are skipped at resize/VAE/TE. Override per-run:
 #   make preprocess ARGS="--min_pixels 0 | --no_drop_lowres | --drop_lowres"
-drop_lowres_images = true
+drop_lowres_images = false
 min_pixels = 250000
 
 # Free-aspect token-band resize ("free-fit") is the only resize mode: images keep

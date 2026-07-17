@@ -102,7 +102,7 @@ validation_seed = 42
 # survive preprocessing (resize/caches mirror the source tree), so this
 # applies to the resized tree too. Training pool only. Kept at the dataset
 # level (subset-ascendable) so the GUI's [[datasets]] override can flip it.
-repeat_by_folder_name = false
+repeat_by_folder_name = true
 
   [[datasets.subsets]]
   # Templates resolve against top-level path keys (source_image_dir,

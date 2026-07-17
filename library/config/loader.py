@@ -395,7 +395,7 @@ class BlueprintGenerator:
 # materially shrinks the training set (e.g. base.toml's default
 # validation_split_num=16 against 30 images leaves only 14 for training)
 # and the resulting CMMD estimator is too noisy to be useful.
-_MIN_TRAIN_IMAGES_FOR_VALIDATION = 100
+_MIN_TRAIN_IMAGES_FOR_VALIDATION = 0
 
 
 def _count_training_image_paths(dataset_blueprint: "DatasetBlueprint") -> int:
