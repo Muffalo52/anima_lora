@@ -65,6 +65,23 @@ def sample_t_routed(
     return tau_cpu.to(device=device, dtype=dtype)
 
 
+def sample_dynamic_sigmas(n_min: int, n_max: int) -> list[float]:
+    """One CDM-style dynamic rollout grid (arXiv:2605.06376 §3.2).
+
+    Length N ~ U{n_min..n_max}; interior anchors drawn uniform in (0,1) and
+    sorted descending, endpoints pinned to t₁=1 and 0 — the same (N+1)-point
+    1 → 0 layout as the static grid, so ``sigmas[i] - sigmas[i+1]`` stays the
+    Euler dt for step i. t₁=1 is what lets the DP-DMD diversity anchor compose
+    unchanged (v_target only assumes the first forward sits at t=1). CPU RNG
+    (seeded by ``torch.manual_seed``), no GPU sync.
+    """
+    n = int(torch.randint(n_min, n_max + 1, (1,)).item())
+    if n == 1:
+        return [1.0, 0.0]
+    interior = torch.sort(torch.rand(n - 1), descending=True).values.tolist()
+    return [1.0, *interior, 0.0]
+
+
 def make_scheduler(opt, total_steps: int, lr: float):
     """Warmup (2% of ``total_steps``, ≥1 step) → cosine annealing to ``0.1·lr``.
 

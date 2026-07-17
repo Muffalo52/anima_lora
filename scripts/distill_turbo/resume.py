@@ -71,6 +71,7 @@ _WARN_FIELDS = (
     "f_div",
     "fake_steps_per_student_step",
     "teacher_cfg",
+    "dynamic_schedule",
 )
 
 

@@ -527,6 +527,11 @@ class TurboConfig:
     dm_x0_norm: bool
     norm_floor: float
     dmd_grad_step: str  # "all" | "last" | "random"
+    # CDM dynamic continuous schedule (arXiv:2605.06376): re-sample the student
+    # rollout grid every iteration (N ~ U{..student_steps}, continuous anchors)
+    # instead of training only on the fixed inference grid. Validation/inference
+    # stay on the static grid; the DP anchor composes unchanged (t₁=1 pinned).
+    dynamic_schedule: bool
 
     # Base objective selector
     base_loss: str
@@ -681,6 +686,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     dm_x0_norm = bool(_pick(args.dm_x0_norm, cfg, "dmd.dm_x0_norm", False))
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
     dmd_grad_step = str(_pick(args.dmd_grad_step, cfg, "dmd.grad_step", "all"))
+    # Default off so existing turbo snapshots reproduce bit-for-bit.
+    dynamic_schedule = bool(_flatten(cfg, "dmd.dynamic_schedule", False))
 
     base_loss = _pick(args.base_loss, cfg, "base_loss", "dpdmd")
 
@@ -964,6 +971,20 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         raise ValueError(
             f"sampling.t_distribution={t_distribution!r}: expected 'uniform' or 'sigmoid'"
         )
+    if dynamic_schedule:
+        if per_step_expert:
+            # Step-expert heads are keyed to fixed grid positions; a per-iteration
+            # random grid makes head identity meaningless.
+            raise ValueError(
+                "dmd.dynamic_schedule=true is incompatible with per_step_expert "
+                "(heads are keyed to fixed grid steps)."
+            )
+        if use_anchor and student_steps < 2:
+            raise ValueError(
+                "dmd.dynamic_schedule=true with base_loss='dpdmd' needs "
+                f"student_steps >= 2 (got {student_steps}): step 0 is the anchor "
+                "and DMD needs at least one refinement step."
+            )
     if fake_rank < student_rank:
         logger.warning(
             f"fake_rank={fake_rank} < student_rank={student_rank}: DM regularizer "
@@ -1070,6 +1091,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         dm_x0_norm=dm_x0_norm,
         norm_floor=norm_floor,
         dmd_grad_step=dmd_grad_step,
+        dynamic_schedule=dynamic_schedule,
         base_loss=base_loss,
         gan_loss_weight_gen=gan_loss_weight_gen,
         gan_feature_block_idx=gan_feature_block_idx,
