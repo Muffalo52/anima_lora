@@ -129,6 +129,7 @@ def _make_dynamic_seq_forward(compiled_inner, lo, hi):
         attn_params,
         rope_cos_sin=None,
         adaln_lora_B_T_3D=None,
+        use_fp32: bool = False,
     ):
         torch._dynamo.mark_dynamic(x_B_T_H_W_D, 2, min=lo, max=hi)
         if rope_cos_sin is not None:
@@ -141,6 +142,7 @@ def _make_dynamic_seq_forward(compiled_inner, lo, hi):
             attn_params,
             rope_cos_sin,
             adaln_lora_B_T_3D,
+            use_fp32=use_fp32,
         )
 
     return marked_forward
@@ -250,8 +252,10 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float())
-        return (output * self.weight).to(x.dtype)
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != 'mps' else 'cpu'
+        with torch.autocast(device_type=device_type, dtype=torch.float32):
+            output = self._norm(x.float()).type_as(x)
+            return output * self.weight
 
 
 class GPT2FeedForward(nn.Module):
@@ -1011,15 +1015,18 @@ class FinalLayer(nn.Module):
         x_B_T_H_W_D: torch.Tensor,
         emb_B_T_D: torch.Tensor,
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
+        use_fp32: bool = False,
     ):
-        if self.use_adaln_lora:
-            assert adaln_lora_B_T_3D is not None
-            shift_B_T_D, scale_B_T_D = (
-                self.adaln_modulation(emb_B_T_D)
-                + adaln_lora_B_T_3D[:, :, : 2 * self.hidden_size]
-            ).chunk(2, dim=-1)
-        else:
-            shift_B_T_D, scale_B_T_D = self.adaln_modulation(emb_B_T_D).chunk(2, dim=-1)
+        device_type = x_B_T_H_W_D.device.type if isinstance(x_B_T_H_W_D.device.type, str) and x_B_T_H_W_D.device.type != 'mps' else 'cpu'
+        with torch.autocast(device_type=device_type, dtype=torch.float32, enabled=use_fp32):
+            if self.use_adaln_lora:
+                assert adaln_lora_B_T_3D is not None
+                shift_B_T_D, scale_B_T_D = (
+                    self.adaln_modulation(emb_B_T_D)
+                    + adaln_lora_B_T_3D[:, :, : 2 * self.hidden_size]
+                ).chunk(2, dim=-1)
+            else:
+                shift_B_T_D, scale_B_T_D = self.adaln_modulation(emb_B_T_D).chunk(2, dim=-1)
 
         shift_B_T_1_1_D = shift_B_T_D[:, :, None, None, :]
         scale_B_T_1_1_D = scale_B_T_D[:, :, None, None, :]
@@ -1158,29 +1165,35 @@ class Block(nn.Module):
         attn_params: attention_dispatch.AttentionParams,
         rope_cos_sin: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
+        use_fp32: bool = False,
     ) -> torch.Tensor:
-        if self.use_adaln_lora:
-            fused_down = self.adaln_fused_down(emb_B_T_D)
-            down_self, down_cross, down_mlp = fused_down.chunk(3, dim=-1)
-            shift_self_attn_B_T_D, scale_self_attn_B_T_D, gate_self_attn_B_T_D = (
-                self.adaln_up_self_attn(down_self) + adaln_lora_B_T_3D
-            ).chunk(3, dim=-1)
-            shift_cross_attn_B_T_D, scale_cross_attn_B_T_D, gate_cross_attn_B_T_D = (
-                self.adaln_up_cross_attn(down_cross) + adaln_lora_B_T_3D
-            ).chunk(3, dim=-1)
-            shift_mlp_B_T_D, scale_mlp_B_T_D, gate_mlp_B_T_D = (
-                self.adaln_up_mlp(down_mlp) + adaln_lora_B_T_3D
-            ).chunk(3, dim=-1)
-        else:
-            shift_self_attn_B_T_D, scale_self_attn_B_T_D, gate_self_attn_B_T_D = (
-                self.adaln_modulation_self_attn(emb_B_T_D).chunk(3, dim=-1)
-            )
-            shift_cross_attn_B_T_D, scale_cross_attn_B_T_D, gate_cross_attn_B_T_D = (
-                self.adaln_modulation_cross_attn(emb_B_T_D).chunk(3, dim=-1)
-            )
-            shift_mlp_B_T_D, scale_mlp_B_T_D, gate_mlp_B_T_D = (
-                self.adaln_modulation_mlp(emb_B_T_D).chunk(3, dim=-1)
-            )
+        if use_fp32:
+            x_B_T_H_W_D = x_B_T_H_W_D.float()
+
+        device_type = x_B_T_H_W_D.device.type if isinstance(x_B_T_H_W_D.device.type, str) and x_B_T_H_W_D.device.type != 'mps' else 'cpu'
+        with torch.autocast(device_type=device_type, dtype=torch.float32, enabled=use_fp32):
+            if self.use_adaln_lora:
+                fused_down = self.adaln_fused_down(emb_B_T_D)
+                down_self, down_cross, down_mlp = fused_down.chunk(3, dim=-1)
+                shift_self_attn_B_T_D, scale_self_attn_B_T_D, gate_self_attn_B_T_D = (
+                    self.adaln_up_self_attn(down_self) + adaln_lora_B_T_3D
+                ).chunk(3, dim=-1)
+                shift_cross_attn_B_T_D, scale_cross_attn_B_T_D, gate_cross_attn_B_T_D = (
+                    self.adaln_up_cross_attn(down_cross) + adaln_lora_B_T_3D
+                ).chunk(3, dim=-1)
+                shift_mlp_B_T_D, scale_mlp_B_T_D, gate_mlp_B_T_D = (
+                    self.adaln_up_mlp(down_mlp) + adaln_lora_B_T_3D
+                ).chunk(3, dim=-1)
+            else:
+                shift_self_attn_B_T_D, scale_self_attn_B_T_D, gate_self_attn_B_T_D = (
+                    self.adaln_modulation_self_attn(emb_B_T_D).chunk(3, dim=-1)
+                )
+                shift_cross_attn_B_T_D, scale_cross_attn_B_T_D, gate_cross_attn_B_T_D = (
+                    self.adaln_modulation_cross_attn(emb_B_T_D).chunk(3, dim=-1)
+                )
+                shift_mlp_B_T_D, scale_mlp_B_T_D, gate_mlp_B_T_D = (
+                    self.adaln_modulation_mlp(emb_B_T_D).chunk(3, dim=-1)
+                )
 
         shift_self_attn_B_T_1_1_D = shift_self_attn_B_T_D[:, :, None, None, :]
         scale_self_attn_B_T_1_1_D = scale_self_attn_B_T_D[:, :, None, None, :]
@@ -1256,6 +1269,7 @@ class Block(nn.Module):
         attn_params: attention_dispatch.AttentionParams,
         rope_cos_sin: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
+        use_fp32: bool = False,
     ) -> torch.Tensor:
         if torch.is_grad_enabled() and self.training and self.gradient_checkpointing:
             if self.unsloth_offload_checkpointing:
@@ -1267,6 +1281,7 @@ class Block(nn.Module):
                     attn_params,
                     rope_cos_sin,
                     adaln_lora_B_T_3D,
+                    use_fp32,
                 )
             else:
                 return torch_checkpoint(
@@ -1277,6 +1292,7 @@ class Block(nn.Module):
                     attn_params,
                     rope_cos_sin,
                     adaln_lora_B_T_3D,
+                    use_fp32,
                     use_reentrant=False,
                 )
         else:
@@ -1287,6 +1303,7 @@ class Block(nn.Module):
                 attn_params,
                 rope_cos_sin,
                 adaln_lora_B_T_3D,
+                use_fp32,
             )
 
 
@@ -1853,6 +1870,7 @@ class Anima(nn.Module):
         capture_blocks: Optional[set] = None,
         feature_sink: Optional[dict] = None,
         stop_after_block: Optional[int] = None,
+        use_fp32: bool = False,
         **block_kwargs,
     ) -> torch.Tensor:
         """The block loop — the per-block compiled hot path (see compile_blocks).
@@ -1904,6 +1922,7 @@ class Anima(nn.Module):
                 t_emb_block,
                 crossattn_emb,
                 attn_params,
+                use_fp32=use_fp32,
                 **block_kwargs,
             )
 
@@ -2120,6 +2139,8 @@ class Anima(nn.Module):
 
         # Block stack runs in _run_blocks — a split point so pre/post-block regions
         # stay eager while the block loop is the compiled hot path.
+        use_fp32 = x_B_T_H_W_D.dtype == torch.float16
+
         x_B_T_H_W_D = self._run_blocks(
             x_B_T_H_W_D,
             t_embedding_B_T_D,
@@ -2128,6 +2149,7 @@ class Anima(nn.Module):
             capture_blocks=return_block_features,
             feature_sink=feature_sink,
             stop_after_block=stop_after_block,
+            use_fp32=use_fp32,
             **block_kwargs,
         )
 
@@ -2153,7 +2175,7 @@ class Anima(nn.Module):
             self._mod_guidance_final_w * self._mod_guidance_delta
         ).unsqueeze(1)
         x_B_T_H_W_O = self.final_layer(
-            x_B_T_H_W_D, t_emb_final, adaln_lora_B_T_3D=adaln_lora_B_T_3D
+            x_B_T_H_W_D, t_emb_final, adaln_lora_B_T_3D=adaln_lora_B_T_3D, use_fp32=use_fp32
         )
         x_B_C_Tt_Hp_Wp = self.unpatchify(x_B_T_H_W_O)
         if return_block_features is not None:

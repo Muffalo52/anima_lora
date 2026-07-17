@@ -50,7 +50,7 @@ def setup_logging(args=None, log_level=None, reset=False):
         handler = None
         if not args or not args.console_log_simple:
             try:
-                from rich.logging import RichHandler
+                raise ImportError("Force disable rich")
                 from rich.console import Console
 
                 handler = RichHandler(console=Console(stderr=True))

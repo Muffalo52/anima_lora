@@ -282,4 +282,4 @@ def get_optimizer_train_eval_fn(
 
 
 def is_schedulefree_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
-    return args.optimizer_type.lower().endswith("schedulefree".lower())
+    return "schedulefree" in args.optimizer_type.lower()

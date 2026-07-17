@@ -486,9 +486,30 @@ def _run_step(trainer, state: LoopState, batch) -> torch.Tensor:
 
         if state.profile_started:
             torch.cuda.nvtx.range_push("optimizer")
-        state.optimizer.step()
-        state.lr_scheduler.step()
-        state.optimizer.zero_grad(set_to_none=True)
+
+        # --- ScheduleFree+ step_func 패치 ---
+        raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
+        if hasattr(raw_opt, "step_func"):
+            if not hasattr(trainer, "_step_func_loss_accum"):
+                trainer._step_func_loss_accum = 0.0
+            trainer._step_func_loss_accum += loss.item()
+
+            if accelerator.sync_gradients:
+                if args.max_grad_norm == 0.0:
+                    accelerator.unscale_gradients()
+                avg_loss = trainer._step_func_loss_accum / args.gradient_accumulation_steps
+                raw_opt.step_func(avg_loss)
+                trainer._step_func_loss_accum = 0.0
+                state.lr_scheduler.step()
+                state.optimizer.zero_grad(set_to_none=True)
+                scaler = getattr(state.optimizer, 'scaler', None)
+                if scaler is not None:
+                    scaler.update()
+        else:
+            state.optimizer.step()
+            state.lr_scheduler.step()
+            state.optimizer.zero_grad(set_to_none=True)
+
         if state.profile_started:
             torch.cuda.nvtx.range_pop()
 
@@ -590,6 +611,16 @@ def _log_step(
     state.loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
     avr_loss: float = state.loss_recorder.moving_average
     logs = {"avr_loss": avr_loss}
+    raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
+    if hasattr(raw_opt, "param_groups") and len(raw_opt.param_groups) > 0:
+        pg = raw_opt.param_groups[0]
+        if "scheduled_lr" in pg:
+            logs["lr/scheduled_lr"] = pg["scheduled_lr"]
+            logs["lr/lr_max"] = pg.get("lr_max", 0.0)
+            logs["opt/grad_l1_ema"] = pg.get("grad_l1_ema", 0.0)
+            logs["opt/function_value_ema"] = pg.get("function_value_ema", 0.0)
+            logs["opt/ip_term"] = pg.get("ip_term", 0.0)
+            max_mean_logs["lr"] = f"{pg['scheduled_lr']:.2e}"
     _unwrapped_net = state.accelerator.unwrap_model(state.network)
     # Refresh router_H only on log cadence — get_router_entropy does a full
     # get_router_stats compute (D2H syncs) wasted on the progress-bar postfix;
@@ -637,6 +668,17 @@ def _log_step(
                 MetricContext(args=args, network=_unwrapped_net),
             )
         )
+        # --- WandB 전송 직전 실질 메트릭 재주입 ---
+        raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
+        if hasattr(raw_opt, "param_groups") and len(raw_opt.param_groups) > 0:
+            pg = raw_opt.param_groups[0]
+            if "scheduled_lr" in pg:
+                logs["lr/scheduled_lr"] = pg["scheduled_lr"]
+                logs["lr/lr_max"] = pg.get("lr_max", 0.0)
+                logs["opt/grad_l1_ema"] = pg.get("grad_l1_ema", 0.0)
+                logs["opt/function_value_ema"] = pg.get("function_value_ema", 0.0)
+                logs["opt/ip_term"] = pg.get("ip_term", 0.0)
+        # ----------------------------------------
         trainer.step_logging(state.accelerator, logs, state.global_step, epoch + 1)
 
 
