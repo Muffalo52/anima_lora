@@ -73,7 +73,11 @@ def run_loop(ctx: RunContext, cfg):
     plain algorithm; only ``data_iter`` and ``fdistill_bins`` are mutated
     (epoch re-iter / f-distill EMA), and neither is read after the loop.
     """
-    model = ctx.model
+    # Bind the fields the loop body touches more than once to short locals; the
+    # single-use ones (model, dataloader, dyn_n_min, uncond_base, softrank_min_pool,
+    # console_steps, tau_profiles, val_*, start_step) are read straight off ctx at
+    # their one use site below. data_iter / fdistill_bins are locals because the
+    # loop reassigns them (epoch re-iter / f-distill EMA).
     turbo = ctx.turbo
     device = ctx.device
     dtype = ctx.dtype
@@ -81,25 +85,17 @@ def run_loop(ctx: RunContext, cfg):
     student_sched = ctx.student_sched
     fake_sched = ctx.fake_sched
     disc_sched = ctx.disc_sched
-    dataloader = ctx.dataloader
     data_iter = ctx.data_iter
     _forward = ctx.forward
     student_sigmas = ctx.student_sigmas
     use_anchor = ctx.use_anchor
-    dyn_n_min = ctx.dyn_n_min
-    uncond_base = ctx.uncond_base
     softrank_on = ctx.softrank_on
     softrank_pool = ctx.softrank_pool
-    softrank_min_pool = ctx.softrank_min_pool
     cdm_on = ctx.cdm_on
     fdistill_bins = ctx.fdistill_bins
     writer = ctx.writer
     progress_sink = ctx.progress_sink
-    console_steps = ctx.console_steps
     metrics = ctx.metrics
-    tau_profiles = ctx.tau_profiles
-    # Single-use fields (val_cond / val_latent_shape / val_clean, start_step) are
-    # read straight off ctx at their one use site below rather than rebound here.
 
     progress = tqdm(
         range(ctx.start_step, cfg.iterations),
@@ -117,7 +113,7 @@ def run_loop(ctx: RunContext, cfg):
             try:
                 batch = next(data_iter)
             except StopIteration:
-                data_iter = iter(dataloader)
+                data_iter = iter(ctx.dataloader)
                 batch = next(data_iter)
             latents = batch["latents"]
             crossattn_emb = batch["crossattn_emb"]
@@ -139,7 +135,7 @@ def run_loop(ctx: RunContext, cfg):
             # Student update: roll an N-step Euler grid from pure noise ε (dpdmd
             # anchors step 1 to a teacher K-step target then refines; dmd is plain).
             eps = torch.randn_like(latents)  # shared start for anchor + student
-            c_null = uncond_for_batch(uncond_base, crossattn_emb)  # anchor + DMD eval
+            c_null = uncond_for_batch(ctx.uncond_base, crossattn_emb)  # anchor + DMD eval
 
             # --- teacher K-step CFG anchor (no grad) → v_target (DP-DMD only) ---
             v_target = None
@@ -154,7 +150,7 @@ def run_loop(ctx: RunContext, cfg):
             # CDM dynamic draw. Everything below indexes sigmas_it/n_steps_it so
             # the two modes share one code path.
             if cfg.dynamic_schedule:
-                sigmas_it = sample_dynamic_sigmas(dyn_n_min, cfg.student_steps)
+                sigmas_it = sample_dynamic_sigmas(ctx.dyn_n_min, cfg.student_steps)
                 n_steps_it = len(sigmas_it) - 1
             else:
                 sigmas_it, n_steps_it = student_sigmas, cfg.student_steps
@@ -198,7 +194,7 @@ def run_loop(ctx: RunContext, cfg):
                 # stays bounded (no negative-push). It rides the step-0 backward below.
                 if softrank_on:
                     if step % cfg.softrank_every_n == 0 and softrank_pool.ready(
-                        softrank_min_pool
+                        ctx.softrank_min_pool
                     ):
                         # Pool negatives → works at any batch size (B=1 included). Head
                         # 0 stays selected → no per-step-expert recompute hazard.
@@ -439,7 +435,7 @@ def run_loop(ctx: RunContext, cfg):
                 # log_interval cadence (per-step would re-introduce the syncs we
                 # just eliminated).
                 progress.set_postfix(**tqdm_postfix(m))
-                if console_steps:
+                if ctx.console_steps:
                     logger.info(
                         console_step_line(
                             m,
@@ -455,13 +451,13 @@ def run_loop(ctx: RunContext, cfg):
                         dataclasses.asdict(m), global_step=step + 1, epoch=0
                     )
                 metrics.reset()
-                for tp in tau_profiles:
+                for tp in ctx.tau_profiles:
                     tp.write(writer, step + 1)
 
             # --- diversity validation (DAVE same-prompt probe) ---
             if ctx.val_cond is not None and (step + 1) % cfg.validate_every_n_steps == 0:
                 dm = run_diversity_validation(
-                    model=model,
+                    model=ctx.model,
                     forward_fn=_forward,
                     set_student_step=turbo.set_student_step,
                     student_sigmas=student_sigmas,
