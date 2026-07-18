@@ -63,11 +63,18 @@ _WARN_FIELDS = (
     "student_lr",
     "fake_lr",
     "gan_disc_lr",
+    # Head granularity changes the objective, not the disc's parameters (same
+    # MLP applied pooled vs per-token) — bundles load across a switch.
+    "gan_disc_head",
     "student_alpha",
     "fake_alpha",
     "student_steps",
     "div_weight",
     "gan_loss_weight_gen",
+    # Delay/warmup reshape the generator-side λ ramp around the resume step —
+    # legitimate (e.g. adding a ramp after a collapsed cold start), never silent.
+    "gan_delay_steps",
+    "gan_warmup_steps",
     "f_div",
     "fake_steps_per_student_step",
     "teacher_cfg",

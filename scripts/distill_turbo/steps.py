@@ -297,7 +297,9 @@ def cdm_off_trajectory_loss(
     )
     eps_cdm = torch.randn_like(latents)
     x_renoised_cdm = renoise(x0_off.detach().to(ctx.dtype), tau_cdm, eps_cdm)
-    v_real_cdm = ctx.teacher_cfg_velocity(x_renoised_cdm, tau_cdm, crossattn_emb, c_null)
+    v_real_cdm = ctx.teacher_cfg_velocity(
+        x_renoised_cdm, tau_cdm, crossattn_emb, c_null
+    )
     v_fake_cdm = ctx.forward(
         "fake", x_renoised_cdm, tau_cdm, crossattn_emb, no_grad=True
     ).squeeze(2)
@@ -337,6 +339,7 @@ def gan_generator_term(
     grad_signal: torch.Tensor,
     fdistill_bins: torch.Tensor | None,
     B: int,
+    gan_weight: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """GAN generator term + f-distill reweighting (ideas 1 & 2).
 
@@ -346,13 +349,16 @@ def gan_generator_term(
     disc itself is frozen here. return_features_early stops after the deepest
     tapped block (half-depth grad forward — full-stack OOM'd).
 
-    No-op when the GAN is off (``turbo.disc is None``): returns a zero loss and
-    the ``grad_signal`` / ``fdistill_bins`` unchanged. Otherwise returns the gen
-    loss, the (possibly f-distill-reweighted) ``grad_signal``, and the updated
-    EMA ``fdistill_bins``.
+    No-op when the GAN is off (``turbo.disc is None``) — and, unless f-distill
+    needs the logits, while ``gan_weight`` is still 0 inside the delay window
+    (skips the grad-bearing half-depth teacher forward entirely; no RNG draws
+    happen here, so the skip leaves the step's random stream unchanged). Returns
+    a zero loss and the ``grad_signal`` / ``fdistill_bins`` unchanged in both
+    cases; otherwise the gen loss, the (possibly f-distill-reweighted)
+    ``grad_signal``, and the updated EMA ``fdistill_bins``.
     """
     turbo = ctx.turbo
-    if turbo.disc is None:
+    if turbo.disc is None or (gan_weight == 0.0 and not ctx.fdistill_on):
         return torch.zeros((), device=ctx.device), grad_signal, fdistill_bins
 
     turbo.set_disc_requires_grad(False)
@@ -401,21 +407,28 @@ def fake_update(
     latents: torch.Tensor,
     crossattn_emb: torch.Tensor,
     B: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fake (critic) + discriminator update against ``x_pred.detach()``.
 
     ``fake_steps_per_student_step`` inner updates, resampling (τ_fake, ε_fake)
     each iteration (standard DMD2 practice — keep the fake's target ahead of the
     moving x_pred dist). When the GAN is on, the discriminator steps once per
     fake inner step (FastGen cadence). Runs the fake + disc optimizer/scheduler
-    steps in-place; returns the mean fake loss and mean disc loss over the inner
-    steps (both detached scalars, for logging).
+    steps in-place; returns the mean fake loss, mean disc loss, mean disc
+    margin (mean real − mean fake logit — the "disc winning" observable the
+    hinge means hide: both hinge losses sit at equilibrium ≈0.69/1.39 even while
+    per-logit structure does the damage), and mean per-logit spread (std over
+    the fake branch's logits — spatial structure of disc pressure under the
+    token head; 0 when the head emits a single logit) over the inner steps (all
+    detached scalars, for logging).
     """
     turbo = ctx.turbo
     device, dtype = ctx.device, ctx.dtype
     x_pred_d = x_pred.detach()
     fake_loss_sum = torch.zeros((), device=device)
     gan_disc_sum = torch.zeros((), device=device)
+    gan_margin_sum = torch.zeros((), device=device)
+    gan_spread_sum = torch.zeros((), device=device)
     for _ in range(cfg.fake_steps_per_student_step):
         # τ-split critic: the drawn τ picks which bank trains this update
         # (banks=1 resolves to the identical sample_t call/RNG stream).
@@ -482,6 +495,13 @@ def fake_update(
             fake_logits_d = turbo.disc(_disc_feats(x_pred_d))
             real_logits_d = turbo.disc(_disc_feats(latents))
             loss_disc = gan_loss_discriminator(real_logits_d, fake_logits_d)
+            with torch.no_grad():
+                gan_margin_sum = gan_margin_sum + (
+                    real_logits_d.mean() - fake_logits_d.mean()
+                )
+                fl = fake_logits_d.flatten()
+                if fl.numel() > 1:  # host-side shape check, no sync
+                    gan_spread_sum = gan_spread_sum + fl.std()
 
             # Approximate-R1 (APT): penalize disc logit change under a small
             # perturbation of the real disc input. Perturb the renoised real
@@ -514,6 +534,10 @@ def fake_update(
             ctx.disc_sched.step()
             turbo.set_disc_requires_grad(False)
             gan_disc_sum = gan_disc_sum + loss_disc.detach()
-    fake_loss_mean_t = fake_loss_sum / cfg.fake_steps_per_student_step
-    gan_disc_mean_t = gan_disc_sum / cfg.fake_steps_per_student_step
-    return fake_loss_mean_t, gan_disc_mean_t
+    n_inner = cfg.fake_steps_per_student_step
+    return (
+        fake_loss_sum / n_inner,
+        gan_disc_sum / n_inner,
+        gan_margin_sum / n_inner,
+        gan_spread_sum / n_inner,
+    )

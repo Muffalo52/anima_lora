@@ -198,6 +198,7 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | `[sampling]` | `t_distribution` | `uniform` | τ sampling for the fake update + warmup (or `sigmoid`) |
 | `[sampling]` | `flow_shift` | `2.0` | σ-schedule shift for the student/teacher Euler grids (matches inference) |
 | `[gan]` | `weight_gen` | `0.03` (**on**) | teacher-feature GAN generator term — see below |
+| `[gan]` | `delay_steps` / `warmup_steps` | `0` / `0` | generator-side λ ramp: hold at 0 for `delay_steps` (disc still trains), then linear 0 → `weight_gen` over `warmup_steps`. Mandatory for `disc_head="token"` on a collapsed warm start — unramped dense logits froze pose at the init's mode (2026-07-18) |
 
 Validation enforces `student_steps ≥ 2` (step 1 is diversity-supervised + detached,
 so at least one further step must carry the DMD loss) and
@@ -323,15 +324,35 @@ DP-DMD is structurally **DMD2 with the GAN amputated**. Two levers port the miss
 adversarial machinery from NVlabs FastGen (`_archive/proposals/turbo_gan.md`) — the
 GAN now ships **on** at the FastGen `weight_gen = 0.03`; f-distill stays off:
 
-- **Teacher-feature GAN** (`[gan] weight_gen > 0`, FastGen idea 1). A tiny pooled-
-  token discriminator (`networks/methods/turbo_dmd.py::PooledTokenDiscriminator`,
+- **Teacher-feature GAN** (`[gan] weight_gen > 0`, FastGen idea 1). A tiny
+  discriminator (`networks/methods/turbo_dmd.py::TeacherFeatureDiscriminator`,
   ~2M params) reads the **frozen teacher DiT's** mid-block activations — captured
   with a compile-safe forward hook on `blocks[feature_block_idx]` (default middle).
-  The generator term `softplus(−disc(feat))` is added to the student loss; the disc
-  trains on the fake/critic cadence with its own AdamW (`disc_lr`, betas (0, 0.99)),
-  optional approximate-R1 (`r1_weight`). The student output stays a **plain LoRA**
-  (the disc is discarded at save, like the fake). FastGen QwenImage recipe:
-  `weight_gen=0.03`, `use_same_t_noise=true`, middle block, `disc_lr=1e-5`.
+  Two head granularities (`disc_head`): `"pooled"` (v0 default) mean-pools each
+  tap's tokens to one logit per tap; `"token"` (LADD-style) applies the **same**
+  MLP to every token for dense per-patch logits — identical parameters, so resume
+  bundles load across a switch; a pooled global logit only constrains global
+  statistics and saturates easily, while the dense head penalizes local defects
+  (glyphs, hands, texture). The generator term `softplus(−disc(feat))` is added to
+  the student loss; the disc trains on the fake/critic cadence with its own AdamW
+  (`disc_lr`, betas (0, 0.99)), optional approximate-R1 (`r1_weight`; per-token
+  MSE under `"token"`). The student output stays a **plain LoRA** (the disc is
+  discarded at save, like the fake). FastGen QwenImage recipe: `weight_gen=0.03`,
+  `use_same_t_noise=true`, middle block, `disc_lr=1e-5`.
+
+  **Token-head caveat (2026-07-18):** at full λ from step 0 on a collapsed warm
+  start (turboV10 init), the dense per-token gradient pins the student's
+  pose/layout at the init's modal composition — the collapsed image is already
+  locally "real" (zero GAN grad) while any pose excursion is penalized at every
+  token position, so the DM + div terms recover appearance axes but never the
+  layout. Use `delay_steps`/`warmup_steps` to hold the generator-side λ at 0
+  through the escape window (~500 steps) and ramp in after. **Observability:**
+  the hinge losses are blind to this (both arms sit at equilibrium ≈0.69/1.39) —
+  read `train/gan_disc_margin` (mean real − fake logit) and
+  `train/gan_logit_spread` (per-token logit std) instead, plus the cross-seed
+  `ac_sim` diversity validation (set `validate_every_n_steps` ≤ 250 for short
+  smokes — at the default 1000 it never fires in a 500-step run);
+  `train/gan_weight_gen_eff` traces the ramp itself.
 - **f-distill reweighting** (`[f_distill] f_div != "rkl"`, FastGen idea 2). Scales
   the DMD signal per-sample by `h = f'(r)`, `r = exp(disc logits)` (free from the
   GAN head). Requires `weight_gen > 0`. `"rkl"` ≡ uniform h ≡ plain DMD2 (no-op).

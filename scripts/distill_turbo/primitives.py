@@ -20,6 +20,7 @@ __all__ = [
     "renoise",
     "sample_t",
     "sample_t_routed",
+    "gan_effective_weight",
     "make_scheduler",
     "PadCache",
     "make_collate",
@@ -99,6 +100,24 @@ def cdm_extrapolate(
     """
     stride = t_to.detach().float().view(-1, *([1] * (x.dim() - 1))) - s_from
     return x.detach().float() + stride * v.detach().float()
+
+
+def gan_effective_weight(cfg, step: int) -> float:
+    """Generator-side GAN weight at ``step``: delay window, then linear ramp.
+
+    0 for ``step < gan_delay_steps`` (the escape window — DM+div re-diversify a
+    collapsed warm start before dense realism pressure lands; an unramped token
+    head froze pose at the init's mode), then a linear 0 → ``gan_loss_weight_gen``
+    ramp over ``gan_warmup_steps`` (instant-on when 0). The disc trains from
+    step 0 regardless — only the student-side λ ramps. Both knobs 0 → constant
+    ``gan_loss_weight_gen`` (byte-identical shipped loop).
+    """
+    if cfg.gan_loss_weight_gen == 0.0 or step < cfg.gan_delay_steps:
+        return 0.0
+    if cfg.gan_warmup_steps > 0:
+        ramp = min(1.0, (step - cfg.gan_delay_steps + 1) / cfg.gan_warmup_steps)
+        return cfg.gan_loss_weight_gen * ramp
+    return cfg.gan_loss_weight_gen
 
 
 def make_scheduler(opt, total_steps: int, lr: float):

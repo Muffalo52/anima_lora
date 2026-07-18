@@ -362,6 +362,33 @@ def build_argparser() -> argparse.ArgumentParser:
         "real logits and logits of a slightly-perturbed real input. 0 disables. "
         "Default: TOML (gan.r1_weight, default 0).",
     )
+    parser.add_argument(
+        "--gan_disc_head",
+        type=str,
+        default=None,
+        choices=["pooled", "token"],
+        help="Disc head granularity: 'pooled' = one logit per tap (mean-pooled "
+        "tokens, v0); 'token' = LADD-style dense per-token logits (same MLP "
+        "applied per token — identical params, denser real/fake signal). "
+        "Default: TOML (gan.disc_head, default 'pooled').",
+    )
+    parser.add_argument(
+        "--gan_delay_steps",
+        type=int,
+        default=-1,
+        help="Hold the generator-side GAN weight at 0 for the first N student "
+        "steps (the disc still trains from step 0). Gives DM+div an escape "
+        "window from a collapsed warm start before dense realism pressure "
+        "lands. Default: TOML (gan.delay_steps, default 0).",
+    )
+    parser.add_argument(
+        "--gan_warmup_steps",
+        type=int,
+        default=-1,
+        help="After the delay window, ramp the generator-side GAN weight "
+        "linearly 0 → weight_gen over N student steps (0 = instant-on). "
+        "Default: TOML (gan.warmup_steps, default 0).",
+    )
 
     # Soft-rank caption-discrimination auxiliary (off by default).
     parser.add_argument(
@@ -563,6 +590,9 @@ class TurboConfig:
     gan_feature_block_idx: int  # -1 → middle block (resolved in distill.py)
     gan_disc_lr: float
     gan_disc_hidden: int  # <= 0 → inner_dim // 2
+    gan_disc_head: str  # "pooled" (per-tap logit) | "token" (LADD-style per-token)
+    gan_delay_steps: int  # generator-side λ held at 0 for the first N steps (disc still trains)
+    gan_warmup_steps: int  # then λ ramps 0 → weight_gen over N steps (0 = instant-on)
     gan_r1_weight: float
     gan_r1_alpha: float
     gan_use_same_t_noise: bool
@@ -728,6 +758,11 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         gan_feature_block_idx = int(_flatten(cfg, "gan.feature_block_idx", -1))
     gan_disc_lr = float(_pick(args.gan_disc_lr, cfg, "gan.disc_lr", 1e-5))
     gan_disc_hidden = int(_flatten(cfg, "gan.disc_hidden", 0))
+    gan_disc_head = str(_pick(args.gan_disc_head, cfg, "gan.disc_head", "pooled"))
+    # Both default 0 → the generator term engages at full weight from step 0
+    # (byte-identical shipped loop).
+    gan_delay_steps = int(_pick(args.gan_delay_steps, cfg, "gan.delay_steps", 0))
+    gan_warmup_steps = int(_pick(args.gan_warmup_steps, cfg, "gan.warmup_steps", 0))
     gan_r1_weight = float(_pick(args.gan_r1_weight, cfg, "gan.r1_weight", 0.0))
     gan_r1_alpha = float(_flatten(cfg, "gan.r1_alpha", 0.1))
     gan_use_same_t_noise = bool(_flatten(cfg, "gan.use_same_t_noise", True))
@@ -988,6 +1023,15 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         )
     if gan_r1_weight < 0.0:
         raise ValueError(f"gan.r1_weight={gan_r1_weight}: must be >= 0")
+    if gan_disc_head not in ("pooled", "token"):
+        raise ValueError(
+            f"gan.disc_head={gan_disc_head!r}: expected 'pooled' or 'token'"
+        )
+    if gan_delay_steps < 0 or gan_warmup_steps < 0:
+        raise ValueError(
+            f"gan.delay_steps={gan_delay_steps} / gan.warmup_steps="
+            f"{gan_warmup_steps}: must be >= 0"
+        )
     _F_DIVS = ("rkl", "kl", "js", "sf", "neyman", "sh", "jf")
     if f_div not in _F_DIVS:
         raise ValueError(f"f_distill.f_div={f_div!r}: expected one of {_F_DIVS}")
@@ -1012,8 +1056,10 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         logger.info(
             f"GAN (DMD2 teacher-feature disc, FastGen idea 1) ON: "
             f"weight_gen={gan_loss_weight_gen}, feature_block_idx="
-            f"{gan_feature_block_idx} (-1 = middle), disc_lr={gan_disc_lr}, "
-            f"r1_weight={gan_r1_weight}, use_same_t_noise={gan_use_same_t_noise}."
+            f"{gan_feature_block_idx} (-1 = middle), disc_head={gan_disc_head}, "
+            f"disc_lr={gan_disc_lr}, r1_weight={gan_r1_weight}, "
+            f"use_same_t_noise={gan_use_same_t_noise}, "
+            f"delay_steps={gan_delay_steps}, warmup_steps={gan_warmup_steps}."
         )
         if f_div != "rkl":
             logger.info(
@@ -1160,6 +1206,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         gan_feature_block_idx=gan_feature_block_idx,
         gan_disc_lr=gan_disc_lr,
         gan_disc_hidden=gan_disc_hidden,
+        gan_disc_head=gan_disc_head,
+        gan_delay_steps=gan_delay_steps,
+        gan_warmup_steps=gan_warmup_steps,
         gan_r1_weight=gan_r1_weight,
         gan_r1_alpha=gan_r1_alpha,
         gan_use_same_t_noise=gan_use_same_t_noise,

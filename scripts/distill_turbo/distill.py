@@ -33,7 +33,7 @@ from .metrics import (
     tqdm_rate,
     write_scalars,
 )
-from .primitives import sample_dynamic_sigmas
+from .primitives import gan_effective_weight, sample_dynamic_sigmas
 from .resume import resume_path_for, save_resume_state
 from .setup import RunContext, build_run
 from .softrank import caption_rank_loss
@@ -135,7 +135,9 @@ def run_loop(ctx: RunContext, cfg):
             # Student update: roll an N-step Euler grid from pure noise ε (dpdmd
             # anchors step 1 to a teacher K-step target then refines; dmd is plain).
             eps = torch.randn_like(latents)  # shared start for anchor + student
-            c_null = uncond_for_batch(ctx.uncond_base, crossattn_emb)  # anchor + DMD eval
+            c_null = uncond_for_batch(
+                ctx.uncond_base, crossattn_emb
+            )  # anchor + DMD eval
 
             # --- teacher K-step CFG anchor (no grad) → v_target (DP-DMD only) ---
             v_target = None
@@ -354,11 +356,22 @@ def run_loop(ctx: RunContext, cfg):
                 )
 
             # --- GAN generator term + f-distill reweighting (ideas 1 & 2) ---
-            # No-op when the GAN is off; otherwise returns the gen loss, the
-            # (possibly f-distill-reweighted) grad_signal, and the updated EMA bins.
+            # No-op when the GAN is off or the delay/warmup ramp still holds the
+            # generator-side λ at 0 (disc keeps training below); otherwise
+            # returns the gen loss, the (possibly f-distill-reweighted)
+            # grad_signal, and the updated EMA bins.
+            gan_w = gan_effective_weight(cfg, step)
             gan_gen_loss, grad_signal, fdistill_bins = gan_generator_term(
-                ctx, cfg, x_pred, tau_dm, eps_dm, crossattn_emb, grad_signal,
-                fdistill_bins, B,
+                ctx,
+                cfg,
+                x_pred,
+                tau_dm,
+                eps_dm,
+                crossattn_emb,
+                grad_signal,
+                fdistill_bins,
+                B,
+                gan_w,
             )
 
             # --- assemble: DMD surrogate on x_θ ---
@@ -381,8 +394,8 @@ def run_loop(ctx: RunContext, cfg):
                     + cfg.softrank_weight * softrank_loss
                 )
 
-            if turbo.disc is not None:
-                loss_student = loss_student + cfg.gan_loss_weight_gen * gan_gen_loss
+            if turbo.disc is not None and gan_w > 0.0:
+                loss_student = loss_student + gan_w * gan_gen_loss
 
             loss_student.backward()
             if cfg.grad_clip > 0:
@@ -396,7 +409,7 @@ def run_loop(ctx: RunContext, cfg):
             # --- fake (critic) + discriminator update against x_pred.detach() ---
             # Runs the fake + disc optimizer/scheduler steps in-place; returns the
             # mean fake / disc loss over the inner steps for logging.
-            fake_loss_mean_t, gan_disc_mean_t = fake_update(
+            fake_loss_mean_t, gan_disc_mean_t, gan_margin_t, gan_spread_t = fake_update(
                 ctx, cfg, x_pred, latents, crossattn_emb, B
             )
 
@@ -414,7 +427,9 @@ def run_loop(ctx: RunContext, cfg):
             )
             metrics.add_div(div_loss_t)
             if turbo.disc is not None:
-                metrics.add_gan(gan_gen_loss, gan_disc_mean_t)
+                metrics.add_gan(
+                    gan_gen_loss, gan_disc_mean_t, gan_margin_t, gan_spread_t
+                )
             if softrank_on:
                 metrics.add_softrank(softrank_loss, active=softrank_ran)
 
@@ -432,6 +447,11 @@ def run_loop(ctx: RunContext, cfg):
                         writer.add_scalar(
                             "train/disc_lr", disc_sched.get_last_lr()[0], step + 1
                         )
+                    if turbo.disc is not None:
+                        # The ramped generator-side λ actually applied this step
+                        # (deterministic from step; makes the delay/warmup window
+                        # legible next to the margin/spread curves).
+                        writer.add_scalar("train/gan_weight_gen_eff", gan_w, step + 1)
                 # log_interval cadence (per-step would re-introduce the syncs we
                 # just eliminated).
                 progress.set_postfix(**tqdm_postfix(m))
@@ -455,7 +475,10 @@ def run_loop(ctx: RunContext, cfg):
                     tp.write(writer, step + 1)
 
             # --- diversity validation (DAVE same-prompt probe) ---
-            if ctx.val_cond is not None and (step + 1) % cfg.validate_every_n_steps == 0:
+            if (
+                ctx.val_cond is not None
+                and (step + 1) % cfg.validate_every_n_steps == 0
+            ):
                 dm = run_diversity_validation(
                     model=ctx.model,
                     forward_fn=_forward,
@@ -499,6 +522,9 @@ def run_loop(ctx: RunContext, cfg):
                     "ss_turbo_k_anchor": str(cfg.k_anchor),
                     "ss_turbo_div_weight": str(cfg.div_weight),
                     "ss_turbo_gan_weight_gen": str(cfg.gan_loss_weight_gen),
+                    "ss_turbo_gan_disc_head": cfg.gan_disc_head,
+                    "ss_turbo_gan_delay_steps": str(cfg.gan_delay_steps),
+                    "ss_turbo_gan_warmup_steps": str(cfg.gan_warmup_steps),
                     "ss_turbo_cdm_weight": str(cfg.cdm_weight),
                     "ss_turbo_f_div": cfg.f_div,
                 }

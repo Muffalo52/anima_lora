@@ -226,6 +226,7 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         adaln_alpha=cfg.adaln_alpha,
         gan_feature_indices=gan_indices,
         gan_disc_hidden=cfg.gan_disc_hidden if cfg.gan_disc_hidden > 0 else None,
+        gan_disc_head=cfg.gan_disc_head,
     )
     turbo.freeze_dit()
     turbo.student.to(device=device, dtype=dtype)

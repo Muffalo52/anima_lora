@@ -45,28 +45,48 @@ logger = logging.getLogger(__name__)
 View = Literal["teacher", "student", "fake"]
 
 
-class PooledTokenDiscriminator(nn.Module):
-    """Pooled-token GAN head over frozen-teacher block features (FastGen v0).
+class TeacherFeatureDiscriminator(nn.Module):
+    """GAN head over frozen-teacher block features (FastGen idea 1).
 
     FastGen's ``Discriminator_ImageDiT`` un-flattens each tapped block's tokens
     back to ``(B, D, H_p, W_p)`` and runs a conv head. Under Anima's native-shape
     bucketing the patch grid is per-bucket and, with ``compile_blocks``, the block
     output is the fake-5D ``(B, 1, L, 1, D)`` layout — so the spatial reshape is
-    the fragile part the proposal flags. This v0 sidesteps it: **mean-pool each
-    tap's token output over every axis between batch and channel** → ``(B, D)``,
-    then a 2-layer MLP per tap → a per-tap logit. The pool is shape-agnostic, so
-    it works identically on the eager ``(B, T, H, W, D)`` grid and the compiled
-    ``(B, 1, L, 1, D)`` layout. Logits for all taps are concatenated to
-    ``(B, num_taps)``; runs in fp32 for GAN-loss stability.
+    the fragile part the proposal flags. Both granularities here sidestep it by
+    never reshaping to a grid:
+
+    - ``granularity="pooled"`` (v0): **mean-pool each tap's token output over
+      every axis between batch and channel** → ``(B, D)``, then the 2-layer MLP
+      per tap → one logit per tap → ``(B, num_taps)``.
+    - ``granularity="token"`` (LADD-style dense head): apply the SAME per-tap MLP
+      to every token (Linear/LayerNorm act on the last dim, so no reshape) →
+      ``(B, *spatial, 1)`` flattened to ``(B, N_tokens)`` per tap →
+      ``(B, num_taps·N)``. Dense per-patch real/fake signal; the hinge losses and
+      the f-distill ratio already ``mean()`` over the logit axis, so downstream
+      is shape-agnostic.
+
+    Both run identically on the eager ``(B, T, H, W, D)`` grid and the compiled
+    ``(B, 1, L, 1, D)`` layout, in fp32 for GAN-loss stability. The parameters
+    are IDENTICAL across granularities (same MLP, applied pooled vs per-token),
+    so resume bundles load across a head switch — resume warns via
+    ``gan_disc_head`` in ``_WARN_FIELDS`` instead of refusing.
 
     Tiny by design (~``inner_dim²/2`` params/tap, ≈2M at D=2048) and discarded at
     save — pure training scaffolding, exactly like the fake/critic LoRA.
     """
 
     def __init__(
-        self, *, inner_dim: int, num_taps: int, hidden_dim: int | None = None
+        self,
+        *,
+        inner_dim: int,
+        num_taps: int,
+        hidden_dim: int | None = None,
+        granularity: Literal["pooled", "token"] = "pooled",
     ) -> None:
         super().__init__()
+        if granularity not in ("pooled", "token"):
+            raise ValueError(f"unknown disc granularity: {granularity!r}")
+        self.granularity = granularity
         h = hidden_dim if hidden_dim is not None else inner_dim // 2
         self.heads = nn.ModuleList(
             nn.Sequential(
@@ -81,16 +101,22 @@ class PooledTokenDiscriminator(nn.Module):
     def forward(self, feats: list[torch.Tensor]) -> torch.Tensor:
         if len(feats) != len(self.heads):
             raise ValueError(
-                f"PooledTokenDiscriminator expected {len(self.heads)} feature "
+                f"TeacherFeatureDiscriminator expected {len(self.heads)} feature "
                 f"tensors, got {len(feats)}"
             )
         logits = []
         for head, f in zip(self.heads, feats):
-            # Pool over every axis between batch (0) and channel (-1): handles
-            # both (B, T, H, W, D) eager and (B, 1, L, 1, D) native-flatten.
-            pooled = f.float().mean(dim=tuple(range(1, f.ndim - 1)))  # (B, D)
-            logits.append(head(pooled))
-        return torch.cat(logits, dim=1)  # (B, num_taps)
+            if self.granularity == "token":
+                # Per-token logits: LayerNorm/Linear act on the last dim, so the
+                # head runs unchanged on (B, T, H, W, D) eager and (B, 1, L, 1, D)
+                # native-flatten alike → (B, *spatial, 1) → (B, N_tokens).
+                logits.append(head(f.float()).flatten(1))
+            else:
+                # Pool over every axis between batch (0) and channel (-1): handles
+                # both (B, T, H, W, D) eager and (B, 1, L, 1, D) native-flatten.
+                pooled = f.float().mean(dim=tuple(range(1, f.ndim - 1)))  # (B, D)
+                logits.append(head(pooled))
+        return torch.cat(logits, dim=1)  # (B, num_taps) | (B, num_taps·N)
 
 
 def gan_loss_generator(fake_logits: torch.Tensor) -> torch.Tensor:
@@ -332,6 +358,7 @@ class TurboDMDNetwork:
         adaln_alpha: float = 0.0,
         gan_feature_indices: set[int] | None = None,
         gan_disc_hidden: int | None = None,
+        gan_disc_head: Literal["pooled", "token"] = "pooled",
     ) -> None:
         self.unet = unet
         self.student_rank = int(student_rank)
@@ -538,18 +565,19 @@ class TurboDMDNetwork:
         # NOT a forward hook; the caller hands the feature dict to self.disc through
         # features_in_order. Taps arrive in native-flatten (B,1,L,1,D) under compile
         # (pooled shape-agnostically); early-exit runs only blocks[0..k].
-        self.disc: PooledTokenDiscriminator | None = None
+        self.disc: TeacherFeatureDiscriminator | None = None
         self.gan_feature_indices: list[int] = []
         if gan_feature_indices:
             self.gan_feature_indices = sorted(gan_feature_indices)
-            self.disc = PooledTokenDiscriminator(
+            self.disc = TeacherFeatureDiscriminator(
                 inner_dim=unet.model_channels,
                 num_taps=len(self.gan_feature_indices),
                 hidden_dim=gan_disc_hidden,
+                granularity=gan_disc_head,
             )
             logger.info(
                 f"TurboDMDNetwork: GAN disc attached (taps={self.gan_feature_indices}, "
-                f"inner_dim={unet.model_channels}, "
+                f"head={gan_disc_head}, inner_dim={unet.model_channels}, "
                 f"{sum(p.numel() for p in self.disc.parameters()):,} params)"
             )
 

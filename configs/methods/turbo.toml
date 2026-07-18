@@ -114,6 +114,13 @@ weight_gen = 0.03               # λ on the generator GAN term (softplus hinge).
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
 disc_lr = 1e-5                  # discriminator AdamW LR
 disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2
+disc_head = "pooled"            # "pooled" = one logit per tap (v0) | "token" = LADD-style dense
+                                # per-token logits (same MLP per token — identical params, denser
+                                # real/fake signal; resume bundles load across a switch)
+delay_steps = 0                 # hold generator-side λ at 0 for the first N steps (disc still
+                                # trains) — escape window for a collapsed warm start; the token
+                                # head at full λ from step 0 freezes pose at the init's mode
+warmup_steps = 0                # then ramp λ linearly 0 → weight_gen over N steps (0 = instant)
 r1_weight = 0.0                 # approximate-R1 (APT) disc regularizer weight. 0 = off
 r1_alpha = 0.1                  # perturbation scale for the R1 input
 use_same_t_noise = true         # real disc branch reuses the fake step's (τ, ε) (FastGen default)

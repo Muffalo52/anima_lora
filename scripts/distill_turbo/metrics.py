@@ -54,6 +54,8 @@ class FlushedMetrics:
     div: float
     gan_gen: float
     gan_disc: float
+    gan_margin: float
+    gan_spread: float
     softrank: float
     softrank_active: float
     cdm: float
@@ -115,11 +117,23 @@ class TurboMetrics:
 
     @torch.no_grad()
     def add_gan(
-        self, gan_gen_loss: torch.Tensor, gan_disc_mean_t: torch.Tensor
+        self,
+        gan_gen_loss: torch.Tensor,
+        gan_disc_mean_t: torch.Tensor,
+        gan_margin_t: torch.Tensor,
+        gan_spread_t: torch.Tensor,
     ) -> None:
-        """Accumulate the GAN generator/discriminator losses (pre-weight)."""
+        """Accumulate the GAN generator/discriminator losses (pre-weight) plus
+        the disc-update observables: margin = mean(real) − mean(fake) logit
+        (disc discrimination strength — the hinge means sit at equilibrium even
+        while per-logit structure collapses diversity, so read THIS, not the
+        losses) and spread = std over the fake branch's logits (spatial
+        structure of disc pressure under the token head; 0 for a single-logit
+        pooled head)."""
         self._acc.add("gan_gen", gan_gen_loss.detach().float())
         self._acc.add("gan_disc", gan_disc_mean_t.detach().float())
+        self._acc.add("gan_margin", gan_margin_t.detach().float())
+        self._acc.add("gan_spread", gan_spread_t.detach().float())
 
     @torch.no_grad()
     def add_softrank(self, softrank_loss: torch.Tensor, *, active: bool) -> None:
@@ -229,6 +243,8 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     writer.add_scalar("train/div_loss", m.div, step)
     writer.add_scalar("train/gan_gen_loss", m.gan_gen, step)
     writer.add_scalar("train/gan_disc_loss", m.gan_disc, step)
+    writer.add_scalar("train/gan_disc_margin", m.gan_margin, step)
+    writer.add_scalar("train/gan_logit_spread", m.gan_spread, step)
     writer.add_scalar("train/softrank_active", m.softrank_active, step)
     writer.add_scalar("train/cdm_grad_rms", m.cdm, step)
     if m.softrank_active > 0:
@@ -286,6 +302,7 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
     if m.gan_gen != 0 or m.gan_disc != 0:
         postfix["gen"] = f"{m.gan_gen:.3f}"
         postfix["dsc"] = f"{m.gan_disc:.3f}"
+        postfix["mgn"] = f"{m.gan_margin:.3f}"
     if m.softrank_active > 0:
         postfix["srank"] = f"{m.softrank / m.softrank_active:.3f}"
     if m.cdm != 0:
