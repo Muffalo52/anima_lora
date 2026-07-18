@@ -161,6 +161,44 @@ so sub-attn rank there is near-free. The reg_dims path keeps the NETWORK alpha
 init is exact). The extractor mirrors it as `--adaln_rank`. Guards in
 `tests/test_turbo_adaln.py`.
 
+### Sizing `adaln_rank` / `adaln_alpha` (measured 2026-07-18)
+
+Trained adaln deltas are strongly low-effective-rank — **rank-matching adaln to
+the network rank is overprovisioning**. SVD spectrum of the learned `.2` ΔW
+(mean over the 84 modules; energy fraction captured at rank r):
+
+| Source | eff. rank | top-1 | r8 | r16 | r32 |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Official turboV10, **exact full-rank delta** (full fine-tune, all 256 dims free) | 10.8 | 51% | 86% | 93% | 96% |
+| r96 ASVD extract of it | 7.9 | 52% | 88% | 95% | 98% |
+| superturbo_E student (alloc r16) | 8.6 | 43% | 87% | 96% | — |
+| soup s1001 style LoRA (alloc r32) | 13.1 | 37% | 74% | 89% | 100% |
+| *same ckpt, attn/MLP for contrast* (alloc r32) | 25.3 | 13% | 49% | 73% | 100% |
+
+Half the energy sits in ONE direction regardless of objective (DP-DMD distill
+vs style FM) or parametrization — a property of the pathway (global
+tone/gate/σ-remap), not the task. attn/MLP nearly saturates whatever rank it is
+given; adaln fills ~40–55% of it with a fast-decaying tail. **Default
+`adaln_rank = 16`** (keeps ~93% of even the official full-rank delta); 8 is
+defensible; matching a rank-64 network wastes ~30M params on low-energy tail
+(4.3M at r8). The r32/48/64 extract-energy numbers above are the near-lossless
+*extraction* bar, not the training-allocation bar.
+
+**`adaln_alpha` follows the √r law, not linear α/r.** Optimal LoRA α scales
+sublinearly as α\*(r) ≈ C·√r ([LoRA-α, arXiv 2606.12883](https://arxiv.org/abs/2606.12883)),
+so cross-rank scale preservation means keeping **α/√r** constant:
+
+```
+adaln_alpha = network_alpha · sqrt(adaln_rank / network_rank)
+```
+
+e.g. superturbo: student 180@r64 → adaln 90@r16 (both α/√r = 22.5). The naive
+linear rule (45 in that example) systematically under-scales the smaller-rank
+module — the ×2 hotter α/r multiplier is the √r law's prescribed compensation,
+not a hot arm. We borrow only the *relative* √r consistency; the paper's
+absolute α_base ≈ 256√r calibration is for fresh-init LLM SFT and does not
+transfer to warm-started adapters.
+
 **Compile interaction (fixed 2026-07-15)**: training adaln under
 `compile_dynamic_seq` initially crashed at the first grad-bearing forward with a
 `ConstraintViolationError` on the marked seq range. The adaln LoRA makes
@@ -228,8 +266,16 @@ Consequences:
   [[project_sea_delta_generalizes_guidance]]: it loads in `load_dit_model`),
   the t-embedding carries max-pooled text, so an adaln LoRA *trained on such a
   model* would learn a weakly pooled-text-conditioned modulation response
-  (global tags, not token-level). Untested hypothesis; changes what bench arm 2
-  could measure.
+  (global tags, not token-level). **Tested 2026-07-18 — refuted at Phase 0**:
+  a soup ingredient retrained with the projection loaded frozen (train.py now
+  has a `--pooled_text_proj` knob for this) learned zero extra text-coupling —
+  ΔU text-coupling index ≈0.003, identical to the stock-trained arm. The FM
+  loss gives modulation no pressure to carry text while cross-attn already
+  does; shifting the operating point alone is insufficient. The only measurable
+  effect is a cost: the checkpoint becomes proj-coupled (~1.7× higher
+  injection dependence at render, i.e. off-distribution in a stock ComfyUI
+  flow without the proj). Don't re-propose mod-aware LoRA training without an
+  explicit text→modulation objective. [[project_modaware_adaln_phase0]]
 - **Independent evidence convergence**: mod-guidance's effectiveness (ICLR'26
   result) and the official turbo's adaln movement both say the modulation
   pathway is the high-leverage lever for *global* behavior — and neither says
@@ -239,12 +285,16 @@ Consequences:
 #### Compatibility design options (escalate only on evidence)
 
 Magnitude bound first: the steering distortion is `‖ΔW‖/‖W‖` per block — ≤1–3%
-even for the turbo extract, smaller for trained style LoRAs. diffusion-pipe
-LoRAs have been silently exercising this coupling in ComfyUI without visible
-mod-guidance breakage, so treat this as a *measured* risk, not an assumed one.
+for the turbo extract; trained style LoRAs at hot alpha reach **3.6%** (soup
+s1001, alpha 128 @ r32). **Measured 2026-07-18 (weight-space probe): even at
+3.6% the adaln LoRA transduces the steering delta untouched — norm ratio
+1.000, cosine 0.9999, all σ.** So MOD=1 looking similar to MOD=0 on a soup is
+NOT adaln interference; the steering effect is just inherently small on that
+LoRA (mod3−w0 LPIPS ≈0.008 at w=3), absorbed LoRA-generically if at all.
 
-0. **Do nothing + verify** (default): the MOD=1 A/B in the bench plan is the
-   gate. If drift is invisible at rendered level, stop here.
+0. **Do nothing + verify** (default): **measured-correct at current scales
+   (≤~4% rel. magnitude) — stop here.** Options below stay documented only for
+   a future regime (much hotter adaln or evidence of real rendered drift).
 1. **Ship adaln as a separate file** — worth doing regardless of the coupling:
    the extractor's module specs already make an adaln-only emit trivial, ComfyUI
    chains LoRA loaders natively, and it buys a free per-part strength knob,

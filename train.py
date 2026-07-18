@@ -505,6 +505,19 @@ class AnimaTrainer:
             attn_softmax_scale=attn_softmax_scale,
         )
 
+        # Mod-aware training: install the distilled pooled_text_proj so every
+        # training forward runs with the pooled-text t-embedding injection
+        # active — an adaln LoRA then trains against the operating point
+        # mod-guidance perturbs at inference. Frozen implicitly (the LoRA
+        # factory excludes pooled_text_proj; the DiT-wide requires_grad_(False)
+        # covers it). Loaded on CPU first — the params are meta tensors when
+        # absent from the pretrained checkpoint — then moved to the model's
+        # loading placement. The injection lives in Anima.forward outside the
+        # blocks, so compile_blocks is unaffected.
+        if getattr(args, "pooled_text_proj", None):
+            anima_utils.load_pooled_text_proj(model, args.pooled_text_proj, "cpu")
+            model.pooled_text_proj.to(device=loading_device, dtype=loading_dtype)
+
         # NOTE: torch.compile (compile_blocks) is intentionally NOT done here.
         # It must run AFTER the adapter's apply_to monkey-patches the targeted
         # Linears, or dynamo traces the un-adapted forward — see the compile

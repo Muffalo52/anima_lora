@@ -161,6 +161,16 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Learning rate for AdaLN modulation layers. None=same as base LR, 0=freeze. Note: mod layers are not included in LoRA by default.",
     )
     parser.add_argument(
+        "--pooled_text_proj",
+        type=str,
+        default=None,
+        help="Path to distilled pooled_text_proj weights (mod-guidance adapter). "
+        "When set, the projection is loaded frozen so every training forward runs "
+        "with the pooled-text t-embedding injection active (mod-aware training) — "
+        "adaln LoRAs then train against the operating point mod-guidance perturbs "
+        "at inference. Same flag name as inference.py.",
+    )
+    parser.add_argument(
         "--t5_tokenizer_path",
         type=str,
         default=None,
