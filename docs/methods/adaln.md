@@ -147,9 +147,40 @@ _derive_network_kwargs`) and `train.py::resolve_network_kwargs` forwards them. S
 (lora / chimera / soup / byg) with no per-method opt-in. Verify a merge with
 `make print-config METHOD=<m> PRESET=<p>`.
 
-**Inert on the frozen-DiT methods.** `soft_tokens` and `easycontrol` use their own
-`network_module`s; they take `**kwargs` and ignore the adaln keys, so the base
-default is silently a no-op there rather than an error.
+**Frozen-DiT methods.** `soft_tokens` takes `**kwargs` and ignores the adaln
+keys, so the base default is silently a no-op there rather than an error.
+`easycontrol` grew its own opt-in consumer 2026-07-18 — see next section.
+
+### EasyControl (opt-in, cond-gated — 2026-07-18)
+
+EasyControl reads the same three knobs but with **method-TOML pins keeping it
+off by default** (`configs/easycontrol/easycontrol.toml` +
+`configs/gui-methods/easycontrol.toml` pin `train_adaln = false` — required
+because `resolve_network_kwargs` forwards base.toml's LoRA-family
+`train_adaln = true` / `adaln_alpha = 90` to every network module, and 90 is
+~4× hot for EC's cond LoRA scale). Unlike the LoRA family, `adaln_rank`/
+`adaln_alpha` are **inert when `train_adaln` is off** (never a raise — base
+always supplies them). Enable with `--train_adaln true` on a `make`/CLI run.
+
+Shape: per-block `_LoRAProj(256 → 3·2048)` deltas on the **target stream's**
+three `adaln_up_{br}` up-projections, applied inside the two-stream inner and
+the cached-cond-KV inference path only — the no-cond fallback runs the
+original `Block.forward`, so the delta is **cond-gated by construction** and
+"no reference = exact baseline DiT" survives (unconditional target-stream
+drift was the objection to naive adaln-in-EC). The cond stream's own
+modulation (`t_embedder(zeros)`) stays stock; zero-init up preserves step-0
+equivalence; `multiplier` scales the delta (a strength knob at inference).
+Defaults: `adaln_rank = 8` (global-grade hypothesis, ~87% of a full-rank
+delta's energy), alpha via the √r law from the cond LoRA
+(`32·√(8/32) = 16`). Motivating arm: colorize "how far to push" — a t-only
+global chroma/tone-commitment prior (it cannot carry reference content; a
+per-image decision is out of reach). Pre-check before training the arm:
+measure residual mean-saturation bias of colorize outputs vs GT — if the
+miner saturation floor already zeroed it, adaln has nothing to absorb.
+Guards in `tests/test_easycontrol_adaln.py`. EC checkpoints are consumed by
+the EC KSampler node, not ComfyUI's LoRA loader — the comfy relayout does not
+apply; the node needs to learn the `adaln_lora_*` keys before an
+adaln-trained EC checkpoint ships.
 
 Turbo knobs (2026-07-15): `network.train_adaln` wires the include on student+fake;
 `network.fake_adaln = false` builds an adaln-less critic (VRAM lever);

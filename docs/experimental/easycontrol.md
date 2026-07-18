@@ -143,6 +143,14 @@ For the default `r = 16`, `D = 2048`, `num_blocks = 28`, `mlp_ratio = 4.0`:
 Set `apply_ffn_lora=0` in `network_args` to drop the FFN LoRA — halves the
 trainable count.
 
+Opt-in extra: `train_adaln = true` adds a **target-stream adaln LoRA**
+(per-block deltas on the three `adaln_up_{br}` up-projections, 256→3·D;
++~4.3 M at the default `adaln_rank = 8`). It is cond-gated — applied only on
+the two-stream / cached-cond-KV paths, so the no-cond fallback stays exact
+baseline DiT. A t-only *global* per-σ modulation prior (e.g. colorize chroma
+commitment), not a conditioning pathway. Sizing, rationale, and the base.toml
+pin gotcha: `docs/methods/adaln.md` §EasyControl.
+
 ## Cond token count: native, no static padding
 
 The cond stream runs at the cond latent's **native** token count — there is no
