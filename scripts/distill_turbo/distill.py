@@ -73,6 +73,7 @@ from .metrics import (
 )
 from .primitives import (
     PadCache,
+    cdm_extrapolate,
     make_collate,
     make_scheduler,
     renoise,
@@ -551,6 +552,9 @@ def main():
     # than the last few captions.
     softrank_on = cfg.softrank_weight > 0.0
     softrank_pool = CaptionNegativePool(cfg.softrank_pool_size) if softrank_on else None
+    # L_CDM off-trajectory loss (docs/proposal/cdm.md Phase 1). weight=0 → the
+    # whole path is off (no extra forwards, no extra RNG draws) → byte-identical.
+    cdm_on = cfg.cdm_weight > 0.0
     softrank_min_pool = max(
         cfg.softrank_k, round(cfg.softrank_warmup_ratio * cfg.softrank_pool_size)
     )
@@ -903,6 +907,12 @@ def main():
             softrank_loss = torch.zeros((), device=device)
             softrank_ran = False
 
+            # L_CDM launch point: the DMD grad step's on-trajectory (x_in, v, σ),
+            # captured raw here and detached at use (cdm_extrapolate). Under
+            # grad_step='random' the launch point sweeps the whole grid over
+            # training; under 'all'/'last' it is the final (cleanest-σ) step.
+            cdm_src = None
+
             if use_anchor:
                 # Step 0 is the diversity anchor (supervised toward v_target, then
                 # detached under split_bwd); steps 1..N-1 carry the DMD-refine grad,
@@ -981,6 +991,8 @@ def main():
                     v_g = _forward(
                         "student", x, t_b, crossattn_emb, no_grad=False
                     ).squeeze(2)
+                    if cdm_on:
+                        cdm_src = (x, v_g, s_g)
                     x_pred = x - s_g * v_g  # one-step x0-prediction at step g
                 else:
                     # 'all' → full BPTT over 1..N-1; else ('last') → only the final step
@@ -1000,6 +1012,8 @@ def main():
                         v = _forward(
                             "student", x, t_b, crossattn_emb, no_grad=step_no_grad
                         ).squeeze(2)
+                        if cdm_on and i == last_step:
+                            cdm_src = (x, v, s_i)
                         x = x - (s_i - s_next) * v
                         if step_no_grad:
                             x = x.detach()
@@ -1025,6 +1039,8 @@ def main():
                         ).squeeze(2)
                         if v_student is None:
                             v_student = v
+                        if cdm_on and i == last_step:
+                            cdm_src = (x, v, s_i)
                         x = x - (s_i - s_next) * v
                     x_pred = x
                 else:
@@ -1054,6 +1070,8 @@ def main():
                     v_g = _forward(
                         "student", x, t_b, crossattn_emb, no_grad=False
                     ).squeeze(2)
+                    if cdm_on:
+                        cdm_src = (x, v_g, s_g)
                     x_pred = x - s_g * v_g  # one-step x0-prediction at step g
                     v_student = v_g
 
@@ -1097,6 +1115,93 @@ def main():
                 )
                 grad_dm = grad_dm / denom
             grad_signal = grad_dm.detach()
+
+            # --- L_CDM off-trajectory loss (CDM §3.3; docs/proposal/cdm.md Phase 1) ---
+            # From the grad step's on-trajectory (x_g, v_g, σ_g), Euler-extrapolate a
+            # large random stride to x_off at t' ~ U(0,1) (velocity-driven, their
+            # Eq. 7 — cdm_extrapolate detaches, so this is a fresh leaf like the DM
+            # renoise path: one grad forward, no second BPTT chain). The student's
+            # local clean estimate there, x0_off = x_off − t'·v_off, gets the same
+            # real-vs-fake DMD surrogate as grad_dm (variant A: CFG'd real score,
+            # consistent with the fused DM; fresh τ̂ draw). This supervises exactly
+            # the truncation-drift region few-step Euler traverses off-manifold,
+            # which on-trajectory rollouts never visit even under dynamic_schedule.
+            # ORDER MATTERS: this whole branch must run BEFORE the GAN gen forward —
+            # that forward's checkpointed recompute happens at backward under the
+            # then-current view, so it must stay the last view flip of the step
+            # (project_turbo_view_ckpt_recompute_hazard).
+            #
+            # VRAM: the CDM student forward is unsloth-checkpointed (same lever as
+            # gan.grad_ckpt — a full second grad graph next to the step-g graph
+            # OOMs a 16 GB card) and BACKWARDED IN-BRANCH, so its graph is freed
+            # before the GAN forward builds. The ckpt'd forward recomputes at that
+            # backward under the then-current view, so the view is restored to
+            # 'student' first (the teacher/fake delta forwards flipped it) —
+            # backward-while-view-live, the same contract the GAN forward honors.
+            cdm_loss = torch.zeros((), device=device)
+            if cdm_on and cdm_src is not None:
+                x_g_cdm, v_g_cdm, s_g_cdm = cdm_src
+                # CPU RNG (seeded by torch.manual_seed, no GPU sync), per-sample.
+                t_off = torch.rand(B).to(device=device, dtype=dtype)
+                # requires_grad_ is LOAD-BEARING under the unsloth ckpt below:
+                # the reentrant path silently drops the LoRA param grads when
+                # every explicit checkpoint input is detached
+                # (project_unsloth_reentrant_drops_grad) — the leaf's grad flag
+                # is what forces the autograd node.
+                x_off = (
+                    cdm_extrapolate(x_g_cdm, v_g_cdm, s_g_cdm, t_off)
+                    .to(dtype)
+                    .requires_grad_()
+                )
+                with selective_block_grad_ckpt(model):
+                    v_off = _forward(
+                        "student", x_off, t_off, crossattn_emb, no_grad=False
+                    ).squeeze(2)
+                # Local clean estimate at t' (their Eq. 1, in our v-param).
+                x0_off = x_off.float() - t_off.view(B, 1, 1, 1).float() * v_off.float()
+                tau_cdm = sample_t_routed(
+                    B,
+                    turbo=turbo,
+                    fake_tau_banks=cfg.fake_tau_banks,
+                    fake_tau_boundary=cfg.fake_tau_boundary,
+                    distribution="uniform",
+                    sigmoid_scale=cfg.sigmoid_scale,
+                    device=device,
+                    dtype=dtype,
+                )
+                eps_cdm = torch.randn_like(latents)
+                x_renoised_cdm = renoise(x0_off.detach().to(dtype), tau_cdm, eps_cdm)
+                v_real_cdm = _teacher_cfg_velocity(
+                    x_renoised_cdm, tau_cdm, crossattn_emb, c_null
+                )
+                v_fake_cdm = _forward(
+                    "fake", x_renoised_cdm, tau_cdm, crossattn_emb, no_grad=True
+                ).squeeze(2)
+                delta_cdm = v_real_cdm - v_fake_cdm
+                tau_cdm_e = tau_cdm.view(B, 1, 1, 1).float()
+                grad_cdm = tau_cdm_e * delta_cdm.float()
+                if cfg.dm_x0_norm:
+                    denom_cdm = (
+                        (tau_cdm_e * v_real_cdm.float())
+                        .abs()
+                        .mean(dim=(1, 2, 3), keepdim=True)
+                        .clamp_min(cfg.norm_floor)
+                    )
+                    grad_cdm = grad_cdm / denom_cdm
+                grad_cdm = grad_cdm.detach()
+                if mask is not None:
+                    cdm_loss = (grad_cdm * x0_off * mask).mean()
+                else:
+                    cdm_loss = (grad_cdm * x0_off).mean()
+                # Backward NOW, with the student view restored: the ckpt'd forward
+                # above recomputes here and must see the view it was recorded
+                # under (the delta forwards flipped it to teacher/fake). Frees the
+                # CDM graph before the GAN forward; grads accumulate, grad_clip
+                # below clips the full student gradient once.
+                turbo.set_view("student")
+                (cfg.cdm_weight * cdm_loss).backward()
+                cdm_loss = cdm_loss.detach()  # metrics-only from here
+                metrics.add_cdm(grad_cdm)
 
             # --- GAN generator term + f-distill reweighting (ideas 1 & 2) ---
             # The disc scores the frozen TEACHER's block features of the student's
@@ -1389,6 +1494,7 @@ def main():
                     "ss_turbo_k_anchor": str(cfg.k_anchor),
                     "ss_turbo_div_weight": str(cfg.div_weight),
                     "ss_turbo_gan_weight_gen": str(cfg.gan_loss_weight_gen),
+                    "ss_turbo_cdm_weight": str(cfg.cdm_weight),
                     "ss_turbo_f_div": cfg.f_div,
                 }
                 if cfg.train_adaln:

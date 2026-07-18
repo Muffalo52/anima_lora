@@ -3,9 +3,10 @@
 Status: **PHASE 0 (dynamic schedule) WIRED 2026-07-17, ON by default in
 `configs/methods/turbo.toml` — 500-step smoke A/B was a decisive dynamic win:
 every gate axis, every eval style, visible at a glance (details in the Phase 0
-section). The verdict-grade 2k read is queued (`queued.md`); Phases 1–3 stay
-gated on it, but the smoke also validated the line's core thesis — see "Why
-this line".**
+section). PHASE 1 (L_CDM) WIRED 2026-07-17, OFF by default (`cdm.weight = 0` —
+byte-identical loop; details in the Phase 1 section). The verdict-grade 2k read
+is queued (`queued.md`); Phase 1 *enablement* and Phases 2–3 stay gated on it,
+but the smoke also validated the line's core thesis — see "Why this line".**
 
 - **Phase 0 shipped**: `dmd.dynamic_schedule` — per-iteration random continuous
   rollout grid (`primitives.sample_dynamic_sigmas`, consumed as `sigmas_it` /
@@ -99,7 +100,7 @@ reward model**.
 | Gradient over all grid points | `grad_step="random"` (routing only — grid stays fixed) | routing ≠ schedule; Phase 0 adds the schedule |
 | L_CA (real cond vs real uncond, weight α, own τ) | fused into the DM real score via `teacher_cfg` | Phase 3 splits it |
 | L_DM (real cond vs fake cond, own τ̃) | `delta_dm` (but real side CFG'd) | Phase 3 |
-| L_CDM (off-trajectory) | — | Phase 1 |
+| L_CDM (off-trajectory) | wired, off (`cdm.weight`) | Phase 1 A/B |
 | GAN / reward aux | teacher-feature GAN + f-distill | Phase 2 removes if L_CDM covers it |
 | Diversity mechanism | DP first-step teacher anchor | **kept — ours is stronger** ([[project_official_turbo_v10_eval]]: V10 mode-collapsed vs ours). CDM has no equivalent; never trade the anchor for L_CDM. |
 
@@ -162,7 +163,40 @@ line closes (flip the TOML back to `false` either way if B loses).
 
 ## Phase 1 — L_CDM off-trajectory loss (gated on Phase 0)
 
-The payload. Wiring sketch, one new branch in the student update, reusing the
+**Wired 2026-07-17, off by default** (`[cdm] weight = 0.0` — no extra forwards,
+no extra RNG draws, byte-identical loop; the A/B stays gated on the 2k read).
+Implementation notes on top of the sketch below:
+
+- Launch point: the DMD grad step's `(x_g, v_g, σ_g)` in every `grad_step`
+  branch (`cdm_src`); under the shipped `random` it sweeps the whole grid over
+  training. Extrapolation is `primitives.cdm_extrapolate` (detached fresh
+  leaf — pinned by `tests/test_turbo_cdm.py`).
+- The surrogate reuses the loop's inner-product form
+  (`(grad_cdm.detach() * x0_off).mean()` + mask), NOT a literal transcription
+  of the MSE notation below — same gradient, no sign-convention risk.
+- **VRAM (16 GB-fit, smoke-proven)**: a second full student grad graph next to
+  the step-g graph OOMs a 16 GB card (first smoke died exactly there), so the
+  CDM forward is unsloth-checkpointed (`selective_block_grad_ckpt`, the
+  gan.grad_ckpt lever) and **backwarded in-branch** with the view restored to
+  `student` first — backward-while-view-live, and the graph frees before the
+  GAN forward builds. `x_off.requires_grad_()` is load-bearing under that ckpt
+  ([[project_unsloth_reentrant_drops_grad]]: all-detached inputs silently drop
+  the LoRA grads). Grads accumulate; `grad_clip` still clips the full student
+  gradient once. Extra compute: ~+1 recomputed (eager) student forward.
+- **Ordering is load-bearing**: the branch runs BEFORE the GAN gen forward,
+  which must stay the last view flip before backward or its checkpointed
+  recompute corrupts silently ([[project_turbo_view_ckpt_recompute_hazard]]).
+- Guards (config resolve): refuses `per_step_expert` (no head owns an off-grid
+  t'), global `--grad_ckpt` (same view × ckpt-recompute hazard class as
+  GAN+grad_ckpt), and `blocks_to_swap > 0` (extra forwards unaudited under
+  swap). Resume warns across a `cdm.weight` flip; ckpt metadata carries
+  `ss_turbo_cdm_weight` (arm verification — never trust the TOML you think you
+  ran, [[project_turbo_sectioned_config_silent_default]]).
+- Telemetry: `train/cdm_grad_rms` (rms of the detached off-trajectory delta,
+  comparable to `train/grad_signal_rms`; the surrogate's value is sign-random
+  and not logged).
+
+Wiring sketch, one new branch in the student update, reusing the
 step-g machinery:
 
 1. After the grad step g produces `v_g` at σ_g: draw t' ~ U(0,1) (CPU RNG),

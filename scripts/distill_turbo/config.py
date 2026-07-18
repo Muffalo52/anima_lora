@@ -413,6 +413,22 @@ def build_argparser() -> argparse.ArgumentParser:
         "Default: TOML (softrank.warmup_ratio, default 1.0).",
     )
 
+    # CDM off-trajectory loss (L_CDM; docs/proposal/cdm.md Phase 1, off by default).
+    parser.add_argument(
+        "--cdm_weight",
+        type=float,
+        default=-1.0,
+        help="λ on the L_CDM off-trajectory loss (CDM §3.3, arXiv:2605.06376): "
+        "Euler-extrapolate the DMD grad step's (x_g, v_g) by a random stride to "
+        "t' ~ U(0,1), run one grad-bearing student forward there, and apply the "
+        "same real-vs-fake DMD surrogate to its local x0 estimate (variant A: "
+        "CFG'd real score, consistent with the fused DM). Supervises the "
+        "truncation-drift region few-step Euler traverses off-manifold. 0 "
+        "disables the whole path (byte-identical loop, no extra forwards/RNG). "
+        "Cost when on: +1 student grad forward, +2 teacher & +1 fake no-grad "
+        "per iteration. Default: TOML (cdm.weight, default 0).",
+    )
+
     # f-distill reweighting (FastGen idea 2; needs the GAN disc).
     parser.add_argument(
         "--f_div",
@@ -532,6 +548,12 @@ class TurboConfig:
     # instead of training only on the fixed inference grid. Validation/inference
     # stay on the static grid; the DP anchor composes unchanged (t₁=1 pinned).
     dynamic_schedule: bool
+
+    # CDM off-trajectory loss (L_CDM, docs/proposal/cdm.md Phase 1): supervise
+    # the student's local x0 estimate at a velocity-extrapolated off-trajectory
+    # point (t' ~ U(0,1)) with the same real-vs-fake delta as the DM branch.
+    # 0 = the whole path off (byte-identical loop).
+    cdm_weight: float
 
     # Base objective selector
     base_loss: str
@@ -690,6 +712,10 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     dynamic_schedule = bool(_flatten(cfg, "dmd.dynamic_schedule", False))
 
     base_loss = _pick(args.base_loss, cfg, "base_loss", "dpdmd")
+
+    # weight=0 keeps the whole L_CDM path off → byte-identical loop (no extra
+    # forwards, no extra RNG draws).
+    cdm_weight = float(_pick(args.cdm_weight, cfg, "cdm.weight", 0.0))
 
     # weight_gen=0 keeps the whole GAN/disc path off → byte-identical DP-DMD.
     # feature_block_idx sentinel is -2 (not -1) because -1 means middle block.
@@ -914,6 +940,42 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             f"softness={softrank_softness}, pool_size={softrank_pool_size} "
             f"(~{softrank_pool_size} MiB), warmup_ratio={softrank_warmup_ratio}."
         )
+    if cdm_weight < 0.0:
+        raise ValueError(f"cdm.weight={cdm_weight}: must be >= 0")
+    if cdm_weight > 0.0:
+        if per_step_expert:
+            # Heads are keyed to fixed grid steps; the off-trajectory forward
+            # runs at an arbitrary continuous t' no head owns.
+            raise ValueError(
+                "cdm.weight > 0 is incompatible with per_step_expert (the "
+                "off-trajectory forward runs at t' ~ U(0,1), which no per-step "
+                "head owns)."
+            )
+        if bool(args.grad_ckpt):
+            # Same view × deferred-ckpt-recompute class as --grad_ckpt + GAN:
+            # the CDM branch flips the view (student → teacher → fake) after the
+            # rollout's checkpointed student forwards, corrupting their recompute.
+            raise ValueError(
+                "--grad_ckpt with cdm.weight > 0: the rollout's checkpointed "
+                "student forwards recompute after the CDM branch flipped the "
+                "view to teacher/fake — the recomputed blocks drop the student "
+                "LoRA and the gradient is silently corrupted "
+                "(project_turbo_view_ckpt_recompute_hazard). Turn one off."
+            )
+        if int(args.blocks_to_swap) > 0:
+            # Extra per-step forwards are the offloader's audited-risk area
+            # ([[project_blockswap_extra_forwards_gradcache]]); turbo keeps the
+            # DiT resident by default. Fail at config time, don't desync.
+            raise ValueError(
+                "cdm.weight > 0 requires blocks_to_swap=0 — the off-trajectory "
+                "forwards are unaudited under block swap."
+            )
+        logger.info(
+            f"L_CDM off-trajectory loss ON (docs/proposal/cdm.md Phase 1): "
+            f"weight={cdm_weight}, variant A (CFG'd real score), t' ~ U(0,1) "
+            "launched from the DMD grad step; +1 student grad forward, "
+            "+2 teacher & +1 fake no-grad per iteration."
+        )
     if bool(args.grad_ckpt) and gan_loss_weight_gen > 0.0:
         # View × deferred-ckpt-recompute hazard: a forward that flips the global
         # view after the rollout's checkpointed forwards corrupts their recompute.
@@ -1092,6 +1154,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         norm_floor=norm_floor,
         dmd_grad_step=dmd_grad_step,
         dynamic_schedule=dynamic_schedule,
+        cdm_weight=cdm_weight,
         base_loss=base_loss,
         gan_loss_weight_gen=gan_loss_weight_gen,
         gan_feature_block_idx=gan_feature_block_idx,
@@ -1167,6 +1230,7 @@ _TB_KEYS = (
     "base_loss",
     "gan_loss_weight_gen",
     "softrank_weight",
+    "cdm_weight",
     "f_div",
     "k_anchor",
     "teacher_anchor_steps",

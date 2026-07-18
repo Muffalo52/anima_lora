@@ -56,6 +56,7 @@ class FlushedMetrics:
     gan_disc: float
     softrank: float
     softrank_active: float
+    cdm: float
 
 
 # Single source of truth for the accumulator key set — adding a logged scalar is
@@ -130,6 +131,16 @@ class TurboMetrics:
         """
         self._acc.add("softrank", softrank_loss.detach().float())
         self._acc.add("softrank_active", 1.0 if active else 0.0)
+
+    @torch.no_grad()
+    def add_cdm(self, grad_cdm: torch.Tensor) -> None:
+        """Accumulate the L_CDM gradient-signal rms (pre-weight).
+
+        The surrogate loss value itself is a sign-random gradient vehicle (like
+        ``loss_student``), so the health scalar is the rms of the detached
+        off-trajectory delta — directly comparable to ``train/grad_signal_rms``.
+        """
+        self._acc.add("cdm", grad_cdm.detach().float().pow(2).mean().sqrt())
 
     def flush(self, log_interval: int) -> FlushedMetrics:
         """One CUDA sync per log boundary: read every accumulator, mean it."""
@@ -219,6 +230,7 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     writer.add_scalar("train/gan_gen_loss", m.gan_gen, step)
     writer.add_scalar("train/gan_disc_loss", m.gan_disc, step)
     writer.add_scalar("train/softrank_active", m.softrank_active, step)
+    writer.add_scalar("train/cdm_grad_rms", m.cdm, step)
     if m.softrank_active > 0:
         # Normalize the interval mean to active steps so the curve reads as the
         # per-firing matched-caption soft rank (→ 0 as discrimination recovers),
@@ -276,4 +288,6 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
         postfix["dsc"] = f"{m.gan_disc:.3f}"
     if m.softrank_active > 0:
         postfix["srank"] = f"{m.softrank / m.softrank_active:.3f}"
+    if m.cdm != 0:
+        postfix["cdm"] = f"{m.cdm:.2e}"
     return postfix

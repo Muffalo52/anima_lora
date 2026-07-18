@@ -72,6 +72,7 @@ _WARN_FIELDS = (
     "fake_steps_per_student_step",
     "teacher_cfg",
     "dynamic_schedule",
+    "cdm_weight",
 )
 
 
