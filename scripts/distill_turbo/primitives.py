@@ -20,9 +20,12 @@ __all__ = [
     "renoise",
     "sample_t",
     "sample_t_routed",
+    "gan_effective_weight",
     "make_scheduler",
     "PadCache",
     "make_collate",
+    "sample_dynamic_sigmas",
+    "cdm_extrapolate",
 ]
 
 
@@ -80,6 +83,41 @@ def sample_dynamic_sigmas(n_min: int, n_max: int) -> list[float]:
         return [1.0, 0.0]
     interior = torch.sort(torch.rand(n - 1), descending=True).values.tolist()
     return [1.0, *interior, 0.0]
+
+
+def cdm_extrapolate(
+    x: torch.Tensor, v: torch.Tensor, s_from: float, t_to: torch.Tensor
+) -> torch.Tensor:
+    """Velocity-driven Euler extrapolation to an off-trajectory point (CDM Eq. 7).
+
+    ``x(t') = x + (t' − s)·v`` — the rollout's own Euler form, with an arbitrary
+    (large, possibly noiseward) stride to ``t' ~ U(0,1)`` instead of the next
+    grid point. Inputs are DETACHED and the result is a plain fp32 tensor with
+    no graph: the extrapolation is a launch point for one fresh grad-bearing
+    student forward, not a second BPTT chain (the deliberate deviation
+    documented in docs/proposal/cdm.md Phase 1 — mirrors the DM renoise path).
+    ``t_to`` is per-sample ``(B,)``, broadcast against ``x``'s trailing dims.
+    """
+    stride = t_to.detach().float().view(-1, *([1] * (x.dim() - 1))) - s_from
+    return x.detach().float() + stride * v.detach().float()
+
+
+def gan_effective_weight(cfg, step: int) -> float:
+    """Generator-side GAN weight at ``step``: delay window, then linear ramp.
+
+    0 for ``step < gan_delay_steps`` (the escape window — DM+div re-diversify a
+    collapsed warm start before dense realism pressure lands; an unramped token
+    head froze pose at the init's mode), then a linear 0 → ``gan_loss_weight_gen``
+    ramp over ``gan_warmup_steps`` (instant-on when 0). The disc trains from
+    step 0 regardless — only the student-side λ ramps. Both knobs 0 → constant
+    ``gan_loss_weight_gen`` (byte-identical shipped loop).
+    """
+    if cfg.gan_loss_weight_gen == 0.0 or step < cfg.gan_delay_steps:
+        return 0.0
+    if cfg.gan_warmup_steps > 0:
+        ramp = min(1.0, (step - cfg.gan_delay_steps + 1) / cfg.gan_warmup_steps)
+        return cfg.gan_loss_weight_gen * ramp
+    return cfg.gan_loss_weight_gen
 
 
 def make_scheduler(opt, total_steps: int, lr: float):

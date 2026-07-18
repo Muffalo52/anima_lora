@@ -48,8 +48,8 @@ fake_tau_boundary = 0.5
 
 per_step_expert = false
 
-student_init_weights = "output/ckpt/turbo/anima_turboV10_delta_r80_asvd.safetensors"
-fake_init_weights = "output/ckpt/turbo/anima_turboV10_delta_r80_asvd.safetensors"
+student_init_weights = "models/extracted/anima_turboV10_delta_r80_asvd_adaln.safetensors"
+fake_init_weights = "models/extracted/anima_turboV10_delta_r80_asvd_adaln.safetensors"
 
 # DMD schedule.
 [dmd]
@@ -65,6 +65,22 @@ dynamic_schedule = true
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
 grad_step = "random"
+
+# CDM off-trajectory loss (L_CDM, arXiv:2605.06376 §3.3; docs/proposal/cdm.md
+# Phase 1). From the DMD grad step's on-trajectory point, Euler-extrapolate a
+# large random stride to t' ~ U(0,1) and supervise the student's local clean
+# estimate there with the same real-vs-fake delta as the DM branch (variant A:
+# CFG'd real score). Targets truncation drift — the off-manifold states few-step
+# Euler actually traverses, which stay unsupervised even under dynamic_schedule.
+# 0 = off (byte-identical loop, no extra forwards/RNG). Cost when on: +1 student
+# grad forward (unsloth-ckpt'd + backwarded in-branch → peak VRAM ≈ baseline,
+# ~+1 recomputed eager forward), +2 teacher & +1 fake no-grad per iteration
+# (~+50-60% step time with the GAN still on).
+# ENABLEMENT IS GATED on the Phase-0 2k verdict (queued.md) — wired ahead of it,
+# do not flip on before that read lands. Incompatible with per_step_expert,
+# --grad_ckpt, and blocks_to_swap > 0 (refused at config resolve).
+[cdm]
+weight = 0.0
 
 # Optimization.
 [optim]
@@ -98,6 +114,13 @@ weight_gen = 0.03               # λ on the generator GAN term (softplus hinge).
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
 disc_lr = 1e-5                  # discriminator AdamW LR
 disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2
+disc_head = "pooled"            # "pooled" = one logit per tap (v0) | "token" = LADD-style dense
+                                # per-token logits (same MLP per token — identical params, denser
+                                # real/fake signal; resume bundles load across a switch)
+delay_steps = 0                 # hold generator-side λ at 0 for the first N steps (disc still
+                                # trains) — escape window for a collapsed warm start; the token
+                                # head at full λ from step 0 freezes pose at the init's mode
+warmup_steps = 0                # then ramp λ linearly 0 → weight_gen over N steps (0 = instant)
 r1_weight = 0.0                 # approximate-R1 (APT) disc regularizer weight. 0 = off
 r1_alpha = 0.1                  # perturbation scale for the R1 input
 use_same_t_noise = true         # real disc branch reuses the fake step's (τ, ε) (FastGen default)

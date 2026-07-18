@@ -79,9 +79,16 @@ def test_accumulate_flush_matches_reference_formulas():
         # div + gan also exercised this step.
         m.add_div(torch.tensor(0.2 * (i + 1)))
         ref["div"] += 0.2 * (i + 1)
-        m.add_gan(torch.tensor(0.3 * (i + 1)), torch.tensor(0.4 * (i + 1)))
+        m.add_gan(
+            torch.tensor(0.3 * (i + 1)),
+            torch.tensor(0.4 * (i + 1)),
+            torch.tensor(0.5 * (i + 1)),
+            torch.tensor(0.6 * (i + 1)),
+        )
         ref["gan_gen"] += 0.3 * (i + 1)
         ref["gan_disc"] += 0.4 * (i + 1)
+        ref["gan_margin"] += 0.5 * (i + 1)
+        ref["gan_spread"] += 0.6 * (i + 1)
 
     out = m.flush(log_interval)
     for name, total in ref.items():

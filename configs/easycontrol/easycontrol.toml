@@ -36,6 +36,19 @@ network_module = "networks.methods.easycontrol"
 network_dim = 32
 network_alpha = 32
 
+# Target-stream adaln LoRA — OPT-IN (flip train_adaln to true, or override on
+# the CLI). Cond-gated by construction: applied only when a reference is set,
+# so "no cond = exact baseline DiT" survives. It is a t-only GLOBAL modulation
+# prior (per-σ tone/strength — e.g. colorize chroma commitment); it cannot
+# carry reference content. See docs/methods/adaln.md.
+# These pins are REQUIRED even while off: base.toml sets train_adaln=true +
+# adaln_alpha=90 for the LoRA family, and resolve_network_kwargs forwards
+# top-level keys to every network module — method wins over base, so pinning
+# here keeps EC opt-in and at EC-scale alpha (√r law from 32@r32).
+train_adaln = false
+adaln_rank = 8
+adaln_alpha = 16.0
+
 network_args = [
     "b_cond_init=-10.0",     # logit bias init: exp(-10) ≈ 4.5e-5 → α ≈ 1 → step 0 = baseline DiT
     "cond_scale=1.0",

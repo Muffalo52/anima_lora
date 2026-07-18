@@ -109,6 +109,8 @@ DEFAULT_LORA_DIM = 16
 DEFAULT_LORA_ALPHA = 16
 DEFAULT_B_COND_INIT = -10.0
 DEFAULT_COND_RES_SCALE = 1.0  # 1.0 = native cond res (bit-exact to pre-PAI path)
+DEFAULT_ADALN_IN_DIM = 256  # AdaLN-LoRA bottleneck width (adaln_up_* in_features)
+DEFAULT_ADALN_RANK = 8
 
 
 # Cond-stream channel scaling uses a COND-SPECIFIC calibration — the LoRA-family
@@ -241,6 +243,19 @@ def create_network(
     apply_ffn_lora = bool(int(kwargs.get("apply_ffn_lora", 1)))
     cond_res_scale = float(kwargs.get("cond_res_scale", DEFAULT_COND_RES_SCALE))
 
+    # Target-stream adaln LoRA (opt-in; see docs/methods/adaln.md §EasyControl).
+    # Reuses the LoRA-family knob names, which resolve_network_kwargs forwards
+    # from top-level config — base.toml sets train_adaln=true for the LoRA
+    # family, so configs/easycontrol/*.toml MUST pin train_adaln=false to keep
+    # this opt-in. adaln_rank/adaln_alpha are sizing knobs, deliberately inert
+    # when train_adaln is off (base.toml always supplies them; raising like the
+    # LoRA family does would break every default EC run).
+    from networks.lora_anima.config import _as_bool
+
+    train_adaln = _as_bool(kwargs.get("train_adaln"))
+    adaln_rank = int(kwargs.get("adaln_rank", DEFAULT_ADALN_RANK) or DEFAULT_ADALN_RANK)
+    adaln_alpha = float(kwargs.get("adaln_alpha", 0.0) or 0.0)  # <=0 → √r law
+
     # Deprecated 2026-06-10, accepted so old snapshot TOMLs replay: the
     # fp32-bottleneck autograd was removed (bench/lora_fp32_bottleneck).
     if str(kwargs.get("use_custom_down_autograd", "false")).strip().lower() in (
@@ -275,6 +290,12 @@ def create_network(
     )
     mlp_ratio = DEFAULT_MLP_RATIO  # Anima default; not exposed on the unet attr
 
+    adaln_in_dim = DEFAULT_ADALN_IN_DIM
+    if unet is not None and getattr(unet, "blocks", None):
+        up = getattr(unet.blocks[0], "adaln_up_self_attn", None)
+        if up is not None:
+            adaln_in_dim = up.in_features
+
     network = EasyControlNetwork(
         num_blocks=num_blocks,
         hidden_size=hidden_size,
@@ -289,6 +310,10 @@ def create_network(
         multiplier=multiplier,
         channel_scaling_alpha=channel_scaling_alpha,
         channel_scales=channel_scales,
+        train_adaln=train_adaln,
+        adaln_rank=adaln_rank,
+        adaln_alpha=adaln_alpha,
+        adaln_in_dim=adaln_in_dim,
     )
 
     # REPA v2 alignment, mirroring networks.lora_anima.factory. Config stashed on
@@ -297,8 +322,6 @@ def create_network(
     # extended self-attention in blocks <= repa_layer (conditioning-utilization
     # pressure, not representation shaping). The block hook captures the target
     # stream alone (cond_x rides side channels), so REPAMethodAdapter is unchanged.
-    from networks.lora_anima.config import _as_bool
-
     if _as_bool(kwargs.get("use_repa")):
         repa_mode = str(kwargs.get("repa_mode", "relational")).lower()
         if repa_mode != "relational":
@@ -397,6 +420,14 @@ def create_network_from_weights(
                 if f"{mlname}.{idx}.inv_scale" in present_inv:
                     channel_scales[_cond_lora_calib_key(kind, idx)] = torch.ones(in_dim)
 
+    # Adaln LoRA presence + sizing come from the weights themselves (metadata
+    # for alpha; shapes are authoritative for rank / in-dim).
+    adaln_w = (weights_sd or {}).get("adaln_lora_self_attn.0.lora_down.weight")
+    train_adaln = adaln_w is not None
+    adaln_rank = int(adaln_w.shape[0]) if train_adaln else DEFAULT_ADALN_RANK
+    adaln_in_dim = int(adaln_w.shape[1]) if train_adaln else DEFAULT_ADALN_IN_DIM
+    adaln_alpha = float(metadata.get("ss_adaln_alpha", 0.0))
+
     network = EasyControlNetwork(
         num_blocks=num_blocks,
         hidden_size=hidden_size,
@@ -411,6 +442,10 @@ def create_network_from_weights(
         multiplier=multiplier,
         channel_scaling_alpha=channel_scaling_alpha,
         channel_scales=channel_scales,
+        train_adaln=train_adaln,
+        adaln_rank=adaln_rank,
+        adaln_alpha=adaln_alpha,
+        adaln_in_dim=adaln_in_dim,
     )
     return network, weights_sd
 
@@ -435,6 +470,10 @@ class EasyControlNetwork(AdapterNetworkBase):
         multiplier: float = 1.0,
         channel_scaling_alpha: float = 0.0,
         channel_scales: Optional[dict] = None,
+        train_adaln: bool = False,
+        adaln_rank: int = DEFAULT_ADALN_RANK,
+        adaln_alpha: float = 0.0,
+        adaln_in_dim: int = DEFAULT_ADALN_IN_DIM,
     ):
         super().__init__()
         if hidden_size % num_heads != 0:
@@ -514,6 +553,56 @@ class EasyControlNetwork(AdapterNetworkBase):
             self.cond_lora_ffn1 = None
             self.cond_lora_ffn2 = None
 
+        # Target-stream adaln LoRA (opt-in): per-block, per-branch delta on the
+        # AdaLN-LoRA up-projections (adaln_up_{self_attn,cross_attn,mlp},
+        # adaln_in_dim -> 3*D). Applied ONLY on the two-stream / cached-cond-KV
+        # target paths — the no-cond fallback runs the original Block.forward,
+        # so the delta is cond-gated by construction and "no reference = exact
+        # baseline DiT" survives. The cond stream's own modulation (cond_temb
+        # at t=0) stays stock. Zero-init up keeps step-0 equivalence. Rationale
+        # + sizing: docs/methods/adaln.md (t-only global modulation — a per-σ
+        # tone/strength prior, e.g. colorize chroma commitment; it cannot carry
+        # reference content).
+        self.train_adaln = bool(train_adaln)
+        self.adaln_rank = int(adaln_rank)
+        self.adaln_in_dim = int(adaln_in_dim)
+        if adaln_alpha <= 0.0:
+            # √r law (α*(r) ∝ √r — docs/methods/adaln.md): keep α/√r consistent
+            # with the cond LoRA rather than linearly scaling α/r.
+            adaln_alpha = cond_lora_alpha * math.sqrt(
+                self.adaln_rank / max(cond_lora_dim, 1)
+            )
+        self.adaln_alpha = float(adaln_alpha)
+        if self.train_adaln:
+            self.adaln_lora_self_attn = nn.ModuleList(
+                [
+                    _LoRAProj(
+                        self.adaln_in_dim, 3 * D, self.adaln_rank, self.adaln_alpha
+                    )
+                    for _ in range(num_blocks)
+                ]
+            )
+            self.adaln_lora_cross_attn = nn.ModuleList(
+                [
+                    _LoRAProj(
+                        self.adaln_in_dim, 3 * D, self.adaln_rank, self.adaln_alpha
+                    )
+                    for _ in range(num_blocks)
+                ]
+            )
+            self.adaln_lora_mlp = nn.ModuleList(
+                [
+                    _LoRAProj(
+                        self.adaln_in_dim, 3 * D, self.adaln_rank, self.adaln_alpha
+                    )
+                    for _ in range(num_blocks)
+                ]
+            )
+        else:
+            self.adaln_lora_self_attn = None
+            self.adaln_lora_cross_attn = None
+            self.adaln_lora_mlp = None
+
         # Per-block scalar additive logit bias on cond keys. Init -10 → cond
         # softmax mass ≈ 4.5e-5 at step 0 → α ≈ 1 → target_out ≈ baseline DiT.
         # 0-d Parameters (not one [num_blocks] Parameter) so each block's closure
@@ -564,9 +653,15 @@ class EasyControlNetwork(AdapterNetworkBase):
             if isinstance(m, _LoRAProj) and m._has_channel_scale
         )
         total = sum(p.numel() for p in self.parameters())
+        adaln_desc = (
+            f"r={self.adaln_rank} alpha={self.adaln_alpha:g}"
+            if self.train_adaln
+            else "off"
+        )
         logger.info(
             f"EasyControlNetwork: blocks={num_blocks}, hidden={hidden_size}/{num_heads}h, "
             f"r={cond_lora_dim} alpha={cond_lora_alpha}, ffn_lora={apply_ffn_lora}, "
+            f"adaln_lora={adaln_desc}, "
             f"b_cond_init={b_cond_init}, cond_scale={cond_scale}, "
             f"cond_res_scale={self.cond_res_scale}, "
             f"channel_scaling_alpha={self.channel_scaling_alpha} "
@@ -588,6 +683,18 @@ class EasyControlNetwork(AdapterNetworkBase):
                 f"DiT has {len(unet.blocks)} blocks, EasyControl expects {self.num_blocks}. "
                 "Re-create the network with matching num_blocks."
             )
+        if self.train_adaln:
+            b0 = unet.blocks[0]
+            if not getattr(b0, "use_adaln_lora", False):
+                raise ValueError(
+                    "train_adaln requires the AdaLN-LoRA bottleneck form "
+                    "(use_adaln_lora=True); this DiT uses the vanilla adaln MLPs."
+                )
+            if b0.adaln_up_self_attn.in_features != self.adaln_in_dim:
+                raise ValueError(
+                    f"adaln in-dim mismatch: network built for {self.adaln_in_dim}, "
+                    f"DiT has {b0.adaln_up_self_attn.in_features}."
+                )
 
         # Bypass nn.Module.__setattr__ auto-registration — a plain assignment
         # would register the frozen DiT as a submodule, inflating parameters().
@@ -672,6 +779,24 @@ class EasyControlNetwork(AdapterNetworkBase):
         pin_dynamo_limit(
             "accumulated_recompile_limit", len(self._block_modules) * per_obj
         )
+
+        # With train_adaln the target shift/scale/gate carry grad, so backward
+        # gains seq-axis reductions whose mix-order-reduction fusion records a
+        # 4096-boundary hint guard that contradicts strict dynamic-seq marks —
+        # same hazard as the DiT path (library/anima/models.py::compile_blocks,
+        # docs/optimizations/for_compile.md §2.6). compile_blocks usually pins
+        # this already; repeat here so compile_cond_stream is safe standalone.
+        if dynamic_seq and self.train_adaln:
+            import torch._inductor.config as _inductor_config
+
+            if _inductor_config.triton.mix_order_reduction:
+                from library.runtime.dynamo import pin_inductor_flag
+
+                pin_inductor_flag("triton.mix_order_reduction", False)
+                logger.info(
+                    "EasyControl: inductor mix_order_reduction disabled "
+                    "(train_adaln under dynamic-seq marks)"
+                )
 
         # dynamic_seq does NOT use torch.compile(dynamic=True); compile static and
         # let the patched forward mark the seq axes. Derive their (min, max) bound.
@@ -1004,6 +1129,9 @@ class EasyControlNetwork(AdapterNetworkBase):
             "ss_apply_ffn_lora": str(int(self.apply_ffn_lora)),
             "ss_cond_res_scale": str(self.cond_res_scale),
             "ss_channel_scaling_alpha": str(self.channel_scaling_alpha),
+            "ss_train_adaln": str(int(self.train_adaln)),
+            "ss_adaln_rank": str(self.adaln_rank),
+            "ss_adaln_alpha": str(self.adaln_alpha),
         }
 
     def state_dict_for_save(self, dtype: torch.dtype) -> dict[str, torch.Tensor]:
@@ -1025,18 +1153,33 @@ class EasyControlNetwork(AdapterNetworkBase):
             logger.info(f"Loaded EasyControl weights from {file} ({len(sd)} tensors)")
 
 
-def _adaln_self_cross_mlp(block: nn.Module, emb, adaln_lora):
+def _adaln_self_cross_mlp(
+    block: nn.Module, emb, adaln_lora, adaln_deltas=None, delta_scale: float = 1.0
+):
     """``(shift, scale, gate)`` triples for self-attn, cross-attn, and mlp.
 
     Mirrors Anima ``Block._forward``'s modulation computation exactly; factored
     out so the EasyControl target path (two-stream + cached-cond-KV) shares one
     copy instead of inlining the chunk-dance. Returns three 3-tuples.
+
+    ``adaln_deltas``: optional ``(self, cross, mlp)`` triple of ``_LoRAProj``
+    modules (the target-stream adaln LoRA), each adding a delta on top of the
+    frozen ``adaln_up_*`` up-projection from the same per-branch down slice.
+    Requires the AdaLN-LoRA bottleneck form (guarded in ``apply_to``).
     """
     if block.use_adaln_lora:
         down_self, down_cross, down_mlp = block.adaln_fused_down(emb).chunk(3, dim=-1)
-        self_p = (block.adaln_up_self_attn(down_self) + adaln_lora).chunk(3, dim=-1)
-        cross_p = (block.adaln_up_cross_attn(down_cross) + adaln_lora).chunk(3, dim=-1)
-        mlp_p = (block.adaln_up_mlp(down_mlp) + adaln_lora).chunk(3, dim=-1)
+        up_self = block.adaln_up_self_attn(down_self)
+        up_cross = block.adaln_up_cross_attn(down_cross)
+        up_mlp = block.adaln_up_mlp(down_mlp)
+        if adaln_deltas is not None:
+            d_self, d_cross, d_mlp = adaln_deltas
+            up_self = up_self + delta_scale * d_self(down_self)
+            up_cross = up_cross + delta_scale * d_cross(down_cross)
+            up_mlp = up_mlp + delta_scale * d_mlp(down_mlp)
+        self_p = (up_self + adaln_lora).chunk(3, dim=-1)
+        cross_p = (up_cross + adaln_lora).chunk(3, dim=-1)
+        mlp_p = (up_mlp + adaln_lora).chunk(3, dim=-1)
     else:
         self_p = block.adaln_modulation_self_attn(emb).chunk(3, dim=-1)
         cross_p = block.adaln_modulation_cross_attn(emb).chunk(3, dim=-1)
@@ -1073,6 +1216,8 @@ def _target_only_with_cached_cond_kv(
     cond_k_cached: torch.Tensor,
     cond_v_cached: torch.Tensor,
     b_param: torch.Tensor,
+    adaln_deltas=None,
+    adaln_delta_scale: float = 1.0,
 ) -> torch.Tensor:
     """Block.forward equivalent for inference when cond KV is cached.
 
@@ -1090,7 +1235,13 @@ def _target_only_with_cached_cond_kv(
         (shift_self_attn, scale_self_attn, gate_self_attn),
         (shift_cross_attn, scale_cross_attn, gate_cross_attn),
         (shift_mlp, scale_mlp, gate_mlp),
-    ) = _adaln_self_cross_mlp(block, emb_B_T_D, adaln_lora_B_T_3D)
+    ) = _adaln_self_cross_mlp(
+        block,
+        emb_B_T_D,
+        adaln_lora_B_T_3D,
+        adaln_deltas=adaln_deltas,
+        delta_scale=adaln_delta_scale,
+    )
 
     sh_self_5 = shift_self_attn[:, :, None, None, :]
     sc_self_5 = scale_self_attn[:, :, None, None, :]
@@ -1180,6 +1331,18 @@ def _make_patched_block_forward(
     cond_lora_o = ec_net.cond_lora_o[block_idx]
     cond_lora_ffn1 = ec_net.cond_lora_ffn1[block_idx] if ec_net.apply_ffn_lora else None
     cond_lora_ffn2 = ec_net.cond_lora_ffn2[block_idx] if ec_net.apply_ffn_lora else None
+    # Target-stream adaln LoRA — lives only on the cond-active paths below (the
+    # no-cond fallback runs original_forward), so it is cond-gated: without a
+    # reference the target stream stays exact-baseline DiT.
+    adaln_deltas = (
+        (
+            ec_net.adaln_lora_self_attn[block_idx],
+            ec_net.adaln_lora_cross_attn[block_idx],
+            ec_net.adaln_lora_mlp[block_idx],
+        )
+        if ec_net.train_adaln
+        else None
+    )
 
     # Last block's cond_x_out is discarded, so its cond self-attn/proj/MLP are
     # dead compute (cond_lora_o/ffn never reach the loss); only its cond K/V are
@@ -1212,7 +1375,13 @@ def _make_patched_block_forward(
             (shift_self_attn, scale_self_attn, gate_self_attn),
             (shift_cross_attn, scale_cross_attn, gate_cross_attn),
             (shift_mlp, scale_mlp, gate_mlp),
-        ) = _adaln_self_cross_mlp(block, emb_B_T_D, adaln_lora_B_T_3D)
+        ) = _adaln_self_cross_mlp(
+            block,
+            emb_B_T_D,
+            adaln_lora_B_T_3D,
+            adaln_deltas=adaln_deltas,
+            delta_scale=ec_net.multiplier,
+        )
         (
             (cond_shift_self_attn, cond_scale_self_attn, cond_gate_self_attn),
             (cond_shift_mlp, cond_scale_mlp, cond_gate_mlp),
@@ -1363,6 +1532,8 @@ def _make_patched_block_forward(
                 cond_k_cached,
                 cond_v_cached,
                 b_param,
+                adaln_deltas=adaln_deltas,
+                adaln_delta_scale=ec_net.multiplier,
             )
 
         cond_state = ec_net._cond_state

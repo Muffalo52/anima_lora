@@ -16,6 +16,14 @@ network_module = "networks.methods.easycontrol"
 network_dim = 16
 network_alpha = 16
 
+# Target-stream adaln LoRA — opt-in; pins required even while off (base.toml
+# sets train_adaln=true + adaln_alpha=90 for the LoRA family and top-level keys
+# forward to every network module). Alpha via √r law from 16@r16. See
+# configs/easycontrol/easycontrol.toml + docs/methods/adaln.md.
+train_adaln = false
+adaln_rank = 8
+adaln_alpha = 11.3
+
 network_args = [
     "b_cond_init=-10.0",
     "cond_scale=1.0",
