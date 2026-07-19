@@ -44,6 +44,8 @@ from networks.lora_anima.routers import (  # noqa: F401
     GlobalRouter,
 )
 
+from networks.network_base import _tag_all_network_params
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -1628,6 +1630,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
             pass  # already a list with one element
 
         self.requires_grad_(True)
+        _tag_all_network_params(self)
 
         all_params = []
         lr_descriptions = []
@@ -1897,6 +1900,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
 
     def prepare_grad_etc(self, text_encoder, unet):
         self.requires_grad_(True)
+        _tag_all_network_params(self)
 
     def on_epoch_start(self, text_encoder, unet):
         self.train()
