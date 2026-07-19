@@ -122,12 +122,17 @@ def cmd_soup(extra):
         make soup PATH_PATTERN="sincos/*"             # attach-by-default
         make soup TARGET=sincos                       # shorthand for "sincos/*"
         make soup PATH_PATTERN="a/*|b/*" NAME=ab --queue
+        make soup ARTISTS_SHARD=1_6                   # round-robin artist shard
+        make soup CUSTOM=soup                         # gui-methods/custom/soup.toml
         make soup TARGET=sincos ARGS="--network_dim 32 --max_train_epochs 8"
 
     Selection is a fnmatch **path_pattern** (``|`` = alternatives, matched
     against each image's path relative to its subset image_dir) rather than a
-    single artist dir. With neither ``PATH_PATTERN`` nor ``TARGET`` set it falls
-    back to the top-level ``path_pattern`` in ``configs/soup/soup.toml``.
+    single artist dir. ``ARTISTS_SHARD=k_N`` is the alternative selector — one
+    round-robin shard of the artist subdirs, expanded to an explicit glob by the
+    pipeline (slug ``shard1of6``); mutually exclusive with ``PATH_PATTERN`` /
+    ``TARGET``. With none of them set it falls back to the top-level
+    ``path_pattern`` **or** ``artists_shard`` in the soup config.
     ``TARGET`` is a convenience shorthand: ``TARGET=x`` ⇒
     ``PATH_PATTERN="x/*" NAME=x``. ``ARGS`` reaches the fine-tune runs. Env knobs
     (all optional): ``NAME`` (output slug; default derived from the pattern),
@@ -143,6 +148,7 @@ def cmd_soup(extra):
     queue).
     """
     pattern = os.environ.get("PATH_PATTERN")
+    shard = os.environ.get("ARTISTS_SHARD")
     name = os.environ.get("NAME")
     target = os.environ.get("TARGET")
     if not pattern and target:
@@ -180,6 +186,8 @@ def cmd_soup(extra):
     # path_pattern in configs/soup/soup.toml (its argparse default).
     if pattern:
         argv += ["--path_pattern", pattern]
+    if shard:
+        argv += ["--artists_shard", shard]
     if name:
         argv += ["--name", name]
     if os.environ.get("POOL_PATH_PATTERN"):

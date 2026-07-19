@@ -976,26 +976,45 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         if not self.cfg.use_timestep_mask:
             return
 
-        max_rank = self.cfg.lora_dim
-        # Reuse a single GPU-resident mask to avoid ~200 CPU→GPU transfers per step
-        mask = getattr(self, "_shared_timestep_mask", None)
-        if mask is None or mask.device != timesteps.device:
-            mask = torch.zeros(1, max_rank, device=timesteps.device)
-            self._shared_timestep_mask = mask
-            self._timestep_mask_arange = torch.arange(max_rank, device=timesteps.device)
+        # ONE shared mask PER DISTINCT RANK, not one per network. Modules do not
+        # all carry cfg.lora_dim: a per-pattern rank override (reg_dims — e.g.
+        # `adaln_rank` in base.toml, which builds the adaln_up_* Linears at r16
+        # under a r32 network) leaves a mixed-rank module set, and rebinding a
+        # single (1, cfg.lora_dim) mask onto all of them made the `lx * mask`
+        # gate broadcast (…, 16) against (1, 32) → RuntimeError at the first
+        # adaln block. Grouping by the module's OWN lora_dim keeps every
+        # multiply shape-exact while preserving the one-buffer-per-group,
+        # no-CPU-transfer property.
+        masks = getattr(self, "_shared_timestep_masks", None)
+        if masks is None or any(m.device != timesteps.device for m in masks.values()):
+            masks = {}
+            self._timestep_mask_aranges = {}
             for lora in self.text_encoder_loras + self.unet_loras:
-                lora._timestep_mask = mask
+                rank = int(getattr(lora, "lora_dim", self.cfg.lora_dim))
+                if rank not in masks:
+                    masks[rank] = torch.zeros(1, rank, device=timesteps.device)
+                    self._timestep_mask_aranges[rank] = torch.arange(
+                        rank, device=timesteps.device
+                    )
+                lora._timestep_mask = masks[rank]
+            self._shared_timestep_masks = masks
 
         # Compute threshold r entirely on device — avoids GPU→CPU .item() sync and
         # keeps the effective rank as a tensor so the mask build stays static-shape.
         t = timesteps.float().mean()
         frac = ((max_timestep - t) / max_timestep).clamp(min=0.0, max=1.0)
-        r = (
-            frac.pow(self.cfg.alpha_rank_scale) * (max_rank - self.cfg.min_rank)
-            + self.cfg.min_rank
-        )
-        r = r.clamp(max=float(max_rank))
-        mask.copy_((self._timestep_mask_arange < r).to(mask.dtype).unsqueeze(0))
+        frac = frac.pow(self.cfg.alpha_rank_scale)
+        for rank, mask in masks.items():
+            # Each group masks the same FRACTION of its own rank, so an r16
+            # override follows the same schedule shape as the r32 bulk instead
+            # of saturating to full rank early. min_rank is clamped into the
+            # group's range (a min_rank above a small group's rank would
+            # otherwise disable the schedule there).
+            floor = min(float(self.cfg.min_rank), float(rank))
+            r = (frac * (rank - floor) + floor).clamp(max=float(rank))
+            mask.copy_(
+                (self._timestep_mask_aranges[rank] < r).to(mask.dtype).unsqueeze(0)
+            )
 
     def clear_timestep_mask(self):
         """Restore full-rank masks on every LoRA module.
@@ -1009,8 +1028,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         keeps the adapter forward free of a None-vs-Tensor guard under
         ``torch.compile``.
         """
-        shared = getattr(self, "_shared_timestep_mask", None)
-        if shared is not None:
+        for shared in (getattr(self, "_shared_timestep_masks", None) or {}).values():
             shared.fill_(1.0)
 
     def set_sigma(self, sigmas: torch.Tensor) -> None:

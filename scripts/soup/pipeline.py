@@ -29,8 +29,11 @@ ladder, 2026-07-04/05) as one pipeline:
 Selection is by fnmatch **path_pattern** (``|``-separated alternatives, matched
 against each image's path relative to its subset ``image_dir``) rather than a
 single artist directory — so a soup can span any glob-expressible slice of the
-dataset, not just one artist. The output slug derives from ``--path_pattern``
-(or an explicit ``--name``).
+dataset, not just one artist. ``--artists_shard k_N`` is the alternative
+selector: it expands to one round-robin shard of the artist subdirectories
+(``<artist>/*|…``) before anything else runs, so the pool union / slug / Phase-2
+flags all see a plain glob. The output slug derives from the selection (or an
+explicit ``--name``).
 
 Runs ``train.py`` as direct subprocesses (single daemon command job — never
 submit nested daemon jobs from here; that deadlocks the serial queue).
@@ -133,6 +136,56 @@ def pool_glob(pool_pattern: str, ft_pattern: str) -> str:
         if a and a not in alts:
             alts.append(a)
     return "|".join(alts)
+
+
+def expand_artists_shard(
+    spec: str, method: str, preset: str, methods_subdir: str | None
+) -> str:
+    """Expand ``--artists_shard k_N`` into an explicit ``<artist>/*|…`` glob.
+
+    train.py expands the shard *inside* its own blueprint build, which is too
+    late for us — the pipeline needs the concrete selection up front to union it
+    into the Phase-1 uncond pool, derive the output slug, and hand Phase 2 a
+    plain ``--path_pattern``. So we replay the same expansion here against the
+    same blueprint (``library.datasets.artist_shard.apply_artist_shard``) and
+    then hand train.py the resulting glob with ``--artists_shard ""``, keeping
+    exactly one selection mechanism live per run.
+    """
+    from library.config.io import load_dataset_config_from_base, load_method_preset
+    from library.datasets.artist_shard import apply_artist_shard, parse_shard
+    from library.env import resolve_under_home
+
+    parse_shard(spec)  # fail fast on a malformed 'k_N' before any I/O
+    subdir = methods_subdir or "methods"
+    merged = load_method_preset(method, preset, methods_subdir=subdir)
+    user_config = load_dataset_config_from_base(
+        method=method, methods_subdir=subdir, overrides=merged
+    )
+    if not user_config:
+        raise SystemExit(
+            f"--artists_shard {spec!r}: no dataset blueprint found for method "
+            f"{method!r} — cannot enumerate artist directories."
+        )
+    apply_artist_shard(user_config, spec, resolve=resolve_under_home)
+    alts: list[str] = []
+    for ds in user_config.get("datasets", []):
+        for sub in ds.get("subsets", []):
+            for a in (sub.get("path_pattern") or "").split("|"):
+                if a and a not in alts:
+                    alts.append(a)
+    if not alts:
+        raise SystemExit(
+            f"--artists_shard {spec!r}: no artist subdirectories found under the "
+            f"blueprint's image_dir(s) — nothing to select."
+        )
+    return "|".join(alts)
+
+
+def slug_for_shard(spec: str) -> str:
+    """Output slug for a shard selection: ``1_6`` → ``shard1of6`` (the artist
+    glob it expands to is far too long to name a checkpoint after)."""
+    k, n = spec.strip().split("_")
+    return f"shard{int(k)}of{int(n)}"
 
 
 def slug_for_pattern(pattern: str) -> str:
@@ -240,11 +293,21 @@ def main() -> None:
     )
     ap.add_argument(
         "--path_pattern",
-        default=cfg.get("path_pattern"),
+        default=None,
         help="fnmatch glob (| = alternatives) selecting the fine-tune images, "
         "matched against each image's path relative to its subset image_dir. "
         "Replaces the old --target artist dir. Defaults to the top-level "
         "path_pattern in configs/soup/soup.toml when omitted.",
+    )
+    ap.add_argument(
+        "--artists_shard",
+        default=None,
+        help="select the fine-tune images as one round-robin shard of the "
+        "artist subdirectories instead of a glob, format 'k_N' (e.g. '1_6'). "
+        "Expanded here into an explicit <artist>/*|… path_pattern, so it also "
+        "drives the Phase-1 pool union and the output slug (anima_soup_"
+        "shard1of6). Mutually exclusive with --path_pattern; a top-level "
+        "artists_shard in the soup config is picked up as the default.",
     )
     ap.add_argument(
         "--pool_path_pattern",
@@ -300,10 +363,35 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     args, ft_extra = ap.parse_known_args()
 
+    # Fine-tune selection: an explicit CLI flag wins, then the config's
+    # artists_shard / path_pattern. The two are mutually exclusive at every
+    # level (a shard can't compose with an arbitrary OR-glob in one string) —
+    # the same rule train.py enforces.
+    if args.path_pattern and args.artists_shard:
+        raise SystemExit(
+            "--path_pattern and --artists_shard are mutually exclusive "
+            "(the shard expands to a path_pattern)."
+        )
+    shard = args.artists_shard
+    if not args.path_pattern and not shard:
+        shard = cfg.get("artists_shard") or None
+        if shard and cfg.get("path_pattern"):
+            raise SystemExit(
+                f"{config}: sets BOTH path_pattern and artists_shard — remove "
+                f"one (or override on the CLI)."
+            )
+    if shard:
+        args.path_pattern = expand_artists_shard(
+            shard, args.method, args.preset, methods_subdir
+        )
+        n_alts = len(args.path_pattern.split("|"))
+        print(f"[soup] artists_shard {shard} -> {n_alts} artists")
+    elif not args.path_pattern:
+        args.path_pattern = cfg.get("path_pattern")
     if not args.path_pattern:
         raise SystemExit(
-            "no fine-tune selection: pass --path_pattern (or set a top-level "
-            "path_pattern in configs/soup/soup.toml)."
+            f"no fine-tune selection: pass --path_pattern or --artists_shard "
+            f"(or set a top-level path_pattern / artists_shard in {config})."
         )
     if args.num_soup < 2:
         raise SystemExit(
@@ -321,9 +409,14 @@ def main() -> None:
         )
 
     ckpt_dir = ROOT / "output" / "ckpt"
-    name = args.name or slug_for_pattern(args.path_pattern)
+    name = args.name or (
+        slug_for_shard(shard) if shard else slug_for_pattern(args.path_pattern)
+    )
     pool = pool_glob(args.pool_path_pattern, args.path_pattern)
     print(f"[soup] fine-tune pattern {args.path_pattern!r} -> slug {name!r}")
+    # Both phases get the expanded glob, so any artists_shard living in the
+    # method config must be switched OFF — train.py refuses to see both.
+    no_shard = ["--artists_shard", ""]
     print(f"[soup] uncond pool pattern {pool!r}")
 
     # Phase 1 — uncond inter-train (skipped when the init already exists, or
@@ -349,6 +442,7 @@ def main() -> None:
                     preset=args.preset,
                     methods_subdir=methods_subdir,
                     extra=[
+                        *no_shard,
                         "--path_pattern",
                         pool,
                         "--caption_dropout_rate",
@@ -385,6 +479,7 @@ def main() -> None:
                 preset=args.preset,
                 methods_subdir=methods_subdir,
                 extra=[
+                    *no_shard,
                     "--path_pattern",
                     args.path_pattern,
                     "--network_weights",

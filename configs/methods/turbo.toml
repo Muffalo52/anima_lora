@@ -33,16 +33,16 @@ activation_memory_budget = 0.99
 base_loss = "dpdmd"
 
 [network]
-student_rank = 80
+student_rank = 64
 student_alpha = 192
-fake_rank = 80
+fake_rank = 64
 fake_alpha = 192
 attn_mode = "flash"
 
 train_adaln = true
 # fake_adaln = false
-adaln_rank = 48
-adaln_alpha = 128
+adaln_rank = 16
+adaln_alpha = 90
 fake_tau_banks = 1
 fake_tau_boundary = 0.5
 

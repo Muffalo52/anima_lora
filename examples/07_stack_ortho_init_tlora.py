@@ -214,9 +214,10 @@ def main() -> None:
             max_train_steps=opts.steps,
         )
 
-        # The mask is now live on every adapted Linear (one shared GPU buffer).
-        # Its sum is the effective rank gating the OrthoInit λ this step.
-        mask = network._shared_timestep_mask
+        # The mask is now live on every adapted Linear (one shared GPU buffer
+        # per distinct module rank — this stack is uniform, so read the
+        # network_dim group). Its sum is the effective rank gating λ this step.
+        mask = network._shared_timestep_masks[opts.network_dim]
         eff_rank = int(mask.sum().item())
         print(
             f"step {step + 1}: t={t.item():.2f} → effective rank "
