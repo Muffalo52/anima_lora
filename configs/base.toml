@@ -81,12 +81,13 @@ gradient_accumulation_steps=1
 # the network's _DEFAULT_EXCLUDE; this rescues them via include_patterns (an
 # exclude-override, not a whitelist — the default attn+MLP set is untouched).
 # Matches diffusion-pipe (the Anima author's trainer), which targets every
-# Linear under Block. Rank/alpha default to the network's; adaln_rank /
-# adaln_alpha override (in-dim is 256, so r32 already keeps ~98% of the ΔW
-# energy). Inert on the frozen-DiT methods (soft_tokens / easycontrol).
+# Linear under Block. adaln_rank sets their rank (in-dim is 256, so r32 already
+# keeps ~98% of the ΔW energy); their alpha is DERIVED from the network's
+# rank/alpha by the √r law (network_alpha·√(adaln_rank/network_dim)) so α/√r
+# matches the attn+MLP modules whatever the method picks — set adaln_alpha to
+# override. Inert on the frozen-DiT methods (soft_tokens / easycontrol).
 train_adaln = true
 adaln_rank = 16
-adaln_alpha = 90
 
 use_repa = false
 
