@@ -44,6 +44,7 @@ The leftmost column is the outcome — what the evidence settled:
 | Verdict | Doc | Why |
 |---------|-----|-----|
 | CLOSED (dead twice) | [turbo_fei_band_deficit_falsified.md](turbo_fei_band_deficit_falsified.md) | FEI band-deficit reweighting of the CFG-uplift `δ_cfg`: falsified in the CA-era loop (wrong distribution), then legitimately reopened on-trajectory and killed again (σ-matched null). Do not re-propose FEI / band-split levers on the DP-DMD loop. |
+| CLOSED | [turbo_tau_critic_interference_lr_artifact.md](turbo_tau_critic_interference_lr_artifact.md) | The fake/critic's cross-band (τ) gradient interference — the load-bearing premise of the τ-split critic — is an **LR artifact**: 17–19× headroom at the annealed tail LR (4e-6), `G1_FAIL` with G2 inverted at the real peak LR (3e-5). Third band-split lever to die on the DP-DMD loop (see row above). Trap: a probe fine-tune at tail LR measures the linearized neighborhood of the init and inflates SNR — pre-register the **peak-LR** arm as primary. |
 | CLOSED | [turbo_gan_dm_grad_orthogonal.md](turbo_gan_dm_grad_orthogonal.md) | The GAN generator gradient is elementwise **DM-orthogonal** (agree-energy == permutation null, every τ-bin) at ~6× the applied DM magnitude — big push, zero structured conflict. Kills the whole GAN↔DM gradient-surgery class (OPD² sign gate, PCGrad). Trap: ~0.5 agree-rate is the orthogonal *baseline*; judge energy vs a permutation null, on **applied** gradients. |
 
 ## Premises that held — the thing shipped

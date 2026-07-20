@@ -3,7 +3,7 @@
 Owns two plain ``LoRANetwork`` instances (student + fake) on one frozen Anima
 DiT — three with the τ-split critic (``fake_tau_banks=2`` adds ``fake_hi``, a
 second fake bank owning the high-τ band; see
-``docs/proposal/turbo_tau_split_critic.md``). Each calls ``apply_to(unet)``
+``_archive/proposals/turbo_tau_split_critic.md``). Each calls ``apply_to(unet)``
 which chains them onto every targeted Linear's forward — at runtime the chain
 order is::
 

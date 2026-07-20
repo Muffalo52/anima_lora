@@ -1,25 +1,45 @@
 # Turbo τ-split critic — dual fake LoRAs specialized by noise level
 
-Status: **PHASE 1 IMPLEMENTED 2026-07-14 — pending run verdict (flip to
-REFUTED if the A/B turns out dead).**
+Status: **CLOSED 2026-07-20 — Phase 0 verdict: G1_FAIL at peak LR; Phase 1
+never gated.** Findings write-up (the durable record):
+`docs/findings/turbo_tau_critic_interference_lr_artifact.md`.
 
-- **P0b gate FIRED** on the superturbo_B bundle (step 3500,
+**The P0b gate fired, then failed its own robustness check.** Same bundle,
+same seed, only the LR differs:
+
+- At the bundle's **annealed tail LR** (4.04e-6,
   `bench/turbo/results/20260714-2032-p0b-superturbo-B/`): G1 headroom 17–19×
-  the ctl/ctl2 noise floor on both bands, G2 symmetric forgetting — the
-  textbook interference signature. Caveat: measured at the bundle's annealed
-  tail LR (4e-6, linear regime); a peak-LR (3e-5) confirmation run is the
-  robustness check.
-- **P0a telemetry shipped** (`TauBinCriticLoss`, rides every run).
-- **Phase 1 wired, off-by-default**: `fake_tau_banks` / `fake_tau_boundary`
-  in `configs/methods/turbo.toml [network]`; `TurboDMDNetwork.fake_hi` +
-  `set_fake_bank`; both routing sites via `primitives.sample_t_routed`;
-  warmup routed; resume bundle carries both banks (bank-count mismatch
-  refused); per-bank τ profiles. Invariant tests:
+  the ctl/ctl2 noise floor on both bands, G2 symmetric forgetting — verdict
+  `FIRE — Phase 1 unlocked`. This is the read the old header cited.
+- At the **peak LR the critic actually trains at** (3e-5,
+  `bench/turbo/results/20260714-2109-p0b-superturbo-B-peaklr/`):
+  `improvement_hi_band` **−6.15e-5** against a noise floor of **3.54e-4**;
+  `degradation_lo_arm_on_hi_band` **−6.99e-5** (the lo-specialist *improved*
+  the hi band → bands share one solution, G2 inverted). `G1_headroom: false`,
+  `G2_forgetting: false`, verdict **`G1_FAIL — close the line`**.
+
+The 17–19× was a linear-regime artifact — at 4e-6 the arms barely leave their
+init, collapsing the ctl/ctl2 denominator. Per the pre-registered rule below
+(§"If G1 fails"), the line is closed. Caveat: the peak-LR floor exceeds the
+tail-LR run's entire signal, so that arm bounds the effect below seed variance
+rather than proving absence; reopening means **re-running P0b at peak LR with
+more updates**, not a Phase-1 A/B.
+
+- **P0a telemetry KEPT** (`TauBinCriticLoss`, rides every run) — always
+  scoped to survive the verdict.
+- **Phase 1 wiring ships INERT**: `fake_tau_banks` / `fake_tau_boundary`
+  in `configs/methods/turbo.toml [network]` default to `1` / `0.5`;
+  `TurboDMDNetwork.fake_hi` + `set_fake_bank`; both routing sites via
+  `primitives.sample_t_routed`; warmup routed; resume bundle carries both
+  banks (bank-count mismatch refused); per-bank τ profiles. Invariant tests:
   `tests/test_turbo_tau_critic.py`. `banks=1` is byte-identical (same RNG
-  stream, second stack never constructed).
-- **Next**: the Phase-1 matched A/B below (single-r96 vs dual-r96,
-  `make turbo --fake_tau_banks 2` vs shipped) — rendered grids at student
-  NFE, within-run CMMD, profile-flattening mechanism check, diversity grids.
+  stream, second stack never constructed). Wired in commit `9d3a8438`
+  *before* the peak-LR probe landed — which is why the tree briefly looked
+  like an open line.
+- **Phase 1 was NEVER evaluated** — none of the four gates below (rendered
+  grids, within-run CMMD, profile-flattening, diversity) were run. The only
+  long `banks=2` run is `anima_superturbo_C`, the null NFE=2 arm, confounded
+  three ways. Every turbo run since 2026-07-16 is `fake_tau_banks = 1`.
 
 ## Premise
 
