@@ -77,7 +77,7 @@ def gram_of(feats: torch.Tensor, *, drop_cls: bool = True) -> torch.Tensor:
     (content-dominated, style-weak — reverses the CMMD-vindicated plain<base
     ranking) and was archived; kept only because the archived probes
     (``_archive/bench/paired_eval/``) import these helpers. Do not build a val
-    metric on the token-Gram — see ``docs/proposal/paired_gram_eval.md``.
+    metric on the token-Gram — see ``_archive/proposals/paired_gram_eval.md``.
     """
     feats = feats.to(torch.float32)
     if drop_cls and feats.shape[0] > 1:
