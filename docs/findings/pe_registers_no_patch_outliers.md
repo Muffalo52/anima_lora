@@ -9,10 +9,10 @@ criterion required.
 
 ## The probe
 
-`bench/pe_registers/outlier_probe.py` — 256 tagger-manifest images through
-both towers (fp32, per-image aspect buckets, forward hooks on every residual
-block; CLS tracked separately from patch tokens). Result envelope:
-`bench/pe_registers/results/20260720-2014-phase0a/`.
+`outlier_probe.py` (now `_archive/bench/pe_registers/`) — 256 tagger-manifest
+images through both towers (fp32, per-image aspect buckets, forward hooks on
+every residual block; CLS tracked separately from patch tokens). Result
+envelope: `_archive/bench/pe_registers/results/20260720-2014-phase0a/`.
 
 ## What the data showed
 
@@ -55,7 +55,8 @@ claim the measurement, not the mechanism.)
 
 ## Reusable
 
-`bench/pe_registers/` stays: `outlier_probe.py` (norm census, gate) and
+`_archive/bench/pe_registers/` keeps the harness (archived 2026-07-20, indexed
+in `_archive/shelved_benches.md`): `outlier_probe.py` (norm census, gate) and
 `find_neurons.py` (Algorithm 1 — register-neuron ranking with per-image /
 per-bucket consistency + activation-map alignment gates, smoke-tested
 end-to-end). If a future vision tower (a PE successor, a different aux
