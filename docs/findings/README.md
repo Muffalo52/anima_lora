@@ -26,6 +26,7 @@ The leftmost column is the outcome — what the evidence settled:
 | FALSIFIED | [selfflow.md](selfflow.md) | Self-Flow rep-loss exploits an info gap a *still-learning* backbone leaves open; Anima's frozen DiT already closed it → ~zero pressure on a rank-r adapter. |
 | NO-GO | [spectral_guidance_no_subspace.md](spectral_guidance_no_subspace.md) | The posterior-mean operator does **not** collapse onto a few guidable directions on Anima — no low-rank guidable subspace (Phase-0 gate). |
 | NO-GO | [ctcal_premise_inverted_on_anima.md](ctcal_premise_inverted_on_anima.md) | CTCal assumes cross-attn is sharp at low noise / degrades at high noise; on Anima that premise is **inverted**. Don't build. |
+| NO-GO | [pe_registers_no_patch_outliers.md](pe_registers_no_patch_outliers.md) | Test-time registers (2506.08010) needs high-norm outlier patch tokens; PE-Core/PE-Spatial have **none** (0 patches ≥5× median, 256 imgs × all layers — CLS absorbs the sink role). Cached PE features are clean; tagger-ceiling result stands stronger. |
 | NOT WORTH | [asymflow_parameterization.md](asymflow_parameterization.md) | The rank-asymmetric velocity parameterization fixes a *pixel-space* dimensionality bottleneck Anima (compressed latent, D_patch/residual = 1/32) doesn't have. |
 | CLOSED | [deft_subtractive_coupling_slows_convergence.md](deft_subtractive_coupling_slows_convergence.md) | DEFT reaches the same optima as LoRA but 2–8× slower everywhere — `ΔW` quadratic in `P`, gradient dominated by a `−W₀GᵀP` coupling. Don't re-propose subtractive adapters. |
 | SHELVED | [l2p_pixel_transfer.md](l2p_pixel_transfer.md) | Swapping the VAE for RGB-patch tokenization breaks the frozen DiT's native latent-token manifold at Anima's 2048-dim / 28-block scale on a single-GPU budget. |
@@ -43,6 +44,7 @@ The leftmost column is the outcome — what the evidence settled:
 | Verdict | Doc | Why |
 |---------|-----|-----|
 | CLOSED (dead twice) | [turbo_fei_band_deficit_falsified.md](turbo_fei_band_deficit_falsified.md) | FEI band-deficit reweighting of the CFG-uplift `δ_cfg`: falsified in the CA-era loop (wrong distribution), then legitimately reopened on-trajectory and killed again (σ-matched null). Do not re-propose FEI / band-split levers on the DP-DMD loop. |
+| CLOSED | [turbo_gan_dm_grad_orthogonal.md](turbo_gan_dm_grad_orthogonal.md) | The GAN generator gradient is elementwise **DM-orthogonal** (agree-energy == permutation null, every τ-bin) at ~6× the applied DM magnitude — big push, zero structured conflict. Kills the whole GAN↔DM gradient-surgery class (OPD² sign gate, PCGrad). Trap: ~0.5 agree-rate is the orthogonal *baseline*; judge energy vs a permutation null, on **applied** gradients. |
 
 ## Premises that held — the thing shipped
 
