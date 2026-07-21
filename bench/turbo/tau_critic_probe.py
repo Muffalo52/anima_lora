@@ -18,7 +18,7 @@ post-warmup LR (no schedule), on the same data stream (separate RNG generators
 for data vs τ, so lo/hi/ctl share batches, ε draws, and student x_pred exactly).
 Per-τ-bin loss on a fixed held-out probe set is measured before and after.
 
-Pre-registered gate (see docs/proposal/turbo_tau_split_critic.md):
+Pre-registered gate (see _archive/proposals/turbo_tau_split_critic.md):
 
   G1 (headroom): lo beats ctl on the lo band AND hi beats ctl on the hi band,
       each by more than the ctl-vs-ctl2 spread on that band.

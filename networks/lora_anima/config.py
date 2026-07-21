@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
 
@@ -421,7 +422,8 @@ class LoRANetworkCfg:
         # _DEFAULT_EXCLUDE, so this rescues them via include_patterns (an
         # exclude-override, not a whitelist, so the default attn+MLP set is
         # untouched). adaln_rank / adaln_alpha give them their own rank / alpha
-        # (0/absent = the network's). Translates to the exact
+        # (0/absent rank = the network's; 0/absent alpha = derived from
+        # network_dim/network_alpha by the √r law, below). Translates to the exact
         # include_patterns / network_reg_dims / network_reg_alphas primitives the
         # turbo harness builds by hand (networks/methods/turbo_dmd.py); injected
         # into reg_dims / reg_alphas after those strings are parsed, below.
@@ -739,8 +741,16 @@ class LoRANetworkCfg:
             include_patterns = (include_patterns or []) + [_adaln_pat]
             if adaln_rank > 0:
                 reg_dims = {**(reg_dims or {}), _adaln_pat: adaln_rank}
-            if adaln_alpha > 0:
-                reg_alphas = {**(reg_alphas or {}), _adaln_pat: adaln_alpha}
+            if adaln_alpha <= 0:
+                # Derive from the network's own rank/alpha instead of inheriting
+                # network_alpha at a smaller rank (which runs the adaln modules
+                # network_dim/adaln_rank hotter in alpha/rank). √r law
+                # (alpha ∝ √r — docs/methods/adaln.md), matching
+                # networks/methods/easycontrol.py. adaln_rank = 0 shares the
+                # network rank, so the factor is 1 and this is a no-op.
+                _r = adaln_rank if adaln_rank > 0 else network_dim
+                adaln_alpha = network_alpha * math.sqrt(_r / max(network_dim, 1))
+            reg_alphas = {**(reg_alphas or {}), _adaln_pat: adaln_alpha}
 
         # DSR register tokens (LoRA + registers trained jointly). Bounds of
         # register_insert_block are validated at network build (needs n_blocks).

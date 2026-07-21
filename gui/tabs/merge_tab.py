@@ -3,7 +3,7 @@
 Layout mirrors ImageViewerTab: top directory combo, left file list, right
 details panel (file stats + bakeability scan + merge options + log).
 
-Runs ``scripts/merge_to_dit.py`` via ``QProcess`` and streams stdout/stderr
+Runs ``scripts/toolkits/merge_to_dit.py`` via ``QProcess`` and streams stdout/stderr
 into the log pane, same pattern as ``ConfigTab`` training.
 """
 
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -223,9 +224,11 @@ class MergeTab(LazyTabMixin, QWidget):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel(t("merge_mode")))
         self.mode_combo = QComboBox()
-        # Index 0 = Into DiT (default), index 1 = Merge LoRAs. _lora_mode() keys off this.
+        # Index 0 = Into DiT (default), 1 = Merge LoRAs, 2 = Extract LoRA.
+        # _lora_mode()/_extract_mode() key off this index.
         self.mode_combo.addItem(t("merge_mode_dit"))
         self.mode_combo.addItem(t("merge_mode_loras"))
+        self.mode_combo.addItem(t("merge_mode_extract"))
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self.mode_combo)
         mode_row.addStretch()
@@ -305,6 +308,64 @@ class MergeTab(LazyTabMixin, QWidget):
         self.lora_box = lora_box
         lora_box.setVisible(False)
         rlay.addWidget(lora_box)
+
+        # ΔW extraction: two full DiT checkpoints → a plain LoRA
+        # (scripts/toolkits/extract_delta_lora.py). Inputs are full checkpoints,
+        # not adapters, so this mode ignores the left file list entirely.
+        extract_box = QGroupBox(t("merge_extract_options"))
+        extract_lay = QFormLayout(extract_box)
+
+        self.extract_hint = QLabel(t("merge_extract_hint"))
+        self.extract_hint.setWordWrap(True)
+        self.extract_hint.setStyleSheet(f"color:{tok('text_dim')};")
+        extract_lay.addRow(self.extract_hint)
+
+        self.extract_base_edit = PickerLineEdit(_DEFAULT_DIT)
+        self.extract_base_edit.clicked.connect(
+            lambda: self._browse_ckpt(self.extract_base_edit)
+        )
+        extract_lay.addRow(t("merge_extract_base"), self.extract_base_edit)
+
+        self.extract_tuned_edit = PickerLineEdit()
+        self.extract_tuned_edit.setPlaceholderText(t("merge_extract_tuned_placeholder"))
+        self.extract_tuned_edit.clicked.connect(
+            lambda: self._browse_ckpt(self.extract_tuned_edit)
+        )
+        extract_lay.addRow(t("merge_extract_tuned"), self.extract_tuned_edit)
+
+        self.extract_rank_spin = QSpinBox()
+        self.extract_rank_spin.setRange(1, 512)
+        self.extract_rank_spin.setValue(96)
+        self.extract_rank_spin.setToolTip(t("merge_extract_rank_tip"))
+        extract_lay.addRow(t("merge_extract_rank"), self.extract_rank_spin)
+
+        self.extract_adaln_check = QCheckBox(t("merge_extract_include_adaln"))
+        self.extract_adaln_check.setToolTip(t("merge_extract_include_adaln_tip"))
+        extract_lay.addRow("", self.extract_adaln_check)
+
+        self.extract_adaln_layout_combo = QComboBox()
+        self.extract_adaln_layout_combo.addItems(["runtime", "comfy"])
+        self.extract_adaln_layout_combo.setToolTip(t("merge_extract_adaln_layout_tip"))
+        self.extract_adaln_layout_combo.setEnabled(False)
+        self.extract_adaln_check.toggled.connect(
+            self.extract_adaln_layout_combo.setEnabled
+        )
+        extract_lay.addRow(
+            t("merge_extract_adaln_layout"), self.extract_adaln_layout_combo
+        )
+
+        self.extract_dtype_combo = QComboBox()
+        self.extract_dtype_combo.addItems(["bf16", "fp16", "fp32"])
+        extract_lay.addRow(t("merge_dtype"), self.extract_dtype_combo)
+
+        self.extract_out_edit = PickerLineEdit()
+        self.extract_out_edit.setPlaceholderText(t("merge_extract_out_placeholder"))
+        self.extract_out_edit.clicked.connect(self._browse_out)
+        extract_lay.addRow(t("merge_out"), self.extract_out_edit)
+
+        self.extract_box = extract_box
+        extract_box.setVisible(False)
+        rlay.addWidget(extract_box)
 
         bar = QHBoxLayout()
         self.merge_btn = action_button(
@@ -418,6 +479,14 @@ class MergeTab(LazyTabMixin, QWidget):
         mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
         self.stats_label.setText(f"{_format_size(st.st_size)} · {mtime}")
 
+        if self._extract_mode():
+            # Clicking a checkpoint in the list picks it as the tuned input
+            # (the file picker stays available for dirs not in the combo). Skip
+            # the adapter scan — these are full DiT checkpoints, not adapters.
+            self.extract_tuned_edit.setText(str(p))
+            self._update_extract_enabled()
+            return
+
         scan = _scan_adapter(p)
         self._current_scan = scan
         colors = {
@@ -464,17 +533,37 @@ class MergeTab(LazyTabMixin, QWidget):
         if f:
             self.dit_edit.setText(f)
 
+    def _browse_ckpt(self, target: "PickerLineEdit"):
+        """Pick a full DiT checkpoint (extract mode base/tuned inputs)."""
+        start = str(ROOT / "models" / "diffusion_models")
+        f, _ = QFileDialog.getOpenFileName(
+            self, t("merge_extract_pick_ckpt"), start, "Safetensors (*.safetensors)"
+        )
+        if f:
+            target.setText(f)
+            self._update_extract_enabled()
+
     def _browse_out(self):
         start = str(ROOT / "output" / "ckpt")
         f, _ = QFileDialog.getSaveFileName(
             self, t("merge_pick_out"), start, "Safetensors (*.safetensors)"
         )
         if f:
-            target = self.lora_out_edit if self._lora_mode() else self.out_edit
+            if self._extract_mode():
+                target = self.extract_out_edit
+            elif self._lora_mode():
+                target = self.lora_out_edit
+            else:
+                target = self.out_edit
             target.setText(f)
+            if self._extract_mode():
+                self._update_extract_enabled()
 
     def _lora_mode(self) -> bool:
         return self.mode_combo.currentIndex() == 1
+
+    def _extract_mode(self) -> bool:
+        return self.mode_combo.currentIndex() == 2
 
     def _selected_loras(self) -> list[Path]:
         """Selected adapters in list order (LoRA-merge mode uses multi-select).
@@ -489,19 +578,31 @@ class MergeTab(LazyTabMixin, QWidget):
 
     def _on_mode_changed(self):
         lora = self._lora_mode()
-        self.opt_box.setVisible(not lora)
+        extract = self._extract_mode()
+        dit = not lora and not extract
+        self.opt_box.setVisible(dit)
         self.lora_box.setVisible(lora)
+        self.extract_box.setVisible(extract)
+        # Extract has no adapter to scan — hide the verdict banner in that mode.
+        self.verdict_label.setVisible(not extract)
         self.file_list.setSelectionMode(
             QAbstractItemView.ExtendedSelection
             if lora
             else QAbstractItemView.SingleSelection
         )
-        self.merge_btn.setText(t("merge_lora_button") if lora else t("merge_button"))
+        if extract:
+            self.merge_btn.setText(t("merge_extract_button"))
+        elif lora:
+            self.merge_btn.setText(t("merge_lora_button"))
+        else:
+            self.merge_btn.setText(t("merge_button"))
         self.analyze_btn.setVisible(lora)
         if not lora:
             # The interference banner only applies to LoRA-merge mode.
             self.analysis_label.setVisible(False)
-        if lora:
+        if extract:
+            self._update_extract_enabled()
+        elif lora:
             self._on_lora_selection()
         else:
             # Restore single-file enablement from the current scan.
@@ -522,10 +623,56 @@ class MergeTab(LazyTabMixin, QWidget):
     def _start_merge(self):
         if self._proc.state() != QProcess.NotRunning:
             return
-        if self._lora_mode():
+        if self._extract_mode():
+            self._start_extract()
+        elif self._lora_mode():
             self._start_lora_merge()
         else:
             self._start_dit_merge()
+
+    # Torch save_dtype names (extract_delta_lora.py does getattr(torch, ...)).
+    _EXTRACT_DTYPE = {"bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}
+
+    def _update_extract_enabled(self):
+        """Extract button gates on its own pickers, independent of the file list."""
+        if not self._extract_mode():
+            return
+        ok = (
+            self._proc.state() == QProcess.NotRunning
+            and bool(self.extract_tuned_edit.text().strip())
+            and bool(self.extract_out_edit.text().strip())
+        )
+        self.merge_btn.setEnabled(ok)
+
+    def _start_extract(self):
+        tuned = self.extract_tuned_edit.text().strip()
+        out = self.extract_out_edit.text().strip()
+        if not tuned:
+            QMessageBox.warning(self, t("error"), t("merge_extract_no_tuned"))
+            return
+        if not out:
+            QMessageBox.warning(self, t("error"), t("merge_extract_no_out"))
+            return
+        args = [
+            "scripts/toolkits/extract_delta_lora.py",
+            "--base",
+            self.extract_base_edit.text().strip() or _DEFAULT_DIT,
+            "--tuned",
+            tuned,
+            "--rank",
+            str(self.extract_rank_spin.value()),
+            "--out",
+            out,
+            "--save_dtype",
+            self._EXTRACT_DTYPE[self.extract_dtype_combo.currentText()],
+        ]
+        if self.extract_adaln_check.isChecked():
+            args += [
+                "--include_adaln",
+                "--adaln_layout",
+                self.extract_adaln_layout_combo.currentText(),
+            ]
+        self._launch(args)
 
     def _start_dit_merge(self):
         adapter = self._current_file()
@@ -534,7 +681,7 @@ class MergeTab(LazyTabMixin, QWidget):
             return
 
         args = [
-            "scripts/merge_to_dit.py",
+            "scripts/toolkits/merge_to_dit.py",
             "--adapter",
             str(adapter),
             "--dit",
@@ -557,7 +704,7 @@ class MergeTab(LazyTabMixin, QWidget):
             QMessageBox.warning(self, t("error"), t("merge_lora_need_two"))
             return
 
-        args = ["scripts/merge_loras.py"]
+        args = ["scripts/toolkits/merge_loras.py"]
         args += [str(p) for p in sel]
         args += [
             "--normalize",
@@ -588,7 +735,7 @@ class MergeTab(LazyTabMixin, QWidget):
         if len(sel) < 2:
             QMessageBox.warning(self, t("error"), t("merge_lora_need_two"))
             return
-        args = ["scripts/merge_loras.py", *[str(p) for p in sel], "--analyze"]
+        args = ["scripts/toolkits/merge_loras.py", *[str(p) for p in sel], "--analyze"]
         weights = self.weights_edit.text().strip()
         if weights:
             n = len(weights.split(","))
@@ -756,7 +903,10 @@ class MergeTab(LazyTabMixin, QWidget):
         self.stop_btn.setEnabled(False)
         self.dir_combo.setEnabled(True)
         self.mode_combo.setEnabled(True)
-        if self._lora_mode():
+        if self._extract_mode():
+            self.merge_btn.setText(t("merge_extract_button"))
+            self._update_extract_enabled()
+        elif self._lora_mode():
             self.merge_btn.setText(t("merge_lora_button"))
             self._on_lora_selection()
         else:

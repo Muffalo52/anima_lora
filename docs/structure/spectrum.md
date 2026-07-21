@@ -139,7 +139,7 @@ The ComfyUI node (https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler) uses a
 
 ## 8. What is *not* saved
 
-Everything Spectrum does lives in the inference loop's local variables — two predictor objects, two optional residual tensors, a few schedule counters — constructed at the start of `spectrum_denoise()` and torn down at the end. Nothing is serialized, nothing loaded; no `.safetensors`, no interaction with `scripts/merge_to_dit.py`.
+Everything Spectrum does lives in the inference loop's local variables — two predictor objects, two optional residual tensors, a few schedule counters — constructed at the start of `spectrum_denoise()` and torn down at the end. Nothing is serialized, nothing loaded; no `.safetensors`, no interaction with `scripts/toolkits/merge_to_dit.py`.
 
 That's the defining property separating it from everything else in this directory: the others produce trained weights and live in a checkpoint. Spectrum is a **pure inference-time decision policy**.
 

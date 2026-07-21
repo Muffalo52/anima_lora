@@ -3,7 +3,7 @@
 Owns two plain ``LoRANetwork`` instances (student + fake) on one frozen Anima
 DiT — three with the τ-split critic (``fake_tau_banks=2`` adds ``fake_hi``, a
 second fake bank owning the high-τ band; see
-``docs/proposal/turbo_tau_split_critic.md``). Each calls ``apply_to(unet)``
+``_archive/proposals/turbo_tau_split_critic.md``). Each calls ``apply_to(unet)``
 which chains them onto every targeted Linear's forward — at runtime the chain
 order is::
 
@@ -270,7 +270,7 @@ def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -
     both directions. Modules absent from the file keep their constructed init.
 
     Intended for the DP-DMD student/fake warm start from an extracted
-    full-model delta (``scripts/extract_delta_lora.py``); accepts any plain
+    full-model delta (``scripts/toolkits/extract_delta_lora.py``); accepts any plain
     LoRA file. Must run before ``compile_dit_blocks`` traces the forwards.
     """
     from safetensors.torch import load_file

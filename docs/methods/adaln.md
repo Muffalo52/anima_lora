@@ -96,13 +96,13 @@ wants the runtime layout.
 
 ## Path 1 — extraction (SHIPPED)
 
-`scripts/extract_delta_lora.py` extracts adaln up-projections from a full-model
+`scripts/toolkits/extract_delta_lora.py` extracts adaln up-projections from a full-model
 delta with `--include_adaln`, and `--adaln_layout comfy` renames to the ComfyUI
 layout at save time (default `runtime` keeps warm-start compat; layout recorded
 in `ss_delta_extract` metadata).
 
 ```bash
-python scripts/extract_delta_lora.py \
+python scripts/toolkits/extract_delta_lora.py \
     --tuned models/diffusion_models/anima_turboV10.net.safetensors \
     --rank 96 --act_scales models/extracted/act_scales_base_4step.safetensors \
     --include_adaln --adaln_layout comfy \
@@ -136,9 +136,11 @@ include_patterns = [".*adaln_up_.*"]
 `train_adaln` / `adaln_rank` / `adaln_alpha` are read by
 `LoRANetworkCfg.from_kwargs` (`networks/lora_anima/config.py`) and desugar to
 exactly the primitives above: `include_patterns += [".*adaln_up_.*"]`, plus
-`network_reg_dims` / `network_reg_alphas` entries on the same pattern when a rank
-or alpha is given. Rank/alpha default to the network's. `adaln_rank` /
-`adaln_alpha` without `train_adaln` raise.
+`network_reg_dims` / `network_reg_alphas` entries on the same pattern. `adaln_rank`
+defaults to the network's rank; **`adaln_alpha` is derived** from the network's
+own rank/alpha by the √r law below (`network_alpha·√(adaln_rank/network_dim)`)
+whenever it is 0/unset — set it only to override. `adaln_rank` / `adaln_alpha`
+without `train_adaln` raise.
 
 They reach the network as **top-level TOML keys**, not `network_args` — the
 allowlist is AST-derived from the `kwargs.get()` reads (`networks/__init__.py::
@@ -157,8 +159,7 @@ EasyControl reads the same three knobs but with **method-TOML pins keeping it
 off by default** (`configs/easycontrol/easycontrol.toml` +
 `configs/gui-methods/easycontrol.toml` pin `train_adaln = false` — required
 because `resolve_network_kwargs` forwards base.toml's LoRA-family
-`train_adaln = true` / `adaln_alpha = 90` to every network module, and 90 is
-~4× hot for EC's cond LoRA scale). Unlike the LoRA family, `adaln_rank`/
+`train_adaln = true` to every network module). Unlike the LoRA family, `adaln_rank`/
 `adaln_alpha` are **inert when `train_adaln` is off** (never a raise — base
 always supplies them). Enable with `--train_adaln true` on a `make`/CLI run.
 
@@ -222,6 +223,14 @@ so cross-rank scale preservation means keeping **α/√r** constant:
 ```
 adaln_alpha = network_alpha · sqrt(adaln_rank / network_rank)
 ```
+
+**This is the LoRA-family default as of 2026-07-20** — `from_kwargs` computes it
+whenever `adaln_alpha` is 0/unset, so the branch stays scale-matched under any
+`network_dim`/`network_alpha` (including a CLI `--network_alpha` override).
+base.toml previously hard-coded `adaln_alpha = 90`, which is this formula
+evaluated for *one* stack and was ~4× hot on every `gui-methods` variant (32/32).
+The bespoke turbo distill loop (`scripts/distill_turbo/`) keeps its own
+explicitly-pinned `adaln_alpha` and is unaffected.
 
 e.g. superturbo: student 180@r64 → adaln 90@r16 (both α/√r = 22.5). The naive
 linear rule (45 in that example) systematically under-scales the smaller-rank

@@ -11,13 +11,18 @@ Two modes, auto-selected by the workflow's contents:
   ``make comfy-batch W=colorize.json``.
 
 * **Artist×chara mode** — otherwise, read ``__artist__`` / ``__chara__``
-  placeholders and submit one job per cartesian-product pair.
+  placeholders and submit one job per cartesian-product pair. With
+  ``--prompts``, the prompt text itself becomes a third axis: every line of the
+  file replaces the positive ``CLIPTextEncode`` text before substitution, so
+  prompt × artist × chara pairs are queued.
 
 Usage:
     python scripts/comfy_batch.py workflows/colorize.json \
         --images_dir ../comfy/input/to_colorize
     python scripts/comfy_batch.py workflows/lora-batch.json \
         --artist workflows/artist.txt --chara workflows/chara.txt
+    python scripts/comfy_batch.py workflows/modhydra.json \
+        --prompts workflows/preferred.txt
 """
 
 import argparse
@@ -37,6 +42,45 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 def load_lines(path: str) -> list[str]:
     with open(path) as f:
         return [line.strip() for line in f if line.strip()]
+
+
+def load_prompts(path: str) -> list[str]:
+    """Read a prompt-per-line file.
+
+    Lines may be bare text or JSON string literals with a trailing comma (the
+    format ``workflows/preferred.txt`` is kept in, so it can be pasted straight
+    out of a workflow JSON). ``#`` comment lines are skipped.
+    """
+    prompts = []
+    for line in load_lines(path):
+        if line.startswith("#"):
+            continue
+        stripped = line.rstrip(",").strip()
+        if stripped.startswith('"'):
+            try:
+                stripped = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+        stripped = stripped.strip()
+        if stripped:
+            prompts.append(stripped)
+    return prompts
+
+
+def apply_prompt(workflow: dict, prompt: str) -> None:
+    """Overwrite the positive ``CLIPTextEncode`` text in-place.
+
+    The positive node is the one carrying a placeholder (``__prompt__`` or the
+    artist/chara markers) — negatives never do.
+    """
+    for node in workflow.values():
+        if node.get("class_type") != "CLIPTextEncode":
+            continue
+        text = node.get("inputs", {}).get("text")
+        if isinstance(text, str) and (
+            "__prompt__" in text or "__artist__" in text or "__chara__" in text
+        ):
+            node["inputs"]["text"] = prompt
 
 
 def substitute(workflow: dict, artist: str, chara: str) -> dict:
@@ -157,20 +201,32 @@ def run_image_mode(workflow, images_dir, args):
 
 
 def run_artist_chara_mode(workflow, args):
-    """One job per (artist, chara) pair."""
-    artists = load_lines(args.artist)
-    charas = load_lines(args.chara)
-    pairs = list(itertools.product(artists, charas))
-    print(f"Queuing {len(artists)} artists × {len(charas)} charas = {len(pairs)} jobs")
+    """One job per (prompt, artist, chara) triple."""
+    # An empty/missing list file is an inert axis, not zero jobs.
+    artists = load_lines(args.artist) or [""]
+    charas = load_lines(args.chara) or [""]
+    prompts = load_prompts(args.prompts) if args.prompts else [None]
 
-    for i, (artist, chara) in enumerate(pairs, 1):
-        wf = substitute(workflow, artist, chara)
+    combos = list(itertools.product(enumerate(prompts, 1), artists, charas))
+    print(
+        f"Queuing {len(prompts)} prompts × {len(artists)} artists × "
+        f"{len(charas)} charas = {len(combos)} jobs"
+    )
+
+    for i, ((pidx, prompt), artist, chara) in enumerate(combos, 1):
+        wf = json.loads(json.dumps(workflow))
+        if prompt is not None:
+            apply_prompt(wf, prompt)
+        wf = substitute(wf, artist, chara)
+        tag = " x ".join(p for p in (artist, chara) if p)
+        if prompt is not None:
+            tag = f"prompt{pidx}" + (f" | {tag}" if tag else "")
         submit(
             wf,
             args.server,
             args.randomize_seed,
             args.wait,
-            f"[{i}/{len(pairs)}] {artist} x {chara}",
+            f"[{i}/{len(combos)}] {tag}",
         )
 
     print("All done.")
@@ -181,6 +237,14 @@ def main():
     parser.add_argument("workflow", help="Path to workflow JSON")
     parser.add_argument("--artist", default="workflows/artist.txt")
     parser.add_argument("--chara", default="workflows/chara.txt")
+    parser.add_argument(
+        "--prompts",
+        default=None,
+        help=(
+            "File of prompts (one per line, bare or JSON-quoted); each replaces "
+            "the positive CLIPTextEncode text, e.g. workflows/preferred.txt."
+        ),
+    )
     parser.add_argument(
         "--images_dir",
         default=None,

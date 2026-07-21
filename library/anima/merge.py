@@ -13,7 +13,7 @@ Not supported (refuse by default; ``allow_partial=True`` to drop and proceed):
   - register tokens   (ride the self-attn sequence; kept-live inference only)
 
 Same merge path as train.py's --base_weights warm-start. The CLI shell over
-this lives in ``scripts/merge_to_dit.py``.
+this lives in ``scripts/toolkits/merge_to_dit.py``.
 """
 
 from __future__ import annotations

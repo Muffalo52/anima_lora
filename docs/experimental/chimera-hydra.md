@@ -296,7 +296,7 @@ ss_router_source               = "input"
 | T-LoRA | ✅ | Built-in (per-half asymmetric masking — content rank-modulated, freq full-rank). |
 | OrthoLoRA | ✅ | `use_ortho=true` is the chimera default. |
 | ComfyUI | ❌ | The 2-A on-disk layout (`lora_ups_c.{i}` + `lora_ups_f.{j}` + dual `lora_down_{c,f}` per Linear) is NOT what the `comfyui-hydralora` node currently understands (it expects the legacy 1-A Hydra-MoE shape). The legacy chimera node-loader tests (removed with the extracted node) exercised the legacy synthetic layout, not the new emitter. ComfyUI loader needs ~150 lines of new code to read the 2-A keys + broadcast `π_f` per step. |
-| Static merge into DiT | ❌ | `scripts/merge_to_dit.py` refuses MoE methods by default (router is sample-dependent). `--allow-partial` would drop the chimera portion entirely. |
+| Static merge into DiT | ❌ | `scripts/toolkits/merge_to_dit.py` refuses MoE methods by default (router is sample-dependent). `--allow-partial` would drop the chimera portion entirely. |
 | FeRA / hydra-moe loaded simultaneously | ❌ | One router scheme per checkpoint; `models.py` refuses two MoE files in one `--lora_weight` list. |
 
 ## Cold-start risk and diagnostics

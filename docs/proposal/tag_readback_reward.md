@@ -30,7 +30,7 @@ and phase discipline are inherited from it, the reward stack is rebuilt.
 - Metric-trap priors this design must obey:
   - CMMD is distribution-level, fragile at n≈24–96, misranks within-family at
     cfg-1 — it cannot be the per-image judge and must not gate any A/B here.
-  - `docs/proposal/paired_gram_eval.md` Phase 0 **failed**: token-Gram style scores
+  - `_archive/proposals/paired_gram_eval.md` Phase 0 **failed**: token-Gram style scores
     are content-dominated. Any style verifier must prove it is not a content
     detector (Phase 0b is content-matched for exactly this reason).
   - PE manifold is collapsed on our data (IP-Adapter diagnostics, archived:
@@ -241,8 +241,8 @@ tagger forward per *selected* candidate — noise.
 - `bench/memorization/probe.py` — xerox / near-duplicate control, novelty term.
 - `docs/proposal/dave_mod_bestofn.md` — `q_tag` consumer; best-of-N order
   statistics for candidate pools.
-- `docs/proposal/paired_gram_eval.md` (Phase 0 failed) — the content-dominance
+- `_archive/proposals/paired_gram_eval.md` (Phase 0 failed) — the content-dominance
   trap Phase 0b is designed against.
-- `docs/proposal/seed_lottery_noise_floor.md`, `docs/experimental/soup.md` —
+- `_archive/proposals/seed_lottery_noise_floor.md`, `docs/experimental/soup.md` —
   selection consumers.
 - `docs/methods/turbo.md` — grow engine; teacher-gap adherence confound.

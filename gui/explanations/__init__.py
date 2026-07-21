@@ -98,7 +98,7 @@ def preprocess_guide() -> str:
     return _guide("preprocess")
 
 
-# Methods that can't be baked into a plain DiT via scripts/merge_to_dit.py (router is
+# Methods that can't be baked into a plain DiT via scripts/toolkits/merge_to_dit.py (router is
 # layer-local / hook-only / not a weight delta) — render the "not mergeable" callout.
 _NOT_MERGEABLE = frozenset({"hydralora", "fera", "chimera", "soft_tokens"})
 _KNOWN_METHODS = frozenset(

@@ -312,9 +312,33 @@ def test_train_adaln_desugars_to_include_pattern():
     assert ".*adaln_up_.*" in cfg.include_patterns
     # the default exclude still lists adaln_up_ — the include is what beats it
     assert any("adaln_up_" in p for p in cfg.exclude_patterns)
-    # rank/alpha inherit the network's unless overridden
+    # rank inherits the network's unless overridden; alpha is always pinned via
+    # reg_alphas, but at adaln_rank=0 the √r factor is 1 → the network alpha
     assert not cfg.reg_dims
-    assert not cfg.reg_alphas
+    assert cfg.reg_alphas == {".*adaln_up_.*": 1.0}
+
+
+def test_adaln_alpha_derives_from_network_rank_alpha():
+    """Unset ``adaln_alpha`` follows the network's rank/alpha by the √r law
+    rather than inheriting network_alpha at the smaller adaln rank (which would
+    run the adaln modules network_dim/adaln_rank hotter in alpha/rank)."""
+    cfg = LoRANetworkCfg.from_kwargs(
+        {"train_adaln": "true", "adaln_rank": "16"},
+        network_dim=32,
+        network_alpha=128.0,
+        neuron_dropout=None,
+        module_class=LoRAModule,
+    )
+    assert cfg.reg_alphas[".*adaln_up_.*"] == pytest.approx(128.0 * (0.5**0.5))
+    # and it tracks network_alpha rather than a hard-coded constant
+    cfg = LoRANetworkCfg.from_kwargs(
+        {"train_adaln": "true", "adaln_rank": "16"},
+        network_dim=32,
+        network_alpha=32.0,
+        neuron_dropout=None,
+        module_class=LoRAModule,
+    )
+    assert cfg.reg_alphas[".*adaln_up_.*"] == pytest.approx(32.0 * (0.5**0.5))
 
 
 def test_train_adaln_off_leaves_include_patterns_untouched():

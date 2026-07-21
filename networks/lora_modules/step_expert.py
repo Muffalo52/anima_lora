@@ -33,7 +33,7 @@ class StepExpertLoRAModule(BaseLoRAModule):
     Linear-only (the turbo student targets fused attention / MLP projections,
     all ``nn.Linear``). ``merge_to`` / ``fuse_weight`` are intentionally absent:
     K per-step heads cannot fold into one static DiT weight, so ``make merge``
-    refuses per-step-expert turbo (see ``scripts/merge_to_dit.py``).
+    refuses per-step-expert turbo (see ``scripts/toolkits/merge_to_dit.py``).
     """
 
     supports_conv2d = False

@@ -15,7 +15,7 @@ def cmd_merge(extra):
     run(
         [
             PY,
-            "scripts/merge_to_dit.py",
+            "scripts/toolkits/merge_to_dit.py",
             "--adapter_dir",
             adapter_dir,
             "--multiplier",
@@ -34,6 +34,11 @@ def cmd_comfy_batch(extra):
 
         make comfy-batch W=colorize.json
         make comfy-batch W=colorize.json IMAGES=/path/to/imgs
+
+    ``PROMPTS=<file>`` (bare names resolve under ``workflows/``) iterates the
+    prompt text as a third axis alongside artist.txt / chara.txt:
+
+        make comfy-batch W=modhydra.json PROMPTS=preferred.txt
     """
     workflow = os.environ.get("W") or (
         extra[0] if extra else "workflows/modhydra-simple.json"
@@ -41,6 +46,12 @@ def cmd_comfy_batch(extra):
     if os.sep not in workflow and "/" not in workflow:
         workflow = f"workflows/{workflow}"
     remaining = extra[1:] if (extra and not os.environ.get("W")) else list(extra)
+
+    prompts = os.environ.get("PROMPTS")
+    if prompts and "--prompts" not in remaining:
+        if os.sep not in prompts and "/" not in prompts:
+            prompts = f"workflows/{prompts}"
+        remaining = ["--prompts", prompts, *remaining]
 
     images_dir = os.environ.get("IMAGES", "../comfy/input/to_colorize")
     if images_dir and "--images_dir" not in remaining:
