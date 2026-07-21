@@ -138,7 +138,7 @@ $$
 W_\text{merged}\ =\ W_0\ +\ m \cdot s \cdot B A
 $$
 
-After merging, the forward is `org_forward` only — LoRA becomes a no-op. `scripts/merge_to_dit.py` uses exactly this path to produce a standalone ComfyUI-compatible DiT checkpoint. (Router-dependent variants can't merge — a sample-dependent gate has no single static $BA$.)
+After merging, the forward is `org_forward` only — LoRA becomes a no-op. `scripts/toolkits/merge_to_dit.py` uses exactly this path to produce a standalone ComfyUI-compatible DiT checkpoint. (Router-dependent variants can't merge — a sample-dependent gate has no single static $BA$.)
 
 ---
 

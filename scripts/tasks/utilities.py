@@ -15,7 +15,7 @@ def cmd_merge(extra):
     run(
         [
             PY,
-            "scripts/merge_to_dit.py",
+            "scripts/toolkits/merge_to_dit.py",
             "--adapter_dir",
             adapter_dir,
             "--multiplier",

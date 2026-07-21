@@ -69,7 +69,7 @@ $$
 \text{lora\_up} = P_\text{eff}\,\text{diag}(\lambda),\qquad \text{lora\_down} = Q_\text{eff}
 $$
 
-OrthoInit distills the same way ($R = I$); SVD-Down was standard LoRA all along. The payoff is uniform: stock ComfyUI loading and lossless `scripts/merge_to_dit.py` merging, whichever variant trained the checkpoint.
+OrthoInit distills the same way ($R = I$); SVD-Down was standard LoRA all along. The payoff is uniform: stock ComfyUI loading and lossless `scripts/toolkits/merge_to_dit.py` merging, whichever variant trained the checkpoint.
 
 ---
 

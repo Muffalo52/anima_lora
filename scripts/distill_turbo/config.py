@@ -522,7 +522,7 @@ class TurboConfig:
     fake_down_init: str
     # Warm start: initialize the stack's ΔW from a plain LoRA checkpoint
     # (e.g. an official-release delta extracted by
-    # scripts/extract_delta_lora.py), SVD-truncated to the stack's rank.
+    # scripts/toolkits/extract_delta_lora.py), SVD-truncated to the stack's rank.
     # Empty = default init. Incompatible with per_step_expert /
     # down_init="weight_svd" (those parameterize or seed what this overwrites).
     student_init_weights: str

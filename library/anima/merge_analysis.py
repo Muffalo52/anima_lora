@@ -1,6 +1,6 @@
 """Weight-space interference analysis for multi-LoRA merges.
 
-When ``scripts/merge_loras.py`` fuses N adapters it sums their weight-deltas
+When ``scripts/toolkits/merge_loras.py`` fuses N adapters it sums their weight-deltas
 ``ΔW_i = (α_i/r_i)·up_i @ down_i``.  The energy of that sum is **not** just the
 sum of energies — it carries pairwise cross-terms::
 

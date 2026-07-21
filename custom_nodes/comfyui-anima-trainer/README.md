@@ -76,4 +76,4 @@ Saves to
 - Directory-of-images datasets and method/preset/warm-start overrides (the old
   "Advanced" node) — use the GUI or CLI (`make lora-gui`) for those.
 - Baking the trained LoRA into DiT weights as a standalone checkpoint
-  (see `scripts/merge_to_dit.py` for the CLI equivalent).
+  (see `scripts/toolkits/merge_to_dit.py` for the CLI equivalent).

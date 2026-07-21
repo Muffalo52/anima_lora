@@ -156,7 +156,7 @@ Step 2 of the "is this measure an effective overfitting detector" ladder
 (endpoint discrimination and dose ordering were already banked; the missing
 claims were false-positive breadth on presumed-healthy checkpoints, and
 whether the measure works on **merged** artifacts — the `ckpt/soup` /
-`scripts/merge_loras.py` use case). One daemon command job, 6 probe runs,
+`scripts/toolkits/merge_loras.py` use case). One daemon command job, 6 probe runs,
 `results/20260712-18*/-19*`. All runs used `--sigmas 0.5 0.7`: the probe
 draws the same per-item seeded noise for every σ, so per-σ AUCs are exactly
 comparable to the banked 4-σ runs' `per_sigma` entries (K=4 and 48/48 item

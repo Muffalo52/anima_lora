@@ -10,7 +10,7 @@ ComfyUI, and the turbo warm-start knob (``network.student_init_weights``).
 Motivating use: seed the DP-DMD student from the official anima_turboV10
 release (see memory ``project_official_turbo_v10_eval``):
 
-    python scripts/extract_delta_lora.py \
+    python scripts/toolkits/extract_delta_lora.py \
         --tuned models/diffusion_models/anima_turboV10.net.safetensors \
         --rank 96 --out models/extracted/anima_turboV10_delta_r96.safetensors
 

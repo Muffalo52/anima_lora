@@ -96,13 +96,13 @@ wants the runtime layout.
 
 ## Path 1 — extraction (SHIPPED)
 
-`scripts/extract_delta_lora.py` extracts adaln up-projections from a full-model
+`scripts/toolkits/extract_delta_lora.py` extracts adaln up-projections from a full-model
 delta with `--include_adaln`, and `--adaln_layout comfy` renames to the ComfyUI
 layout at save time (default `runtime` keeps warm-start compat; layout recorded
 in `ss_delta_extract` metadata).
 
 ```bash
-python scripts/extract_delta_lora.py \
+python scripts/toolkits/extract_delta_lora.py \
     --tuned models/diffusion_models/anima_turboV10.net.safetensors \
     --rank 96 --act_scales models/extracted/act_scales_base_4step.safetensors \
     --include_adaln --adaln_layout comfy \

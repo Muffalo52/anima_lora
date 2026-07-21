@@ -255,7 +255,7 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
 
     # Warm start (network.student_init_weights / fake_init_weights): seed the
     # stack's ΔW from a plain LoRA file (e.g. an official-release delta from
-    # scripts/extract_delta_lora.py). After .to() so the SVD runs on-device,
+    # scripts/toolkits/extract_delta_lora.py). After .to() so the SVD runs on-device,
     # before compile so traced forwards see the final tensors.
     if resume_state is not None:
         if cfg.student_init_weights or cfg.fake_init_weights:

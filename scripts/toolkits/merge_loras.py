@@ -25,7 +25,7 @@ global RMS ‖ΔW‖_F matches the average single-LoRA norm (≈1/√N when orth
 →1/N when similar); 'off' reproduces the raw exact-concat sum.
 
 Usage:
-    uv run python scripts/merge_loras.py \
+    uv run python scripts/toolkits/merge_loras.py \
         output/ckpt/anima_artist1.safetensors \
         output/ckpt/anima_artist2.safetensors \
         output/ckpt/anima_artist3.safetensors \

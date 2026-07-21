@@ -6,7 +6,7 @@ visual merge verdict from loss-side numbers alone). Nothing built yet;
 Phase 0 (calibration) gates Phase 1 (ship).**
 
 Ships a *behavioral* merge check next to the shipped *weight-geometry* check:
-`scripts/merge_loras.py --analyze` (`library/anima/merge_analysis.py`)
+`scripts/toolkits/merge_loras.py --analyze` (`library/anima/merge_analysis.py`)
 predicts interference from pairwise ΔW cosines and subspace-overlap bands,
 but nothing measures what a merge actually *does* to each ingredient's fit.
 Phase 0.5 showed that measurement exists, is cheap, and is enormous when the

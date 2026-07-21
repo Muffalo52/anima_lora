@@ -270,7 +270,7 @@ def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -
     both directions. Modules absent from the file keep their constructed init.
 
     Intended for the DP-DMD student/fake warm start from an extracted
-    full-model delta (``scripts/extract_delta_lora.py``); accepts any plain
+    full-model delta (``scripts/toolkits/extract_delta_lora.py``); accepts any plain
     LoRA file. Must run before ``compile_dit_blocks`` traces the forwards.
     """
     from safetensors.torch import load_file

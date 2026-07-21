@@ -134,7 +134,7 @@ The shipped seed is the **official `anima_turboV10` release delta**, extracted a
 the base DiT:
 
 ```bash
-python scripts/extract_delta_lora.py \
+python scripts/toolkits/extract_delta_lora.py \
     --tuned models/diffusion_models/anima_turboV10.net.safetensors \
     --rank 96 --act_scales models/extracted/act_scales_base_4step.safetensors \
     --out models/extracted/anima_turboV10_delta_r96_asvd.safetensors
