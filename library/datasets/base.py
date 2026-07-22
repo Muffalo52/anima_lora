@@ -460,12 +460,11 @@ class BaseDataset(torch.utils.data.Dataset):
         """Per-index target tier for ``random`` mode (recomputed each epoch).
 
         Assigns each of the ``L`` epoch slots (``L`` = pinned epoch length) a target
-        rank: the top tier for a ``highres_ratio`` fraction of the slots, the
-        cheapest (rank 0) for the rest — exactly ``round(L * highres_ratio)`` top
-        slots, shuffled per epoch (own RNG stream, seeded by epoch) so high/low-res
-        batches interleave randomly across the run instead of being back-loaded like
-        ``curriculum``. Binary by design (top vs cheapest, mirroring curriculum's
-        ``step`` ramp); middle tiers, if any, aren't drawn. No-op off ``random``.
+        rank: the top tier for a ``highres_ratio`` fraction of the slots, with the
+        remaining slots distributed evenly among lower and middle tiers (rank 0 to
+        top-1). Shuffled per epoch (own RNG stream, seeded by epoch) so batches at
+        various resolution tiers interleave randomly across the run instead of being
+        back-loaded like ``curriculum``. No-op off ``random``.
         """
         self._autoscale_random_ranks = []
         sched = self._autoscale
@@ -474,11 +473,18 @@ class BaseDataset(torch.utils.data.Dataset):
         L = max((len(p) for p in positions.values()), default=0)
         if L <= 0:
             return
-        top = self._autoscale_n_ranks - 1
+
+        n_ranks = self._autoscale_n_ranks
+        top = n_ranks - 1
         n_top = max(0, min(L, round(L * sched.highres_ratio)))
-        ranks = [top if i < n_top else 0 for i in range(L)]
-        # Separate stream from the bucket shuffle (offset seed) so toggling random
-        # mode doesn't perturb the bucket order, and reproducible per epoch.
+
+        ranks = [top] * n_top
+
+        n_remaining = L - n_top
+        lower_ranks_count = top 
+        for i in range(n_remaining):
+            ranks.append(i % lower_ranks_count)
+            
         rng = random.Random(int(self.seed) + int(self.current_epoch) + 1009)
         rng.shuffle(ranks)
         self._autoscale_random_ranks = ranks

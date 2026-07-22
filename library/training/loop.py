@@ -487,7 +487,7 @@ def _run_step(trainer, state: LoopState, batch) -> torch.Tensor:
         if state.profile_started:
             torch.cuda.nvtx.range_push("optimizer")
 
-        # --- ScheduleFree+ step_func 패치 ---
+        # --- ScheduleFree+ step_func 및 NaN/Inf 패치 ---
         raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
         if hasattr(raw_opt, "step_func"):
             if not hasattr(trainer, "_step_func_loss_accum"):
@@ -498,9 +498,24 @@ def _run_step(trainer, state: LoopState, batch) -> torch.Tensor:
                 if args.max_grad_norm == 0.0:
                     accelerator.unscale_gradients()
                 avg_loss = trainer._step_func_loss_accum / args.gradient_accumulation_steps
-                raw_opt.step_func(avg_loss)
+
+                # 그래디언트 유효성 검사
+                is_finite = True
+                for param_group in raw_opt.param_groups:
+                    for param in param_group['params']:
+                        if param.grad is not None and not torch.isfinite(param.grad).all():
+                            is_finite = False
+                            break
+                    if not is_finite:
+                        break
+
+                if is_finite:
+                    raw_opt.step_func(avg_loss)
+                    state.lr_scheduler.step()
+                else:
+                    accelerator.print("⚠️ Gradient overflow (NaN/Inf) detected. Skipping step for ScheduleFree.")
+
                 trainer._step_func_loss_accum = 0.0
-                state.lr_scheduler.step()
                 state.optimizer.zero_grad(set_to_none=True)
                 scaler = getattr(state.optimizer, 'scaler', None)
                 if scaler is not None:
