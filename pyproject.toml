@@ -17,6 +17,7 @@ dependencies = [
     "prodigy-plus-schedule-free",
     "adv-optm @ git+https://github.com/koratahiu/advanced_optimizers.git",
     "schedulefree @ git+https://github.com/facebookresearch/schedule_free.git",
+    "LoraEasyCustomOptimizer @ git+https://github.com/67372a/LoRA_Easy_Training_scripts_Backend.git#subdirectory=custom_scheduler",
     # Data & Config
     "toml>=0.10.2",
     "tomlkit>=0.13",  # style-preserving TOML for the GUI's sectioned distill-config editor
