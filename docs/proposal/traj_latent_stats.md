@@ -8,9 +8,19 @@ front-loaded commitment confirmed at aggregate scale (~half of tokens
 code-committed by σ=0.5, ~2/3 by σ=1/3, tight spread), (b) channel usage
 skewed ~4× and corpus-stable, (c) generation ↔ inversion traces structurally
 agree below σ≈0.92 — corpus statistics transfer; neither falsifier fired.
-**Phase 2 (intactness gauge) is the active phase** — it is the actual
-product; Phase 3 (interventions) stays gated (compute-reuse keeps its
-audition; channel truncation demoted to measurement-only, see report).
+**Phase 2 (intactness gauge) DONE & PASSED 2026-07-23** —
+`bench/traj_stats/gauge.py` + `run_gauge_calibration.py`, run
+`results/20260723-2130-phase2-recal/`: one exemplar per verdict band
+(SMC-CFG intact · Spectrum perturbed · foveation process-broken). P4t
+rediscovered from traces alone via commit-CDF hole 0.17 + in-loop hf
+blow-up ~30× (the predicted *flatline* only exists post-readout — detector
+retained). Key calibration finding: **quality-neutral ≠
+process-transparent** (Spectrum's forecast steps are process-visible;
+verdicts are driven by distributional metrics only, pointwise divergence is
+descriptive). Falsifier 3 does not fire. **Phase 3 (interventions) is now
+unblocked but stays gated per-item** — compute-reuse must clear this gauge
+before any quality bench is spent; channel truncation demoted to
+measurement-only.
 
 Originally proposed in PR #74; this copy supersedes the draft there.
 
@@ -144,7 +154,7 @@ envelope + the existing `run_bench.py` render pattern via
    is an important negative result on its own: generated trajectories are
    off-manifold and corpus stats only license img2img/editing claims.
 
-## Phase 2 — the trajectory-intactness gauge (ACTIVE)
+## Phase 2 — the trajectory-intactness gauge (DONE 2026-07-23 — see report §Phase 2)
 
 The product. For a candidate intervention X and a fixed (prompt, seed, steps):
 

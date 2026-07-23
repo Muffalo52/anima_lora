@@ -172,6 +172,8 @@ def test_flush_roundtrip_and_idempotent(tmp_path):
     assert path is not None and path.endswith("_seed7.npz")
 
     d = np.load(path)
+    assert d["tok"].shape == (steps, 1, 16, 4, 4)
+    assert d["tok"].dtype == np.float16
     assert d["activity"].shape == (steps, 1, 4, 4)
     assert d["hf"].shape == (steps, 1, 4, 4)
     assert d["guide"].shape == (steps, 1, 4, 4)

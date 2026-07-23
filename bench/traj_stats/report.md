@@ -1,5 +1,69 @@
 # traj_stats — trajectory-resolved latent statistics
 
+## Phase 2 — the trajectory-intactness gauge
+
+**Verdict: PASS** (calibration `results/20260723-2130-phase2-recal/`, traces
+from `results/20260723-2120-phase2/`; 4 prompts × 2 seeds × 1024², 28-step
+**euler** CFG 4 — Euler everywhere because the foveated runner forces it).
+
+`gauge.py --baseline <dir> --candidate <dir>` compares matched
+(prompt, seed) trace grids and emits the per-σ divergence profile D(X) as
+curves (x̂₀ RMSE, code mismatch, ΔE, hf-ratio, commit-CDF shift) plus
+structural detectors, then a verdict band. Calibration landed **one
+exemplar in each band**:
+
+| arm | verdict | expected | evidence |
+|---|---|---|---|
+| SMC-CFG | **intact** | intact | all distributional metrics ≈ 0 (max ΔE 0.02) |
+| Spectrum | **perturbed** | perturbed | ΔE −0.65 localized in its forecast band; no structural damage |
+| foveation σ_c=0.75 | **process-broken** | process-broken | commit-CDF hole 0.168 + hf blow-up ~30× over 14 knots |
+
+Three findings that shape how the gauge must be read:
+
+1. **P4t is rediscovered from traces alone — but the in-loop signature is a
+   blow-up, not a flatline.** The proposal predicted the periphery `hf`
+   trace flatlining; in the recorded (full-grid) latents the group-shared
+   periphery is piecewise-constant, so cell boundaries dump Laplacian
+   energy — hf_ratio jumps to ~30× at the σ_c crossing and stays ≥14×. The
+   *flatline* only exists in the final image, after the bicubic readout.
+   The commit-CDF hole (−0.17 around σ=0.80: tokens that had committed in
+   baseline get yanked by the merge rewrite) is the second, independent
+   break signature. The flatline detector is retained for future
+   interventions that smooth in-loop.
+2. **Quality-neutral ≠ process-transparent.** Spectrum's own bench is
+   quality-neutral, but its Chebyshev-forecast steps are process-visible:
+   per-token activity collapses on forecast knots (ΔE dips to −0.65),
+   because information genuinely does not flow through the DiT on those
+   steps. "Perturbed" is the *correct* reading, and the pre-registered
+   expectation was updated accordingly (documented in
+   `run_gauge_calibration.py`). The falsifier-3 requirement — separate
+   foveation from Spectrum — is met with wide margin (hf blow-up 28×
+   vs 0.34 max deviation; commit hole 0.168 vs 0.090).
+3. **Verdicts are driven by distributional metrics only.** Any intervention
+   touching the combine (SMC) or the step rule produces large *pointwise*
+   divergence (SMC: 65 % code mismatch at 8-step smoke) through ordinary
+   trajectory chaos while leaving process statistics intact. x̂₀ RMSE and
+   code-mismatch curves are reported as descriptive context, never verdict
+   inputs.
+
+Recorder change for the gauge: the sidecar now stores `tok` (token-level
+normalized x̂₀, f16) so D's RMSE term is exact rather than k=4-code-coarse.
+Phase 0 gates re-verified after the change (`results/20260723-2131-tok-reverify-1024/`):
+bit-exact PASS, overhead **1.35 %** at 1024² (budget 2 %); sidecar ~6 MB.
+The foveated runner (`networks/foveated.py`) now records via the same
+side channel as the other runners.
+
+Verdict bands live in `gauge.BANDS` — bench-calibrated, provisional; re-run
+`run_gauge_calibration.py --reuse <run_dir>` after any band/logic change
+(offline, no rendering).
+
+Repro:
+
+    uv run python bench/traj_stats/run_gauge_calibration.py --label phase2
+    uv run python bench/traj_stats/gauge.py --baseline <dir> --candidate <dir>
+
+---
+
 ## Phase 1 — the anime-domain atlas
 
 **Run**: `results/20260723-2100-phase1/` (`run_atlas.py --label phase1`).

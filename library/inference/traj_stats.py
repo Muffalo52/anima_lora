@@ -20,6 +20,8 @@ channel.
 
 Traces per step (see the proposal's table):
 
+* ``tok``      — token-level normalized x̂₀ itself (f16) — the raw map the
+  Phase 2 gauge computes token-wise RMSE(σ) on (codes are too coarse at k=4)
 * ``codes``    — k-bit uniform quantization code of token-level x̂₀ (uint8)
 * ``activity`` — ‖x̂₀(p, i) − x̂₀(p, i−1)‖ over channels (NaN at step 0)
 * ``hf``       — Laplacian energy of x̂₀ around each token (foveation's x0var)
@@ -260,6 +262,7 @@ class TrajStatsRecorder:
 
         self._steps.append(
             {
+                "tok": tok.to(torch.float16),
                 "activity": activity.to(torch.float16),
                 "hf": hf.to(torch.float16),
                 "guide": guide.to(torch.float16),
@@ -295,6 +298,7 @@ class TrajStatsRecorder:
         # "a few MB" per sidecar, so disk is the cheap side of this trade.
         np.savez(
             path,
+            tok=stack("tok"),  # (S, B, C, Ht, Wt) f16 — token-level x̂₀
             activity=stack("activity"),  # (S, B, Ht, Wt) f16, step 0 = NaN
             hf=stack("hf"),  # (S, B, Ht, Wt) f16
             guide=stack("guide"),  # (S, B, Ht, Wt) f16, NaN when no CFG
