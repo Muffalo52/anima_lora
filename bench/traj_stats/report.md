@@ -147,6 +147,41 @@ from corpus to generation. Phase 2 (the intactness gauge) proceeds;
 Phase 3's committed-token compute-reuse item keeps its audition, channel
 truncation is demoted to measurement-only.
 
+### Addendum (2026-07-23) — channel *subspace* + boundary predictability
+
+`analyze_subspace.py` (offline, reads existing traces + cached latents;
+json in `results/20260723-2100-phase1/subspace_addendum.json`). Two
+questions the marginal (axis-aligned) atlas stats couldn't answer:
+
+**The domain lives in a fixed ~3-dim channel subspace, and inference never
+leaves it.** Channel-covariance spectrum of token-level normalized x̂₀:
+
+| population | effective rank | top-4 var | top-8 alignment to static |
+|---|---|---|---|
+| static corpus (488k tokens) | 3.38 / 16 | 0.90 | — |
+| generated, final x̂₀ | 2.75 / 16 | 0.94 | cos ∠ = 1, 1, 1, 1, 1, .999, .996, .97 |
+| generated, mid-trajectory σ=0.5 | 2.67 / 16 | — | same (≥ .97 all eight) |
+
+The Phase 1 cbits skew was the axis-aligned shadow of this: the anime
+domain uses a fixed ~3–4-dim subspace of the 16-dim VAE channel space, the
+*same* subspace during generation (even mid-trajectory) as in the clean
+corpus. Caveats: token-level (2×2-pooled) statistics — per-pixel tails are
+suppressed; and "statistics live low-dim" ≠ "decode quality survives
+projection" — that test is the Phase 3 subspace-truncated decode probe.
+
+**Which tokens commit late is NOT predictable a priori; when they commit
+is.** Per-token commit-knot vs final-hf Spearman: mean 0.17 (range
+0.05–0.41 over 16 traces); vs early-σ guide: 0.14. The "detail commits
+late" intuition is a weak per-token signal, while the σ-direction
+(population commit-CDF) is tight and systematic. Design consequence for
+Phase 3 compute-reuse: **detect, don't predict** — online code-stability
+detection is free and reliable; pre-drawn masks (foveation's shape) are
+refuted a second time by this data.
+
+Repro:
+
+    uv run python bench/traj_stats/analyze_subspace.py
+
 Repro:
 
     uv run python bench/traj_stats/run_atlas.py --label phase1
