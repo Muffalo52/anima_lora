@@ -1,5 +1,58 @@
 # traj_stats — trajectory-resolved latent statistics
 
+## Phase 3 — compute-reuse oracle replay: CLOSED (line archived)
+
+**Verdict: compute reuse dies at the pre-gauge gate** (2026-07-24,
+`run_reuse_oracle.py`, run `results/20260724-0001-phase3-reuse-oracle/`;
+offline replay of the 32 Phase 1 atlas generation traces — no renders, no
+GPU). With tier routing already failed at 3a and channel truncation demoted
+to measurement-only at Phase 2, this closes the last intervention item; the
+proposal is archived (`_archive/proposals/traj_latent_stats.md`). Phases 0–2
+(recorder / atlas / gauge) stay shipped as observability.
+
+The proposal's detector rule — freeze a token's velocity once its code has
+been stable m steps, below a σ threshold — replayed against recorded ground
+truth (open-loop, i.e. the intervention's *best* case: real reuse adds
+compounding drift on top):
+
+| m | σ< | skip% | oracle% | false-freeze% | final-code mismatch% | stale p50 / p95 |
+|---|-----|-------|---------|---------------|----------------------|------------------|
+| 2 | 1.0 | 61.4 | 25.5 | 56.4 | 69.0 | 12.7 / 37.4 |
+| 3 | 0.7 | 32.1 | 20.5 | 29.9 | 45.1 | 4.6 / 11.1 |
+| 4 | 0.5 | 13.9 | 13.6 | 15.3 | 25.9 | 2.0 / 4.7 |
+
+(staleness in σ→0 noise-floor units; full 3×3 grid in the result envelope)
+
+Both ways it could fail, it fails:
+
+1. **The headroom is small even with impossible-in-practice perfect
+   detection.** A retrospective oracle freezing each token exactly at its
+   true commit step skips only **25.5 %** of token-steps at σ<1.0 (**13.6 %**
+   at σ<0.5). That already bounds query+MLP savings; real wall-clock savings
+   are lower still, since frozen tokens must stay in the K/V stream
+   (dropping them is foveation redux — the refuted mechanism).
+2. **The realizable online detector is unreliable at every setting.**
+   Stable-for-m does not predict stable-forever — codes flicker. At the only
+   cell with tolerable staleness (m=4, σ<0.5, ~14 % skip ≈ the oracle
+   ceiling), **26 % of frozen tokens end the trajectory in a different
+   quantization cell** than the one frozen, and median staleness is already
+   2× the σ→0 activity floor. This extends the Phase 1 addendum's
+   "detect, don't predict": online code-stability detection isn't reliable
+   either.
+
+The aggregate front-loaded commit-CDF is real (Phase 1 stands), but — same
+shape as the 3a tier-routing failure — it does not convert into a per-token
+intervention basis. A ~10 % best-case wall-clock saving does not justify
+per-step dynamic token subsets fighting `compile_dynamic_seq`, a gauge run,
+and P4t-class process risk.
+
+**Decode probe closed unrun**: measurement-only, no process risk, but its
+payoff is bounded — it only informs latent-storage compression, and the VAE
+latent caches total ~3.0 GB / 3008 files (the rest of
+`post_image_dataset/lora/` is TE/PE caches the probe says nothing about).
+Trivially reopenable: `analyze_subspace.py` + the PCA directions in the
+Phase 1 `subspace_addendum.json` are the needed inputs.
+
 ## Phase 2 — the trajectory-intactness gauge
 
 **Verdict: PASS** (calibration `results/20260723-2130-phase2-recal/`, traces
@@ -193,7 +246,7 @@ Repro:
 **Verdict: PASS** (run `results/20260723-2042-phase0/`, 1024², 28 steps,
 er_sde, CFG 4.0, seed 42; spectrum smoke arm included).
 
-Implements Phase 0 of `docs/proposal/traj_latent_stats.md` (PR #74): the
+Implements Phase 0 of `_archive/proposals/traj_latent_stats.md` (PR #74): the
 `--traj_stats` recorder (`library/inference/traj_stats.py`), hooked into the
 main inline loop, the tiled loop, and `spectrum_denoise` via
 `SamplerSideChannels.traj_stats`. Invariant tests: `tests/test_traj_stats.py`.

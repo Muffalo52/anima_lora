@@ -529,7 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
         "so the α path is the only mode now. α=0.2 is the production default.",
     )
 
-    # Trajectory-resolved latent statistics (docs/proposal/traj_latent_stats.md
+    # Trajectory-resolved latent statistics (_archive/proposals/traj_latent_stats.md
     # Phase 0). Passive per-step recorder — pure observation, recorder on/off
     # latents are bit-identical (pinned by tests/test_traj_stats.py). One .npz
     # sidecar per generation. Composes with --spectrum (recorded post-combine

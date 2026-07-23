@@ -333,7 +333,7 @@ def foveated_denoise(
     lora_cutoff_step = ctx.lora_cutoff_step
     soft_tokens_net = ctx.soft_tokens_net
     # --traj_stats: passive per-step recorder (Phase 2 known-bad calibration
-    # arm — docs/proposal/traj_latent_stats.md). Post-combine, pre-Euler-step,
+    # arm — _archive/proposals/traj_latent_stats.md). Post-combine, pre-Euler-step,
     # on the full-grid x5 (periphery tokens carry their group-shared values
     # after the σ_c crossing — exactly the trace the gauge must flag).
     traj_stats = getattr(ctx, "traj_stats", None)

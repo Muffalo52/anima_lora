@@ -4,7 +4,7 @@ The per-image form of the Phase 1 static column
 (``bench/traj_stats/run_atlas.py::run_static_arm``): identical k-bit quantizer,
 identical double normalization (``(cached_latent - mean) / std`` applied on top
 of the already-VAE-normalized cache — that is the established Phase 1
-convention, not a bug). Design: ``docs/proposal/traj_latent_stats.md`` §Phase 3a.
+convention, not a bug). Design: ``_archive/proposals/traj_latent_stats.md`` §Phase 3a.
 
 Pure numpy + bucket math; no torch model code here.
 """

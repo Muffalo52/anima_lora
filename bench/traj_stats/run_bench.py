@@ -2,7 +2,7 @@
 """traj_stats Phase 0 bench — recorder bit-exactness + overhead budget.
 
 The acceptance gate for the passive trajectory recorder
-(``docs/proposal/traj_latent_stats.md`` Phase 0):
+(``_archive/proposals/traj_latent_stats.md`` Phase 0):
 
 1. **Determinism control** — two recorder-OFF generations at the same seed
    produce bit-identical latents (otherwise bit-exactness is unmeasurable).

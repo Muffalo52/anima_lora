@@ -6,7 +6,7 @@ For a candidate intervention X and a baseline, both recorded with
 
     D(X) = per-σ divergence profile between X's traces and baseline's traces
 
-reported as *curves*, never one scalar (``docs/proposal/traj_latent_stats.md``
+reported as *curves*, never one scalar (``_archive/proposals/traj_latent_stats.md``
 Phase 2). The design premise: a process-breaking intervention (foveation) can
 look fine on the final image while its *trace* flatlines — the gauge must
 rediscover that from traces alone.

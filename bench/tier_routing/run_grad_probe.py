@@ -2,7 +2,7 @@
 """tier_routing Phase 3a — the gradient-equivalence probe.
 
 Validates the claim behind entropy-aware tier routing
-(``docs/proposal/traj_latent_stats.md`` §Phase 3a): that for high-redundancy
+(``_archive/proposals/traj_latent_stats.md`` §Phase 3a): that for high-redundancy
 (flat, cel-style) images, training on a tier-down cache produces the same LoRA
 gradient the native-tier cache does.
 

@@ -2,7 +2,7 @@
 """traj_stats Phase 2 — gauge calibration: known-bad vs known-good.
 
 The acceptance test for the trajectory-intactness gauge
-(``docs/proposal/traj_latent_stats.md`` Phase 2): record matched
+(``_archive/proposals/traj_latent_stats.md`` Phase 2): record matched
 (prompt, seed) trace grids for a baseline and three candidate arms, run
 ``gauge.py`` on each, and demand
 

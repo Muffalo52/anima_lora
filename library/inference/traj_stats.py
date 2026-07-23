@@ -1,6 +1,6 @@
 """Trajectory-resolved latent statistics — the passive per-step recorder.
 
-Phase 0 of ``docs/proposal/traj_latent_stats.md``: observe the denoising
+Phase 0 of ``_archive/proposals/traj_latent_stats.md``: observe the denoising
 trajectory (per-step, per-token, per-channel statistics of the x̂₀ estimate)
 without changing a single bit of the generation. Everything is computed on
 ``.float()`` copies of the loop tensors, out-of-place, and dumped to one

@@ -1,6 +1,6 @@
 """Invariant tests for the --traj_stats passive recorder (Phase 0).
 
-Pins the proposal's Tier-1.5 contract (docs/proposal/traj_latent_stats.md):
+Pins the proposal's Tier-1.5 contract (_archive/proposals/traj_latent_stats.md):
 pure observation (inputs bit-identical after record), explicit dim-2 squeeze
 discipline, commit/trace semantics, npz round-trip, and the Qwen VAE
 normalization constants staying in lockstep with the model defaults.

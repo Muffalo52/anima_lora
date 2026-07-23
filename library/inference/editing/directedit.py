@@ -277,7 +277,7 @@ def invert(
     ``traj_recorder`` (optional): a
     :class:`library.inference.traj_stats.TrajStatsRecorder` observing the
     inversion trajectory — the Phase 1 real-image arm of
-    ``docs/proposal/traj_latent_stats.md``. Passive: recorded on ``.float()``
+    ``_archive/proposals/traj_latent_stats.md``. Passive: recorded on ``.float()``
     copies, ``z_inv``/``delta_z`` are bit-identical with it on or off (pinned
     by ``tests/test_traj_stats.py``). Per step it records
     ``(z_inv[i], sigmas[i], v)`` — since ``z_inv[i] = z_inv[i+1] +

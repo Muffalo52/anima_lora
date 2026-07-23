@@ -778,7 +778,7 @@ def generate_body(
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
 
     # --traj_stats: passive per-step trajectory recorder (pure observation —
-    # docs/proposal/traj_latent_stats.md Phase 0). Threaded through the side
+    # _archive/proposals/traj_latent_stats.md Phase 0). Threaded through the side
     # channels so the spectrum runner records too; flushed once before return.
     traj_stats = TrajStatsRecorder.from_args(args, seed=seed)
 

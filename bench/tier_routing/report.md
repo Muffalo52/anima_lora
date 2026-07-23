@@ -6,7 +6,7 @@ content-modulated**: the conditional mean E[gap | redundancy] is flat. The
 selective-routing thesis has no basis in gradient space; the item closes at
 the price of the probe (~2.5 h GPU, no training run spent).
 
-Design: `docs/proposal/traj_latent_stats.md` §Phase 3a. Per image,
+Design: `_archive/proposals/traj_latent_stats.md` §Phase 3a. Per image,
 accumulated-gradient estimates over K (σ, ε) draws (stratified σ grid,
 `flow_shift` 1.0) at a trained plain-LoRA operating point
 (`anima_soup_sincos`); within-tier redraw floor as the null, re-encode arm as

@@ -2,7 +2,7 @@
 """traj_stats Phase 1 — the anime-domain trajectory atlas.
 
 Turns single-render traces into domain statistics and answers the three
-Phase 1 questions of ``docs/proposal/traj_latent_stats.md``:
+Phase 1 questions of ``_archive/proposals/traj_latent_stats.md``:
 
   (a) how front-loaded is token commitment in this domain (commit-CDF, E(σ)),
   (b) which channels carry it (cbits(c, σ)),
