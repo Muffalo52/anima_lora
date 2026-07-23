@@ -148,3 +148,12 @@ Not yet settled:
 - The σ<0.45 tail carries ≈0% of SEA-weighted skip-cost (consistent with x̂₀
   resolving by σ≈0.45) yet the blind schedule force-computes the last 3 steps —
   a concrete reallocation the adaptive trigger could exploit.
+  **[SETTLED — twice refuted, 2026-06-22 / 2026-07-24.]** The SEA P1
+  matched-compute measurement showed the tail actual-rate is governed by
+  `stop_caching_step` (identical in both arms; the apparent SEA reallocation was
+  a stop-mismatch artifact), and the DPCache Phase-0 bench
+  (`bench/spectrum_dp/`, `docs/findings/dpcache_dp_phase0_refuted.md`) showed a
+  planner *freed* from the tail forcing at matched total compute voluntarily
+  re-places 3 forwards below σ=0.45 — the forced tail is where a
+  budget-constrained schedule wants them anyway. Do not re-propose tail
+  reallocation.
