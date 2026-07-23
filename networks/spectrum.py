@@ -253,6 +253,10 @@ def spectrum_denoise(
     xattn_boost_band = ctx.xattn_boost_band
     xattn_renorm = ctx.xattn_boost_renorm
     xattn_renorm_frac = ctx.xattn_boost_renorm_frac
+    # --traj_stats: passive per-step recorder (records actual AND forecast
+    # steps post-combine — the trace is the process as emitted). generate_body
+    # owns the flush.
+    traj_stats = getattr(ctx, "traj_stats", None)
 
     do_cfg = guidance_scale != 1.0
     num_steps = len(timesteps)
@@ -550,6 +554,14 @@ def spectrum_denoise(
                 if foveation is not None:
                     noise_pred = foveation.pool_velocity(noise_pred, float(sigmas[i]))
 
+                if traj_stats is not None:
+                    traj_stats.record(
+                        i,
+                        sigmas[i],  # tensor, NOT float() — float() = stream sync
+                        latents,
+                        noise_pred,
+                        uncond_noise_pred if do_cfg else None,
+                    )
                 denoised = latents.float() - sigmas[i] * noise_pred.float()
                 if sampler is not None:
                     new_latents = sampler.step(latents, denoised, i)

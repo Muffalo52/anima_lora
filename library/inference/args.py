@@ -529,6 +529,30 @@ def build_parser() -> argparse.ArgumentParser:
         "so the α path is the only mode now. α=0.2 is the production default.",
     )
 
+    # Trajectory-resolved latent statistics (docs/proposal/traj_latent_stats.md
+    # Phase 0). Passive per-step recorder — pure observation, recorder on/off
+    # latents are bit-identical (pinned by tests/test_traj_stats.py). One .npz
+    # sidecar per generation. Composes with --spectrum (recorded post-combine
+    # in the spectrum loop too) and the tiled path (post-blend).
+    parser.add_argument(
+        "--traj_stats",
+        action="store_true",
+        help="Record per-step/per-token/per-channel x̂₀ trajectory statistics "
+        "to an .npz sidecar (passive; does not change the generation).",
+    )
+    parser.add_argument(
+        "--traj_stats_dir",
+        type=str,
+        default="output/traj_stats",
+        help="Output directory for --traj_stats sidecars.",
+    )
+    parser.add_argument(
+        "--traj_stats_k",
+        type=int,
+        default=4,
+        help="Bits per channel for the --traj_stats quantization codes (1-8).",
+    )
+
     # FSG: Foresight Guidance (NeurIPS 2025, arXiv 23177). Pre-step latent
     # calibration: at scheduled mid-σ steps, run K forward(cond)-backward(uncond)
     # fixed-point iterations to pull x_t onto the golden path, then denoise from

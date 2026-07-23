@@ -32,6 +32,7 @@ from library.inference.corrections.mod_guidance import setup_mod_guidance
 from library.inference.corrections.smc_cfg import SMCCFGState
 from library.inference.corrections.fsg import FSGCalibrator
 from library.inference.sampler_context import SamplerSideChannels
+from library.inference.traj_stats import TrajStatsRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +377,8 @@ def generate_body_tiled(
         if do_cfg and getattr(args, "smc_cfg", False)
         else None
     )
+    # --traj_stats: passive per-step recorder (post-blend, pre-sampler-step).
+    traj_stats = TrajStatsRecorder.from_args(args, seed=getattr(args, "seed", None))
 
     pgraft_network = getattr(anima, "_pgraft_network", None)
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
@@ -507,6 +510,14 @@ def generate_body_tiled(
                             noise_pred - uncond_noise_pred
                         )
 
+                if traj_stats is not None:
+                    traj_stats.record(
+                        i,
+                        sigmas[i],  # tensor, NOT float() — float() = stream sync
+                        latents,
+                        noise_pred,
+                        uncond_noise_pred if do_cfg else None,
+                    )
                 denoised = latents.float() - sigmas[i] * noise_pred.float()
                 if er_sde is not None:
                     new_latents = er_sde.step(latents, denoised, i)
@@ -524,6 +535,8 @@ def generate_body_tiled(
         if pgraft_network is not None and lora_cutoff_step is not None:
             pgraft_network.set_enabled(True)
 
+    if traj_stats is not None:
+        traj_stats.flush()
     return latents
 
 
@@ -764,6 +777,11 @@ def generate_body(
     pgraft_network = getattr(anima, "_pgraft_network", None)
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
 
+    # --traj_stats: passive per-step trajectory recorder (pure observation —
+    # docs/proposal/traj_latent_stats.md Phase 0). Threaded through the side
+    # channels so the spectrum runner records too; flushed once before return.
+    traj_stats = TrajStatsRecorder.from_args(args, seed=seed)
+
     # Shared conditioning side-channels handed to whichever loop runner is active
     # (spectrum / spd). The standard inline loop below reads the locals directly.
     _side_channels = SamplerSideChannels.from_args(
@@ -778,6 +796,7 @@ def generate_body(
         soft_tokens_net=soft_tokens_net,
         soft_tokens_embed_seqlens=soft_tokens_embed_seqlens,
         soft_tokens_neg_seqlens=soft_tokens_neg_seqlens,
+        traj_stats=traj_stats,
     )
 
     _fovea_sigma_c = float(getattr(args, "fovea_sigma_c", 0.0) or 0.0)
@@ -1064,6 +1083,14 @@ def generate_body(
                             # prediction and continue on the unconditional path.
                             noise_pred = uncond_noise_pred
 
+                    if traj_stats is not None:
+                        traj_stats.record(
+                            i,
+                            sigmas[i],  # tensor, NOT float() — float() = stream sync
+                            latents,
+                            noise_pred,
+                            uncond_noise_pred if do_cfg else None,
+                        )
                     denoised = latents.float() - sigmas[i] * noise_pred.float()
                     if er_sde is not None:
                         new_latents = er_sde.step(latents, denoised, i)
@@ -1086,6 +1113,12 @@ def generate_body(
             if pgraft_network is not None and lora_cutoff_step is not None:
                 pgraft_network.set_enabled(True)
 
+    # Single flush point for every branch (inline / spectrum / spd / foveated
+    # — runners record via the side channel but never flush). Idempotent, so a
+    # runner that flushed early is harmless; an exception mid-loop drops the
+    # partial trace by design.
+    if traj_stats is not None:
+        traj_stats.flush()
     return latents
 
 
