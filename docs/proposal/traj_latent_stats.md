@@ -1,10 +1,16 @@
 # Trajectory-resolved latent statistics — effective token usage measured *during* generation
 
 Status: **Phase 0 SHIPPED & PASSED 2026-07-23** (recorder + invariant tests +
-bench — `bench/traj_stats/results/20260723-2042-phase0/`, report in
-`bench/traj_stats/report.md`). **Phase 1 (atlas) is the active phase.**
-Phase 2 (intactness gauge) is the actual product; Phase 3 (interventions) is
-explicitly speculative and gated on Phase 1/2 evidence.
+bench — `bench/traj_stats/results/20260723-2042-phase0/`).
+**Phase 1 (atlas) DONE 2026-07-23** — `run_atlas.py`, run
+`bench/traj_stats/results/20260723-2100-phase1/`, report §Phase 1: (a)
+front-loaded commitment confirmed at aggregate scale (~half of tokens
+code-committed by σ=0.5, ~2/3 by σ=1/3, tight spread), (b) channel usage
+skewed ~4× and corpus-stable, (c) generation ↔ inversion traces structurally
+agree below σ≈0.92 — corpus statistics transfer; neither falsifier fired.
+**Phase 2 (intactness gauge) is the active phase** — it is the actual
+product; Phase 3 (interventions) stays gated (compute-reuse keeps its
+audition; channel truncation demoted to measurement-only, see report).
 
 Originally proposed in PR #74; this copy supersedes the draft there.
 
@@ -94,7 +100,7 @@ Derived scalars:
   headroom for *any* late-step token intervention; if flat, the efficiency
   thesis dies cheaply in Phase 1.
 
-## Phase 1 — the atlas (ACTIVE)
+## Phase 1 — the atlas (DONE 2026-07-23 — see report §Phase 1)
 
 Goal: turn single-render traces into anime-domain trajectory statistics, and
 answer three questions: **(a)** how front-loaded is token commitment in this
@@ -138,7 +144,7 @@ envelope + the existing `run_bench.py` render pattern via
    is an important negative result on its own: generated trajectories are
    off-manifold and corpus stats only license img2img/editing claims.
 
-## Phase 2 — the trajectory-intactness gauge
+## Phase 2 — the trajectory-intactness gauge (ACTIVE)
 
 The product. For a candidate intervention X and a fixed (prompt, seed, steps):
 

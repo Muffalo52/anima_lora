@@ -127,6 +127,40 @@ def test_guide_nan_without_cfg(tmp_path):
     assert not torch.isnan(rec._steps[1]["guide"]).any()
 
 
+def test_invert_recorder_is_pure_observation(tmp_path):
+    # Phase 1 real-image arm: the recorder threaded through DirectEdit
+    # inversion must leave z_inv / delta_z bit-identical.
+    from library.inference.editing.directedit import invert
+
+    def fake_anima(latents, t_expand, embed, padding_mask=None):
+        # deterministic, latent- and σ-dependent pseudo-velocity
+        return (latents * 0.25 + t_expand.view(-1, 1, 1, 1, 1).to(latents.dtype)).to(
+            latents.dtype
+        )
+
+    torch.manual_seed(3)
+    z_clean = torch.randn(1, 16, 1, 8, 8, dtype=torch.bfloat16)
+    embed = torch.randn(1, 4, 8, dtype=torch.bfloat16)
+    sigmas = torch.linspace(1.0, 0.0, 5)
+
+    z_ref, d_ref = invert(fake_anima, z_clean.clone(), embed, None, sigmas)
+
+    rec = _mk_recorder(tmp_path)
+    z_rec, d_rec = invert(
+        fake_anima, z_clean.clone(), embed, None, sigmas, traj_recorder=rec
+    )
+    assert all(torch.equal(a, b) for a, b in zip(z_ref, z_rec))
+    assert all(torch.equal(a, b) for a, b in zip(d_ref, d_rec))
+
+    # one record per step, natural inversion order: σ ascending (clean → noise)
+    path = rec.flush()
+    d = np.load(path)
+    assert d["codes"].shape[0] == sigmas.shape[0] - 1
+    rec_sigmas = d["sigmas"]
+    assert all(a < b for a, b in zip(rec_sigmas, rec_sigmas[1:]))
+    assert rec_sigmas[-1] == pytest.approx(1.0)
+
+
 def test_flush_roundtrip_and_idempotent(tmp_path):
     torch.manual_seed(1)
     rec = _mk_recorder(tmp_path, seed=7)
