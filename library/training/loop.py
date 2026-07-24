@@ -85,6 +85,7 @@ class LoopState:
     metadata: dict
     is_tracking: bool
     progress_bar: Any
+    rate_tracker: Any
     loss_recorder: LossRecorder
     val_step_loss_recorder: LossRecorder
     val_epoch_loss_recorder: LossRecorder
@@ -239,11 +240,14 @@ def build_loop_state(
 
     clean_memory_on_device(accelerator.device)
 
+    rate_tracker = loss_recorder.RateTracker()
+
     progress_bar = tqdm(
         range(args.max_train_steps - global_step),
         smoothing=0,
         disable=not accelerator.is_local_main_process,
         desc="steps",
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]",  # <--- [수정] bar_format 지정
     )
 
     validation_steps = (
@@ -304,6 +308,7 @@ def build_loop_state(
         metadata=metadata,
         is_tracking=is_tracking,
         progress_bar=progress_bar,
+        rate_tracker=rate_tracker,
         loss_recorder=loss_recorder,
         val_step_loss_recorder=val_step_loss_recorder,
         val_epoch_loss_recorder=val_epoch_loss_recorder,
@@ -393,6 +398,7 @@ def _run_epoch_steps(trainer, state: LoopState, epoch: int) -> None:
         keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(state)
 
         if accelerator.sync_gradients:
+            state.rate_tracker.tick()
             state.progress_bar.update(1)
             state.global_step += 1
             if state.global_step == LIVENESS_EARLY_CHECK_STEP:
@@ -625,7 +631,10 @@ def _log_step(
     current_loss = loss.detach().item()
     state.loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
     avr_loss: float = state.loss_recorder.moving_average
-    logs = {"avr_loss": avr_loss}
+    logs = {
+        "avr_loss": avr_loss,
+        "it/s": state.rate_tracker.display_rate,
+    }
     raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
     if hasattr(raw_opt, "param_groups") and len(raw_opt.param_groups) > 0:
         pg = raw_opt.param_groups[0]
