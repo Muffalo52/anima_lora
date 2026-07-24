@@ -35,6 +35,7 @@ from library.training.contexts import TrainCtx, ValCtx
 from library.training.method_adapter import StepCtx
 from library.training.metrics import MetricContext, collect_metrics
 from library.training.validation import run_validation
+from library.training.loss_recorder import RateTracker
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ def build_loop_state(
 
     clean_memory_on_device(accelerator.device)
 
-    rate_tracker = loss_recorder.RateTracker()
+    rate_tracker = RateTracker()
 
     progress_bar = tqdm(
         range(args.max_train_steps - global_step),
