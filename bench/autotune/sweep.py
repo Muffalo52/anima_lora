@@ -31,9 +31,9 @@ OOM/timeout status. Output is the standard bench envelope plus surface.md / surf
 
 Usage
 -----
-    python project/sigma_lowres/bench/autotune/sweep.py                       # full 3×4 lora grid, backgroundable
-    python project/sigma_lowres/bench/autotune/sweep.py --swaps 0,20 --budgets 1.0,0.7
-    python project/sigma_lowres/bench/autotune/sweep.py --dry-run             # print the grid + argv, run nothing
+    python bench/autotune/sweep.py                       # full 3×4 lora grid, backgroundable
+    python bench/autotune/sweep.py --swaps 0,20 --budgets 1.0,0.7
+    python bench/autotune/sweep.py --dry-run             # print the grid + argv, run nothing
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ import threading
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]  # anima_lora/
+REPO_ROOT = Path(__file__).resolve().parents[2]  # anima_lora/
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -518,6 +518,7 @@ def parse_args():
         default=45.0,
         help="max wait for prior cell's VRAM to drain (s)",
     )
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--label", default=None)
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()

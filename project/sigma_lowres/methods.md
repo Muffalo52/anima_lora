@@ -4,12 +4,17 @@ What exists in code for the σ-conditional low-res gradient line. Everything is
 **observability instrumentation** — no trainer wiring has been built (Phase 1b
 is design-only; see `roadmap.md`).
 
-The line's benches are adopted into this home (`bench/`), including the two
-predecessor instruments it builds on: `bench/tier_routing/` (the closed
-Phase-3a gradient-equivalence probe — `redundancy.py` still supplies probe-set
-selection to both measurements below) and `bench/autotune/` (the
+The line's benches are adopted into this home (`bench/`), including
+`bench/tier_routing/` (the closed Phase-3a gradient-equivalence probe —
+`redundancy.py` still supplies probe-set selection to both measurements below)
+and `bench/traj_stats/` (the closed traj_stats line's observability harness,
+re-adopted from `_archive/` 2026-07-24: passive recorder bit-exactness bench,
+trajectory atlas, gauge + calibration, and `run_reuse_oracle.py` — the
+oracle-replay sidecar instrument that is the mandated first step for any new
+σ-conditioned intervention, e.g. Phase-1b trainer wiring). The
 `blocks_to_swap` × `activation_memory_budget` → peak-VRAM/step-time surface
-sweep behind the partitioner-budget operating point the gradient probe pins).
+sweep it briefly hosted moved back to top-level `bench/autotune/` (general
+infra, not sigma_lowres-specific).
 
 ## Measurement A — latent RAPSD + closed-form crossover
 

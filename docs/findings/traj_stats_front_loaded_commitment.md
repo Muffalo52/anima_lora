@@ -3,10 +3,12 @@
 > **LINE CLOSED (2026-07-24).** The proposal is archived
 > (`_archive/proposals/traj_latent_stats.md`, originally PR #74); the
 > `--traj_stats` recorder (`library/inference/traj_stats.py`) stays shipped.
-> The bench (atlas, subspace analysis, trajectory-intactness gauge) is archived
-> to `_archive/bench/traj_stats/` — still runnable from there for any future
-> inference-time intervention. Run-by-run evidence:
-> `_archive/bench/traj_stats/report.md` (Phases 0–3) and
+> The bench (atlas, subspace analysis, trajectory-intactness gauge) was
+> briefly archived, then re-adopted 2026-07-24 into
+> `project/sigma_lowres/bench/traj_stats/` as that line's observability
+> harness (oracle-replay sidecars first for any new σ-conditioned
+> intervention). Run-by-run evidence:
+> `project/sigma_lowres/bench/traj_stats/report.md` (Phases 0–3) and
 > `project/sigma_lowres/bench/tier_routing/report.md` (Phase 3a). All four
 > Phase 3 intervention candidates are dead: tier routing (3a probe), committed-token
 > compute reuse (oracle replay), channel truncation (no compute target), decode
@@ -101,7 +103,7 @@ shape:
   ([[project_tier_routing_phase3a_failed]]).
 - **Inference-side (committed-token compute reuse)**: killed by a free
   offline oracle replay of the 32 atlas sidecars
-  (`_archive/bench/traj_stats/run_reuse_oracle.py`,
+  (`project/sigma_lowres/bench/traj_stats/run_reuse_oracle.py`,
   `results/20260724-0001-phase3-reuse-oracle/`) — no implementation, no
   renders. Two independent kill shots: (a) even a **perfect oracle**
   freezing each token at its true retrospective commit step skips only
@@ -135,9 +137,9 @@ mechanism-independent.
   (`float()` is a stream sync, ~28 ms/step) and write sidecars with
   uncompressed `np.savez` (zlib >100 ms inside generation wall time).
 
-## Repro (bench archived 2026-07-24 → `_archive/bench/traj_stats/`)
+## Repro (bench home: `project/sigma_lowres/bench/traj_stats/`)
 
-    uv run python _archive/bench/traj_stats/run_atlas.py --label phase1
-    uv run python _archive/bench/traj_stats/analyze_subspace.py
-    uv run python _archive/bench/traj_stats/run_gauge_calibration.py --label phase2
-    uv run python _archive/bench/traj_stats/run_reuse_oracle.py
+    uv run python project/sigma_lowres/bench/traj_stats/run_atlas.py --label phase1
+    uv run python project/sigma_lowres/bench/traj_stats/analyze_subspace.py
+    uv run python project/sigma_lowres/bench/traj_stats/run_gauge_calibration.py --label phase2
+    uv run python project/sigma_lowres/bench/traj_stats/run_reuse_oracle.py
