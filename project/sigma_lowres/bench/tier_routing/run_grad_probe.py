@@ -28,9 +28,9 @@ here.
 
 Usage::
 
-    uv run python bench/tier_routing/run_grad_probe.py \
+    uv run python project/sigma_lowres/bench/tier_routing/run_grad_probe.py \
         --adapter output/ckpt/anima_soup_sincos.safetensors --label phase3a
-    uv run python bench/tier_routing/run_grad_probe.py \
+    uv run python project/sigma_lowres/bench/tier_routing/run_grad_probe.py \
         --adapter <ckpt> --smoke --label smoke
 """
 
@@ -43,7 +43,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np  # noqa: E402
@@ -51,7 +51,7 @@ import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from bench._common import make_run_dir, write_result  # noqa: E402
-from bench.tier_routing.redundancy import (  # noqa: E402
+from project.sigma_lowres.bench.tier_routing.redundancy import (  # noqa: E402
     ImageRecord,
     demoted_bucket,
     score_corpus,
@@ -263,7 +263,9 @@ def main() -> None:
         )
 
     sigmas = stratified_sigmas(args.draws, args.flow_shift)
-    run_dir = make_run_dir("tier_routing", args.label)
+    run_dir = make_run_dir(
+        "tier_routing", args.label, root=Path(__file__).resolve().parent / "results"
+    )
     rows_path = run_dir / "per_image.jsonl"
     rows: list[dict] = []
     t0 = time.time()

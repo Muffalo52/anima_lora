@@ -1,10 +1,10 @@
 # σ-conditional low-res gradient equivalence — Phase 0 (observability)
 
 **Status: Phase 0 DONE (2026-07-24) — spectral mechanism REFUTED; verdict in
-`bench/sigma_lowres/report.md`.** σ-dependence is real and tier-ordered, but
+`project/sigma_lowres/bench/report.md`.** σ-dependence is real and tier-ordered, but
 the collapse sits at σ ≈ 0.5 (not the RAPSD-predicted ≈ 0.14), 512 is never
 safe at any σ, and the practical residue (σ>0.5 → 896, ~14% wall-clock
-ceiling) is likely below the Phase-1 bar. Bench: `bench/sigma_lowres/`.
+ceiling) is likely below the Phase-1 bar. Bench: `project/sigma_lowres/bench/`.
 
 ## Motivation
 
@@ -22,7 +22,7 @@ demoted-tier latent equivalent to the native-tier gradient **conditional on
   (redundancy, tags) predicts demotion cost. Its estimator **marginalized σ
   out** (one accumulated gradient over the whole stratified σ grid, then one
   cosine). Per-σ-band gaps are explicitly listed under "Not retried / out of
-  scope" in `bench/tier_routing/report.md`. The report's guard — "any new
+  scope" in `project/sigma_lowres/bench/tier_routing/report.md`. The report's guard — "any new
   predictor needs a fresh probe set and a pre-registered hypothesis" — is
   satisfied: the predictor here is σ (a controlled variable, not per-image
   fishing) and the hypothesis is pre-registered by SwD's spectral analysis.
@@ -55,7 +55,7 @@ places Anima's high-frequency content in the σ < 0.45 tail.
 
 ## Design
 
-**Measurement A — `bench/sigma_lowres/rapsd.py`** (no DiT, minutes).
+**Measurement A — `project/sigma_lowres/bench/rapsd.py`** (no DiT, minutes).
 RAPSD of the probe set's cached latents in the DiT's spatial grid, normalized
 frequency r ∈ (0, 0.5] cycles/latent-pixel. Noise PSD is analytically 1
 (unit-variance white). Outputs: P(f) mean curve, σ_eq(f), predicted σ\*(e)
@@ -71,7 +71,7 @@ axis, not the image axis. Measurement B therefore runs demote arms
 **896, 768, 512**; pre-registered prediction is gap collapse to floor above
 bin 1 (σ ≳ 0.15–0.25) with tier-ordered onset (H3), 512 included.
 
-**Measurement B — `bench/sigma_lowres/run_sigma_probe.py`** (~2 h GPU).
+**Measurement B — `project/sigma_lowres/bench/run_sigma_probe.py`** (~2 h GPU).
 The 3a instrument (redraw-floor null, re-encode confound control, demote
 arms with pixel-space downscale → VAE re-encode → noise — SwD's validated
 "strategy B" ordering) extended with **per-σ-bin gradient accumulators**:

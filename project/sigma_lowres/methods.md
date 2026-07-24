@@ -4,9 +4,16 @@ What exists in code for the σ-conditional low-res gradient line. Everything is
 **observability instrumentation** — no trainer wiring has been built (Phase 1b
 is design-only; see `roadmap.md`).
 
+The line's benches are adopted into this home (`bench/`), including the two
+predecessor instruments it builds on: `bench/tier_routing/` (the closed
+Phase-3a gradient-equivalence probe — `redundancy.py` still supplies probe-set
+selection to both measurements below) and `bench/autotune/` (the
+`blocks_to_swap` × `activation_memory_budget` → peak-VRAM/step-time surface
+sweep behind the partitioner-budget operating point the gradient probe pins).
+
 ## Measurement A — latent RAPSD + closed-form crossover
 
-`bench/sigma_lowres/rapsd.py` (CPU-scale, no DiT).
+`project/sigma_lowres/bench/rapsd.py` (CPU-scale, no DiT).
 
 - Computes the radially-averaged power spectral density of the probe set's
   cached VAE latents in the DiT's spatial grid, normalized frequency
@@ -21,7 +28,7 @@ is design-only; see `roadmap.md`).
 
 ## Measurement B — per-σ-bin gradient probe
 
-`bench/sigma_lowres/run_sigma_probe.py` (~2–2.6 h GPU for 40 images × 6 arms).
+`project/sigma_lowres/bench/run_sigma_probe.py` (~2–2.6 h GPU for 40 images × 6 arms).
 
 The tier_routing Phase-3a instrument extended with per-σ-bin gradient
 accumulators — the estimator class that was *reliable* in 3a (per-bin means

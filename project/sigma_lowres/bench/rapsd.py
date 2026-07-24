@@ -16,12 +16,12 @@ demoted grid's Nyquist 0.5·e/1024 — above σ*(e), everything the demoted grid
 cannot represent is already noise-masked (H1), and the gradient probe
 (Measurement B) should see the demotion gap collapse (H2/H3).
 
-Probe-set selection is shared with ``bench/tier_routing`` so Measurement B
+Probe-set selection is shared with ``tier_routing/`` (sibling dir) so Measurement B
 runs on the same images.
 
 Usage::
 
-    uv run python bench/sigma_lowres/rapsd.py --label phase0
+    uv run python project/sigma_lowres/bench/rapsd.py --label phase0
 """
 
 from __future__ import annotations
@@ -32,13 +32,16 @@ import logging
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np  # noqa: E402
 
 from bench._common import make_run_dir, write_result  # noqa: E402
-from bench.tier_routing.redundancy import score_corpus, select_probe_set  # noqa: E402
+from project.sigma_lowres.bench.tier_routing.redundancy import (
+    score_corpus,
+    select_probe_set,
+)  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
@@ -140,7 +143,9 @@ def main() -> None:
     p_mean = np.nanmean(np.stack(profiles), axis=0)
     seq = sigma_eq(p_mean)
 
-    run_dir = make_run_dir("sigma_lowres", args.label)
+    run_dir = make_run_dir(
+        "sigma_lowres", args.label, root=Path(__file__).resolve().parent / "results"
+    )
 
     headline: dict = {
         "n_images": len(probe),

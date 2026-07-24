@@ -9,7 +9,7 @@ RAPSD-predicted σ\* ≈ 0.14** (H3 quantitative: **fail**, off by ~3.5×), and
 σ=0.94 where the latent is ~pure noise). The SwD noise-masking argument does
 not govern LoRA gradients on Anima.
 
-Design: `docs/proposal/lowres_sigma_equivalence.md` (criteria frozen before
+Design: `project/sigma_lowres/initial_proposal.md` (criteria frozen before
 data). Runs: RAPSD `results/20260724-1202-phase0/`, gradient probe
 `results/20260724-1237-phase0/` (40 images, 6 arms, 8 uniform σ-bins × 8
 draws, ~2.6 h; plot `gap_vs_sigma.png`).

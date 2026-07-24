@@ -49,6 +49,6 @@ Do not schedule until Phase 1b has shipped and survived its gate.
 
 ## Pointers
 
-Design: `docs/proposal/lowres_sigma_equivalence.md` · Data:
-`bench/sigma_lowres/report.md` · Memory: `project_sigma_lowres_phase0`,
+Design: `project/sigma_lowres/initial_proposal.md` · Data:
+`project/sigma_lowres/bench/report.md` · Memory: `project_sigma_lowres_phase0`,
 `project_tier_routing_phase3a_failed` (split-half check mandatory).

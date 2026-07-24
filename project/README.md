@@ -14,8 +14,9 @@ Canonical sources these digest (never duplicated wholesale):
 the line's proposal(s) (frozen designs) and its bench (`report.md` = raw
 verdicts + full tables, `results/` = run envelopes). A promoted line may
 adopt these into its home — `project/<line>/bench/` for the bench and e.g.
-`initial_proposal.md` for the founding proposal (directedit_ec does both);
-lines that haven't keep them in `bench/<line>/` and `docs/proposal/<line>*.md`.
+`initial_proposal.md` for the founding proposal (directedit_ec and
+sigma_lowres do both); lines that haven't keep them in `bench/<line>/`
+and `docs/proposal/<line>*.md`.
 
 Active projects:
 

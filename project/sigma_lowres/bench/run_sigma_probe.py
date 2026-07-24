@@ -7,7 +7,7 @@ control, demote arms) with one change: gradients are accumulated into
 becomes a curve gap_e(σ) instead of a scalar. Phase 3a marginalized σ out;
 SwD's spectral analysis (arXiv:2503.16397 §3) pre-registers the hypothesis
 that the gap concentrates below a tier-specific σ* and collapses above it
-(``docs/proposal/lowres_sigma_equivalence.md`` H2/H3).
+(``project/sigma_lowres/initial_proposal.md`` H2/H3).
 
 σ bins are uniform on (0, 1) — the mechanism axis. Per-bin means across
 images are the verdict quantity (the estimator class that was reliable in
@@ -16,9 +16,9 @@ reliability analysis.
 
 Usage::
 
-    uv run python bench/sigma_lowres/run_sigma_probe.py \
+    uv run python project/sigma_lowres/bench/run_sigma_probe.py \
         --adapter output/ckpt/anima_soup_sincos.safetensors --label phase0
-    uv run python bench/sigma_lowres/run_sigma_probe.py \
+    uv run python project/sigma_lowres/bench/run_sigma_probe.py \
         --adapter <ckpt> --smoke --label smoke
 """
 
@@ -32,18 +32,18 @@ import threading
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from bench._common import make_run_dir, write_result  # noqa: E402
-from bench.tier_routing.redundancy import (  # noqa: E402
+from project.sigma_lowres.bench.tier_routing.redundancy import (  # noqa: E402
     score_corpus,
     select_probe_set,
 )
-from bench.tier_routing.run_grad_probe import (  # noqa: E402
+from project.sigma_lowres.bench.tier_routing.run_grad_probe import (  # noqa: E402
     DIT,
     VAE,
     cosine,
@@ -227,7 +227,9 @@ def main() -> None:
 
     sigmas = bin_sigmas(args.bins, args.draws_per_bin)
     centers = [round(float(s), 4) for s in sigmas.mean(dim=1)]
-    run_dir = make_run_dir("sigma_lowres", args.label)
+    run_dir = make_run_dir(
+        "sigma_lowres", args.label, root=Path(__file__).resolve().parent / "results"
+    )
     rows_path = run_dir / "per_image.jsonl"
     rows: list[dict] = []
     t0 = time.time()

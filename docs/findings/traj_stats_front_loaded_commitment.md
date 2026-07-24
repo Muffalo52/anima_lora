@@ -7,7 +7,7 @@
 > to `_archive/bench/traj_stats/` — still runnable from there for any future
 > inference-time intervention. Run-by-run evidence:
 > `_archive/bench/traj_stats/report.md` (Phases 0–3) and
-> `bench/tier_routing/report.md` (Phase 3a). All four
+> `project/sigma_lowres/bench/tier_routing/report.md` (Phase 3a). All four
 > Phase 3 intervention candidates are dead: tier routing (3a probe), committed-token
 > compute reuse (oracle replay), channel truncation (no compute target), decode
 > probe (closed unrun — payoff bounded to ~3 GB of latent caches).
