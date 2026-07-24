@@ -217,6 +217,8 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         use_custom_down_autograd=cfg.use_custom_down_autograd,
         channel_scaling_alpha=cfg.channel_scaling_alpha,
         student_step_expert_K=cfg.step_expert_K,
+        dual_pool=cfg.dual_pool,
+        div_pool_rank=cfg.div_pool_rank,
         student_down_init=cfg.student_down_init,
         fake_down_init=cfg.fake_down_init,
         fake_tau_banks=cfg.fake_tau_banks,
@@ -229,7 +231,8 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         gan_disc_head=cfg.gan_disc_head,
     )
     turbo.freeze_dit()
-    turbo.student.to(device=device, dtype=dtype)
+    for pool in turbo.student_pools:
+        pool.to(device=device, dtype=dtype)
     for bank in turbo.fake_banks:
         bank.to(device=device, dtype=dtype)
 
@@ -379,7 +382,9 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     logger.info(f"trainable: student={n_student:,}  fake={n_fake:,}")
 
     student_opt = torch.optim.AdamW(
-        turbo.student_params(),
+        # Under dual_pool this is two param groups (pool B at student_lr, pool A at
+        # div_pool_lr); single-pool collapses to one group == the flat build.
+        turbo.student_param_groups(cfg.student_lr, cfg.div_pool_lr),
         lr=cfg.student_lr,
         weight_decay=cfg.weight_decay,
         fused=torch.cuda.is_available(),

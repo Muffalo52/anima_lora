@@ -183,6 +183,28 @@ def _build_stacked_experts_state_dict(
     return StackedExpertsLoRAModule.build_moe_state_dict(state_dict, dtype)
 
 
+def build_standard_state_dict(
+    state_dict: Dict[str, torch.Tensor],
+    dtype: Optional[torch.dtype],
+    metadata: Optional[Dict[str, str]],
+) -> tuple[Dict[str, torch.Tensor], Optional[Dict[str, str]]]:
+    """Run the standard (lora/ortho) finalize chain WITHOUT writing a file.
+
+    Defuse fused qkv + bake channel scaling, relay adaln keys to the ComfyUI
+    layout, cast dtype. Returns the finalized ``(state_dict, metadata)``. Factored
+    out of :func:`save_network_weights` so the dual-pool turbo save can finalize
+    each pool to its on-disk plain-LoRA layout and concat the two exactly (the
+    distill chain must have already run on the caller's side for ortho/chimera
+    stacks — plain-LoRA turbo pools have no such keys, so it is a no-op there).
+    """
+    defuse_and_bake_standard(state_dict)
+    metadata = _relayout_adaln_to_comfy(state_dict, metadata)
+    if dtype is not None:
+        for key in list(state_dict.keys()):
+            state_dict[key] = state_dict[key].detach().clone().to("cpu").to(dtype)
+    return state_dict, metadata
+
+
 def save_network_weights(
     state_dict: Dict[str, torch.Tensor],
     *,
@@ -253,13 +275,7 @@ def save_network_weights(
         return
 
     # Standard (lora / ortho) write path.
-    defuse_and_bake_standard(state_dict)
-    metadata = _relayout_adaln_to_comfy(state_dict, metadata)
-
-    if dtype is not None:
-        for key in list(state_dict.keys()):
-            v = state_dict[key].detach().clone().to("cpu").to(dtype)
-            state_dict[key] = v
+    state_dict, metadata = build_standard_state_dict(state_dict, dtype, metadata)
 
     if os.path.splitext(file)[1] == ".safetensors":
         from safetensors.torch import save_file

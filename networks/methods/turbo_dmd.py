@@ -349,6 +349,8 @@ class TurboDMDNetwork:
         use_custom_down_autograd: bool = False,
         channel_scaling_alpha: float = 0.0,
         student_step_expert_K: int = 0,
+        dual_pool: bool = False,
+        div_pool_rank: int = 16,
         student_down_init: str = "kaiming",
         fake_down_init: str = "kaiming",
         fake_tau_banks: int = 1,
@@ -488,6 +490,44 @@ class TurboDMDNetwork:
             channel_scaling_alpha=self.channel_scaling_alpha,
             **_student_kwargs,
         )
+
+        # Dual-pool gradient routing (docs/proposal/turbo_dual_pool_grad_routing.md):
+        # a SECOND always-on plain-LoRA pool. Pool A (this one) receives only the
+        # step-0 diversity gradient; the pool above (self.student = pool B) only the
+        # DMD/GAN/CDM refinement gradients (the routing is `requires_grad` gating in
+        # distill.py around the two existing backwards — both pools stay *enabled*,
+        # so activations always flow through A+B). Pool A is deliberately MINIMAL:
+        # plain LoRA on the attn/MLP set only — NO adaln modules (adaln is a quality
+        # remap → pool B), NO per-step-expert, NO channel scaling. Zero-init up
+        # (the LoRAModule default) means at step 0 the merged student IS the
+        # warm-started pool B, and A grows a pure de-collapse correction from zero.
+        self.dual_pool = bool(dual_pool)
+        self.div_pool_rank = int(div_pool_rank)
+        self.student_div: LoRANetwork | None = None
+        if self.dual_pool:
+            if self.student_step_expert_K > 1:
+                raise ValueError(
+                    "dual_pool is incompatible with the per-step-expert student "
+                    "(step_expert_K>1): both restructure the student stack."
+                )
+            if self.div_pool_rank < 1:
+                raise ValueError(f"div_pool_rank must be >= 1, got {div_pool_rank}")
+            self.student_div = create_network(
+                multiplier=1.0,
+                network_dim=self.div_pool_rank,
+                network_alpha=self.div_pool_rank,  # scale 1.0; zero-init up
+                vae=None,
+                text_encoders=[],
+                unet=unet,
+                use_custom_down_autograd=use_custom_down_autograd,
+                channel_scaling_alpha=0.0,
+            )
+        # Both pools train under the student optimizer and toggle together in the
+        # "student" view. Bank order mirrors fake_banks: pool B first (the warm
+        # start / save anchor), pool A second.
+        self.student_pools: list[LoRANetwork] = [self.student]
+        if self.student_div is not None:
+            self.student_pools.append(self.student_div)
         _fake_kwargs: dict = {}
         if self.fake_down_init != "kaiming":
             _fake_kwargs["down_init"] = self.fake_down_init
@@ -525,6 +565,13 @@ class TurboDMDNetwork:
             apply_text_encoder=False,
             apply_unet=True,
         )
+        if self.student_div is not None:
+            self.student_div.apply_to(
+                text_encoders=[],
+                unet=unet,
+                apply_text_encoder=False,
+                apply_unet=True,
+            )
         self.fake.apply_to(
             text_encoders=[],
             unet=unet,
@@ -553,6 +600,8 @@ class TurboDMDNetwork:
         # stack explicitly here — else the set_view invariant (cur state matches
         # _VIEW_FLAGS[_view]) breaks once any stack carries nonzero weights.
         self.student.set_enabled(False)
+        if self.student_div is not None:
+            self.student_div.set_enabled(False)
         self.fake.set_enabled(False)
         if self.fake_hi is not None:
             self.fake_hi.set_enabled(False)
@@ -643,7 +692,10 @@ class TurboDMDNetwork:
             ) from e
         cur_student, cur_fake = self._VIEW_FLAGS[self._view]
         if want_student != cur_student:
-            self.student.set_enabled(want_student)
+            # Both dual pools toggle together — the "student" view is always
+            # A+B (grad routing is `requires_grad`, not enablement; see route_*).
+            for pool in self.student_pools:
+                pool.set_enabled(want_student)
         if want_fake != cur_fake:
             # Only the ACTIVE bank ever toggles — inactive banks stay disabled
             # from __init__ on, so the fake view is always exactly one bank.
@@ -699,8 +751,65 @@ class TurboDMDNetwork:
             self.student.set_step_index(i)
 
     def student_params(self):
-        """Trainable params for the student optimizer."""
-        return [p for p in self.student.parameters() if p.requires_grad]
+        """Trainable params for the student optimizer (all pools under dual_pool).
+
+        Filtered by ``requires_grad`` — so the caller must restore both pools to
+        grad-on (``route_all_on``) BEFORE grad-clip/step, else a transiently-gated
+        pool's grads escape clipping. The optimizer holds every pool's params from
+        construction; the mid-iteration routing only gates grad *accumulation*.
+        """
+        return [
+            p for pool in self.student_pools for p in pool.parameters() if p.requires_grad
+        ]
+
+    def student_param_groups(self, student_lr: float, div_pool_lr: float = 0.0):
+        """AdamW param groups: pool B at ``student_lr``, pool A at ``div_pool_lr``.
+
+        ``div_pool_lr=0`` inherits ``student_lr``. Under single-pool this is one
+        group over the sole stack — equivalent to a flat ``student_params()`` build,
+        so the shipped path stays byte-identical.
+        """
+        groups = [{"params": list(self.student.parameters()), "lr": student_lr}]
+        if self.student_div is not None:
+            groups.append(
+                {
+                    "params": list(self.student_div.parameters()),
+                    "lr": div_pool_lr if div_pool_lr > 0.0 else student_lr,
+                }
+            )
+        return groups
+
+    def _set_pool_requires_grad(self, pool: "LoRANetwork | None", flag: bool) -> None:
+        if pool is None:
+            return
+        for p in pool.parameters():
+            p.requires_grad_(flag)
+
+    def route_div(self) -> None:
+        """Gate grads to pool A only (the step-0 diversity backward).
+
+        No-op under single-pool. Both pools stay ENABLED (activations flow); only
+        pool B's grad accumulation is switched off so the diversity/soft-rank
+        backward lands on pool A alone.
+        """
+        if self.student_div is None:
+            return
+        self._set_pool_requires_grad(self.student_div, True)
+        self._set_pool_requires_grad(self.student, False)
+
+    def route_quality(self) -> None:
+        """Gate grads to pool B only (DMD / GAN / CDM refinement backwards)."""
+        if self.student_div is None:
+            return
+        self._set_pool_requires_grad(self.student, True)
+        self._set_pool_requires_grad(self.student_div, False)
+
+    def route_all_on(self) -> None:
+        """Restore grad-on for both pools (call before grad-clip / optimizer step)."""
+        if self.student_div is None:
+            return
+        self._set_pool_requires_grad(self.student, True)
+        self._set_pool_requires_grad(self.student_div, True)
 
     def fake_params(self):
         """Trainable params for the fake optimizer — all banks, bank order.
@@ -725,7 +834,7 @@ class TurboDMDNetwork:
         walk only ``unet`` params whose name doesn't start with a LoRA prefix.
         """
         lora_prefixes = tuple(
-            set(m.lora_name for m in self.student.unet_loras)
+            {m.lora_name for pool in self.student_pools for m in pool.unet_loras}
             | {m.lora_name for bank in self.fake_banks for m in bank.unet_loras}
         )
         n_frozen = 0
@@ -742,12 +851,21 @@ class TurboDMDNetwork:
         *,
         dtype: torch.dtype = torch.bfloat16,
         metadata: dict[str, str] | None = None,
+        div_scale: float = 1.0,
     ) -> None:
         """Serialize only the student LoRA in the standard plain-LoRA layout.
 
         Output is loadable by ``inference.py --lora_weight <file>`` — the
         fake network is training scaffolding and never shipped.
+
+        Under dual_pool the two pools are merged EXACTLY into one plain LoRA of
+        rank ``student_rank + div_pool_rank`` via factor concatenation (no SVD).
+        ``div_scale`` dials pool A at merge time (0 = the warm-start-ish quality
+        map, 1 = full anchor correction) — the free diversity knob.
         """
+        if self.student_div is not None:
+            self._save_dual_pool(file, dtype, metadata, div_scale)
+            return
         if self.student_step_expert_K > 1:
             sd = self.student.state_dict()
             # Strip any non-LoRA keys defensively (the per-step-expert layout is
@@ -768,6 +886,101 @@ class TurboDMDNetwork:
         # standard write path, so no post-hoc rewrite is needed here.
         self.student.save_weights(file, dtype, metadata)
         logger.info(f"saved student LoRA → {file}")
+
+    @staticmethod
+    def _finalize_pool_state_dict(
+        pool: "LoRANetwork", metadata: dict[str, str] | None
+    ) -> tuple[dict[str, torch.Tensor], dict[str, str] | None]:
+        """One plain-LoRA pool → its on-disk (defused, adaln-relayed) fp32 dict.
+
+        dtype=None keeps fp32 so the concat/scale-bake is exact; the caller casts
+        the merged dict once at the end.
+        """
+        from networks import lora_save
+
+        sd = pool.state_dict()
+        for prefix in getattr(pool, "_training_only_prefixes", ()):
+            for key in [k for k in sd if k.startswith(prefix)]:
+                del sd[key]
+        return lora_save.build_standard_state_dict(sd, None, metadata)
+
+    def _save_dual_pool(
+        self,
+        file: str,
+        dtype: torch.dtype,
+        metadata: dict[str, str] | None,
+        div_scale: float,
+    ) -> None:
+        """Merge pool B (quality) + pool A (diversity) into one exact plain LoRA.
+
+        Two rank-r LoRAs on the same Linear fold to rank r_B+r_A by factor
+        concatenation: ``down = concat(rows)``, ``up = concat(cols)`` reproduces
+        ``ΔW_B + ΔW_A`` identically. Per-pool scale (``alpha/rank``) differs, so it
+        is baked into ``up`` and the merged alpha set to the merged rank (scale 1).
+        ``div_scale`` multiplies pool A's ``up`` — the merge-time diversity dial.
+        Pool A is plain attn/MLP only, so its module set ⊆ pool B's; adaln-only
+        keys pass through from B untouched (A contributes 0 there).
+        """
+        from safetensors.torch import save_file
+        from library.training.hashing import precalculate_safetensors_hashes
+
+        sd_b, meta = self._finalize_pool_state_dict(self.student, dict(metadata or {}))
+        sd_a, _ = self._finalize_pool_state_dict(self.student_div, None)
+        meta = meta or {}
+
+        merged: dict[str, torch.Tensor] = dict(sd_b)  # adaln-only keys ride through
+        down_suffix = ".lora_down.weight"
+        for a_down_key in [k for k in sd_a if k.endswith(down_suffix)]:
+            prefix = a_down_key[: -len(down_suffix)]
+            up_key = prefix + ".lora_up.weight"
+            alpha_key = prefix + ".alpha"
+            if prefix + down_suffix not in sd_b or up_key not in sd_b:
+                raise ValueError(
+                    f"dual-pool merge: pool A module {prefix!r} absent from pool B "
+                    "(pool A must be a subset of pool B's module set)."
+                )
+            down_a, up_a = sd_a[a_down_key].float(), sd_a[up_key].float()
+            down_b, up_b = sd_b[a_down_key].float(), sd_b[up_key].float()
+            r_a, r_b = down_a.shape[0], down_b.shape[0]
+            scale_a = (float(sd_a[alpha_key]) / r_a) if alpha_key in sd_a else 1.0
+            scale_b = (float(sd_b[alpha_key]) / r_b) if alpha_key in sd_b else 1.0
+            # Bake scale into up; div_scale dials pool A. B first, A second.
+            up_merged = torch.cat([up_b * scale_b, up_a * (scale_a * div_scale)], dim=1)
+            down_merged = torch.cat([down_b, down_a], dim=0)
+            merged[prefix + down_suffix] = down_merged
+            merged[up_key] = up_merged
+            r_merged = r_a + r_b
+            if alpha_key in sd_b:
+                merged[alpha_key] = torch.tensor(
+                    float(r_merged), dtype=sd_b[alpha_key].dtype
+                )
+            else:
+                merged[alpha_key] = torch.tensor(float(r_merged))
+
+        # Provenance: this IS a plain LoRA (loads with no special path); the
+        # dual-pool stamps are for arm verification only — never trust the TOML.
+        spec = getattr(self.student, "_network_spec", None)
+        if spec is not None:
+            meta["ss_network_spec"] = spec.name
+        meta["ss_turbo_dual_pool"] = "true"
+        meta["ss_turbo_quality_pool_rank"] = str(int(self.student_rank))
+        meta["ss_turbo_div_pool_rank"] = str(int(self.div_pool_rank))
+        if div_scale != 1.0:
+            meta["ss_turbo_div_scale"] = str(float(div_scale))
+
+        if dtype is not None:
+            merged = {
+                k: v.detach().clone().to("cpu").to(dtype) for k, v in merged.items()
+            }
+        model_hash, legacy_hash = precalculate_safetensors_hashes(merged, meta)
+        meta["sshs_model_hash"] = model_hash
+        meta["sshs_legacy_hash"] = legacy_hash
+        save_file(merged, file, meta)
+        logger.info(
+            f"saved dual-pool student LoRA → {file}  (merged rank "
+            f"{self.student_rank}+{self.div_pool_rank}={self.student_rank + self.div_pool_rank}, "
+            f"div_scale={div_scale}; exact plain-LoRA concat)"
+        )
 
     def _save_student_step_expert(
         self,
