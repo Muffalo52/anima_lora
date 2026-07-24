@@ -6,23 +6,41 @@ in-place edit type. **Phase 2 is unblocked** and is the next work item.
 
 ## Phase 2 — cross-image subject descriptor (one standard EasyControl train)
 
-New descriptor `configs/easycontrol/subject.toml` (colorize/inpaint shape) —
-same `EasyControlNetwork`, only the data pairing changes:
+**Status: PREPARED (2026-07-24)** — descriptor + miner + task wiring shipped
+and staging validated; the remaining work is the train itself + the gate
+bench. Surface: `configs/easycontrol/subject.toml` (descriptor with knobs +
+generated blueprint tail), `easycontrol_adapters/tools/subject_pairs.py`
+(the miner — near_twins contract, CPU-only), `EASYADAPTER=subject` registered
+in `scripts/tasks/training.py`. First mining run: **1116 pairs over 283
+characters, 813 (73%) cross-artist** (solo 1girl/1boy single-character only,
+cap 16 targets/character, seed 42; manifest at
+`post_image_dataset/easycontrol/subject/pairs.json`).
+
+```bash
+make easycontrol-staging    EASYADAPTER=subject   # mine pairs → staging/ + cond/ (CPU, done)
+make easycontrol-preprocess EASYADAPTER=subject   # rebuild cond/ only (after corpus re-preprocess)
+make easycontrol            EASYADAPTER=subject   # the Phase-2 train (--queue for daemon)
+```
+
+Design (as proposed, now implemented):
 
 - **Pairs**: cond = image A of a character, target = image B of the same
-  character, mined from `caption_index.json` character tags (fallback: same
-  artist + shared character-defining tags). Staging emits a pair manifest;
-  cond latents reuse the shared LoRA cache — no synthetic tree, cheapest
-  descriptor staging yet.
-- **Anti-shortcut knobs**: `cond_res_scale = 0.5` (starves the positional
-  shortcut, and is faster); `easycontrol_drop_p = 0.05`; `b_cond_init = -8`
-  (softer learned operating point than inpaint's all-in −6).
+  character, mined from `caption_index.json` character tags. Staging emits a
+  pair manifest; cond + target latents/TE reuse the shared LoRA cache — no
+  synthetic tree and **no encode pass** (both steps are pure symlinks;
+  cheapest descriptor staging yet). The same-artist + shared-tags fallback
+  was skipped — character tags alone cover ~1.1k targets. Each target's cond
+  partner prefers a different artist dir (starves the style shortcut too).
+- **Anti-shortcut knobs** (in `[training]`): `cond_res_scale = 0.5` (starves
+  the positional shortcut, and is faster); `easycontrol_drop_p = 0.05`;
+  `b_cond_init = -8` (softer learned operating point than inpaint's all-in −6).
 - **Text**: full captions of the *target* — prompt keeps owning layout/pose,
   cond owns identity/appearance only.
-- Cost: inpaint-recipe scale (~4 epochs, 16 GiB-friendly,
-  `make easycontrol EASYADAPTER=subject`, daemon flow).
+- Cost: inpaint-recipe scale (8 epochs over the 1.1k pair set ≈ inpaint's
+  4 epochs over the 3k corpus in optimizer steps; 16 GiB-friendly).
 - **Gate** (re-run the existing harness:
-  `bench/directedit_ec/run_bench.py --ec_weight <subject.safetensors>`):
+  `project/directedit_ec/bench/run_bench.py --ec_weight
+  output/ckpt/anima_easycontrol_subject.safetensors`):
   (a) sweet-spot width ≥ 2 b_offset units (inpaint: ~1) — answers
   questions.md Q1; (b) ≥ parity with vinj_t6 on the 1b geometry edit —
   answers Q2, the associative-retrieval claim.
@@ -65,6 +83,6 @@ scoped. If BYG's Phase-0 gate ever passes, a BYG arm belongs in this bench.
 
 ## Pointers
 
-Proposal: `docs/proposal/directedit_ec_preservation.md` · Data:
-`bench/directedit_ec/report.md` · Memory: `project_directedit_ec_phase0` ·
+Proposal: `project/directedit_ec/initial_proposal.md` · Data:
+`project/directedit_ec/bench/report.md` · Memory: `project_directedit_ec_phase0` ·
 Recipe + component map: `methods.md`.

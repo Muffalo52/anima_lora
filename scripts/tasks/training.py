@@ -764,6 +764,47 @@ def _inpaint_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     )
 
 
+def _subject_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject staging: mine cross-image same-character pairs (directedit_ec Phase 2).
+
+    ``easycontrol_adapters/tools/subject_pairs.py`` reads the descriptor's
+    ``[staging]`` table itself and rewrites the blueprint tail back into the same
+    file (near_twins contract). CPU-only: both pair members are corpus images, so
+    staging is symlinks + a ``pairs.json`` manifest + the ``cond/`` latent tree —
+    no encode pass (latents/TE reused from the shared LoRA cache)."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_pairs",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
+
+
+def _subject_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject preprocess: rebuild ``cond/`` from ``pairs.json`` (idempotent).
+
+    Nothing to encode — re-run this after a shared-corpus re-preprocess so cond
+    symlinks track any bucket moves."""
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_pairs",
+            "--config",
+            str(_easy_cfg_path(adapter)),
+            "--cond-only",
+            *extra,
+        ]
+    )
+
+
 # Per-adapter materialization bodies (training is generic via _easy_train_extra);
 # only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter. Both
 # receive ``(adapter, cfg, base, extra)``. ``sanitize`` reuses the near-twin miner
@@ -773,6 +814,7 @@ _EASY_ADAPTERS = {
     "sanitize": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
     "colorize": {"stage": _colorize_stage, "preprocess": _colorize_preprocess},
     "inpaint": {"stage": _inpaint_stage, "preprocess": _inpaint_preprocess},
+    "subject": {"stage": _subject_stage, "preprocess": _subject_preprocess},
 }
 
 

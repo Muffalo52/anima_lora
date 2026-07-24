@@ -28,7 +28,7 @@ v1.1 status:
     Eq. 12 — Δz dropped inside the edit region (the full background-lock
     latent blend remains future work). ``--easycontrol_mask`` composes the
     learned counterpart: gray-hole the EC cond over the same region so the
-    inpaint prior clamps outside it (bench/directedit_ec Phase 1a).
+    inpaint prior clamps outside it (project/directedit_ec/bench Phase 1a).
   * Inversion runs at ``--invert_guidance 1.0`` (no CFG); the edit pass uses
     the user's ``--guidance_scale`` (default 4.0, Anima base-v1.0 standard).
 """
@@ -320,7 +320,7 @@ def parse_args() -> argparse.Namespace:
         help="Additive offset on every block's learned b_cond gate — the "
         "continuous cond-softmax-mass dial (each -1 cuts cond attention mass "
         "~e×; cond_scale is near-binary on the inpaint prior, see "
-        "bench/directedit_ec). Applied after load, read live per forward "
+        "project/directedit_ec/bench). Applied after load, read live per forward "
         "(NOT baked into the KV cache).",
     )
     p.add_argument(

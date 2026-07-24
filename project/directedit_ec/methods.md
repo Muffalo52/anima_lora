@@ -36,7 +36,8 @@ The hole must be punched in **both** preservation mechanisms:
 | EC cond KV cache + gate | `networks/methods/easycontrol.py::_target_only_with_cached_cond_kv` (~1208) | LSE-extended attention; cond K/V prefilled once |
 | `b_cond` offset dial | same function — **live logit bias**, NOT baked into the KV cache | additive offset post-`load_weights`; each −1 ≈ e× less cond mass; inpaint useful range −1..−2 (superseded by the mask recipe at offset 0) |
 | CLI wiring | `scripts/edit.py` `--easycontrol_weight / --easycontrol_b_offset / --easycontrol_mask / --mask` | `--easycontrol_mask` requires `--easycontrol_weight` |
-| Bench harness | `bench/directedit_ec/run_bench.py` | phases: smoke / 0 / 0b / 1a / 1b; `EDITS_1B` dict = per-image edit specs + hole boxes |
+| Bench harness | `project/directedit_ec/bench/run_bench.py` | phases: smoke / 0 / 0b / 1a / 1b; `EDITS_1B` dict = per-image edit specs + hole boxes |
+| Phase-2 subject descriptor | `configs/easycontrol/subject.toml` + `easycontrol_adapters/tools/subject_pairs.py` | cross-image same-character pairs off `caption_index.json`; staging + cond tree are pure symlinks over the shared LoRA cache (no encode); `EASYADAPTER=subject` |
 
 ## Mechanism invariants (learned the hard way)
 

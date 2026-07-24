@@ -6,13 +6,16 @@ into an ongoing project with open phases. Each subdir is the line's home page:
 | File | Contents |
 |---|---|
 | `methods.md` | The implementation — what code exists, where it lives, how to run it |
-| `bench.md` | Digest of measured results (canonical data stays in `bench/<line>/`) |
+| `bench.md` | Digest of measured results — omitted when the line's bench lives in-tree (`bench/report.md` serves directly) |
 | `questions.md` | Open questions the line has not answered |
 | `roadmap.md` | Remaining phases, gates, and kill criteria |
 
 Canonical sources these digest (never duplicated wholesale):
-`docs/proposal/<line>*.md` (frozen designs), `bench/<line>/report.md`
-(raw verdicts + full tables), `bench/<line>/results/` (run envelopes).
+the line's proposal(s) (frozen designs) and its bench (`report.md` = raw
+verdicts + full tables, `results/` = run envelopes). A promoted line may
+adopt these into its home — `project/<line>/bench/` for the bench and e.g.
+`initial_proposal.md` for the founding proposal (directedit_ec does both);
+lines that haven't keep them in `bench/<line>/` and `docs/proposal/<line>*.md`.
 
 Active projects:
 

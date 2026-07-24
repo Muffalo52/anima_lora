@@ -385,7 +385,7 @@ def edit_forward(
         the edit region — the anchor is a per-step pull back to the source,
         so a global anchor suppresses the edit even when other preservation
         mechanisms (e.g. an EasyControl masked-cond prior) have released the
-        region (bench/directedit_ec Phase 1a). Outside the region the anchor
+        region (project/directedit_ec/bench Phase 1a). Outside the region the anchor
         applies unchanged. The full background-lock latent BLEND (locking
         the outside to the inverted trajectory) remains future work.
 

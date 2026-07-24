@@ -32,11 +32,11 @@ run at b_offset 0, no tuning. Adds an outside/inside-hole MSE split for every
 arm; gate = ec_mask's outside-hole MSE ≤ 2× recon_base's, per image.
 
 Usage:
-    uv run python bench/directedit_ec/run_bench.py --smoke      # 1 img, 4 arms
-    uv run python bench/directedit_ec/run_bench.py              # full sweep
-    uv run python bench/directedit_ec/run_bench.py --edit smile --n_images 4
-    uv run python bench/directedit_ec/run_bench.py --phase 1a   # masked-cond
-    uv run python bench/directedit_ec/run_bench.py --phase 1b   # edit types
+    uv run python project/directedit_ec/bench/run_bench.py --smoke      # 1 img, 4 arms
+    uv run python project/directedit_ec/bench/run_bench.py              # full sweep
+    uv run python project/directedit_ec/bench/run_bench.py --edit smile --n_images 4
+    uv run python project/directedit_ec/bench/run_bench.py --phase 1a   # masked-cond
+    uv run python project/directedit_ec/bench/run_bench.py --phase 1b   # edit types
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from bench._common import make_run_dir, write_result  # noqa: E402
@@ -470,6 +470,7 @@ def main() -> None:
 
     run_dir = make_run_dir(
         "directedit_ec",
+        root=Path(__file__).resolve().parent / "results",
         label=args.label
         or (
             "smoke"

@@ -2,7 +2,7 @@
 
 Status: **Phase 0 PASSED**; **Phase 1a PASSED, amended**; **Phase 1b PASSED
 (3/3 in-place edit types ≥ vinj_t6)** (2026-07-24, all zero-training;
-`bench/directedit_ec/report.md`). Phase 2 is unblocked. The 1a amendment: the cond
+`project/directedit_ec/bench/report.md`). Phase 2 is unblocked. The 1a amendment: the cond
 hole alone landed the edit on 1/3 images — the global Δz anchor pulls the
 hole back to the source. Dropping the anchor inside the edit region (paper
 Eq. 12's anchor-side half, now wired as `--mask` in `scripts/edit.py` /
@@ -30,7 +30,7 @@ one KV prefill instead of a per-step parallel src forward.
 
 ## Phase 0 results (done — grounding, not plan)
 
-Runs: `bench/directedit_ec/results/20260724-1731-phase0-full` (3 img × 8 arms),
+Runs: `project/directedit_ec/bench/results/20260724-1731-phase0-full` (3 img × 8 arms),
 `…-1749-phase0b-boffset` (2 img × 10 arms). Edit = caption + ", glasses",
 CFG 4, 28 steps. Adapter: `output/ckpt/methods/anima_inpaint.safetensors`.
 
@@ -67,7 +67,7 @@ band squeezed into b_offset ∈ [−2, −1]. Two orthogonal wideners:
 
 ### Phase 1a — masked-cond probe (zero training, ~1 GPU-hour) — **DONE, PASSED AMENDED**
 
-Result (`bench/directedit_ec/report.md` Phase 1a): exception-driven
+Result (`project/directedit_ec/bench/report.md` Phase 1a): exception-driven
 preservation works exactly as pitched, but the edit only lands once the Δz
 anchor is ALSO masked inside the edit region (`ec_mask_anch` arm). The
 literal ≤2× outside-MSE gate is mis-calibrated (recon is near-pixel-exact;
@@ -97,7 +97,7 @@ per-image b_offset tuning for localized edits.
 
 ### Phase 1b — edit-type generalization (zero training, ~2 GPU-hours) — **DONE, PASSED 3/3**
 
-Result (`bench/directedit_ec/report.md` Phase 1b): ec_mask_anch ≥ vinj_t6 on
+Result (`project/directedit_ec/bench/report.md` Phase 1b): ec_mask_anch ≥ vinj_t6 on
 all three in-place types — REMOVE and REPLACE land only under ec_mask_anch
 (vinj_t6 landed neither anywhere); expression parity. Geometry control failed
 as expected, with the twist that the full-frame box DOES produce the pose
@@ -134,7 +134,7 @@ A new descriptor `configs/easycontrol/subject.toml` (colorize/inpaint shape) —
   layout/pose; the cond should own identity/appearance only).
 - Cost: inpaint-recipe scale — ~4 epochs, 16 GiB-friendly, same daemon flow
   (`make easycontrol EASYADAPTER=subject`).
-- **Gate** (the Phase-0 harness re-run, `bench/directedit_ec/run_bench.py
+- **Gate** (the Phase-0 harness re-run, `project/directedit_ec/bench/run_bench.py
   --ec_weight <subject.safetensors>`): (a) sweet-spot width — the b_offset
   range where the edit lands with composition held spans ≥ 2 units (inpaint:
   ~1); (b) at least parity with vinj_t6 on the geometry edit from 1b that the
