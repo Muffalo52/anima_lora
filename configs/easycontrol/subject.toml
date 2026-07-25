@@ -38,12 +38,12 @@ seed = 42
 network_dim = 32
 network_alpha = 32
 network_args = [
-    "b_cond_init=-8.0",
+    "b_cond_init=-4.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
-    "cond_res_scale=0.5",
+    "cond_res_scale=1.0",
 ]
-output_name = "anima_easycontrol_subject"
+output_name = "anima_easycontrol_subjectv2"
 masked_loss = false
 learning_rate = 2e-5
 # Inpaint's recipe was 4 epochs over the ~3k-image corpus; the pair set is

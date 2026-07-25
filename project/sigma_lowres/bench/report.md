@@ -106,6 +106,63 @@ Pre-registered bar: gap_768 within the reenc band at σ ≥ 0.5.
   ~13–14% wall-clock at fixed steps. EC/turbo extensions inherit this route
   only, pending their own operating-point probes.
 
+## Mechanism addendum (2026-07-24): two-term account confirmed
+
+`hypothesis.md` pre-registered gap_e(σ) ≈ S1_e(σ) (input branch, Wiener-decay,
+no hard gate) + Floor_e (target × graph, σ-independent). Both discriminating
+probes passed: the σ=1 endpoint bin (`results/20260724-2101-endpoint/` —
+input pure ε, gaps −0.01/0.13/0.33 for 896/768/512, all in pre-committed
+bands) and the x-zero probe (`results/20260724-2136-xzero/` — x=0 in input
+AND target; 512 xz ≈ endpoint ⇒ Floor graph-dominated). See hypothesis.md
+for the full account and outcome matrix.
+
+## Phase Q2 (2026-07-25): per-module / per-block Floor localization
+
+Runs: `results/20260724-2306-endpoint-pg/` (standard arms, σ=1 only, 16
+draws) + `results/20260724-2343-xzero-pg/` (x-zero arms, 4 bins + endpoint),
+both `--per_group`: 15 module-type groups (incl. `lora_up` row-splits of the
+fused qkv/kv projections — the RoPE q/k-vs-v discriminator) × 28 block
+groups. Validity: per-group gap_reenc −0.045..−0.01 for every group;
+split-half of block curves 0.61–1.00.
+
+**Verdict: the Floor localizes in DEPTH, not module type — and RoPE is
+refuted as a concentrated mechanism.**
+
+- **Type axis ≈ flat.** At 512/σ=1 every module type sits in 0.22–0.31
+  (endpoint) / 0.14–0.30 (x-zero) — no clean type, no dominant type.
+  Notably `self_attn_up_q` +0.28 ≈ `up_k` +0.30 ≈ `up_v` +0.30 (endpoint;
+  x-zero 0.23/0.24/0.24): **q/k show zero excess over v**, so RoPE geometry
+  is not where the sensitivity is concentrated. `adaln_up_*` are among the
+  highest (0.26–0.31) with ep−xz ≈ 0 — global-statistics shift, not content.
+- **Depth axis is the signal.** Early blocks carry ~3× the late-block gap
+  (means at σ=1, early = blocks 0–9, late = 14–27):
+
+  | edge | ep early | ep late | xz early | xz late |
+  |---|---|---|---|---|
+  | 512 | .357 | .223 | **.351** | .125 |
+  | 768 | .164 | .085 | .121 | .033 |
+  | 896 | .023 | .015 | .044 | .012 |
+
+  The 512 x-zero profile peaks at blocks 3–8 (up to 0.48 at block 4) and
+  decays to ~0.12 by block 14. Early-block gap is σ-flat in the x-zero run
+  (no S1-style decline) — pure Floor.
+- **The content share (ep − xz) lives in LATE blocks**: at 512, early
+  ep−xz ≈ 0.006 (nothing) vs late ≈ 0.10; same shape at 768. Graph
+  sensitivity is created early; content correspondence is a late-block,
+  minority effect.
+
+**Interpretation**: per-type uniformity within a block + early concentration
++ q/k ≈ v says the mechanism is not a parameter circuit but **early-block
+representation building**: the first ~10 blocks construct grid-calibrated
+token statistics (attention over N tokens of ~noise differs in its softmax
+statistics with N), the divergence propagates into every param type's
+gradient in those blocks roughly equally, and deeper blocks inherit a
+partially washed-out version. This is Q2's "subset of parameters for which
+demotion IS safe" answer inverted: the safe subset is a **depth band, not a
+module type** — late-half-only updates would see gap ≈ 0.03 (768 x-zero) to
+0.09 (768 endpoint) vs 0.12 full. Quantitatively that does NOT yet clear the
+reenc band at 768 on its own; it is a lever, not a free win.
+
 ## Caveats
 
 - Single operating point (`anima_soup_sincos`, trained at native tiers). An

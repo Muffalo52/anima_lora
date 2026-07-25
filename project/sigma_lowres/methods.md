@@ -54,6 +54,16 @@ across images, SEM ~0.02), not the per-image ranking that failed there.
 - **CLI**: `--tier <native_edge> --demote_edges <e1,e2,...>` selects the
   operating point (Phase 0 ran 1024→{896,768,512}; Phase 1a ran
   896→{768,512}).
+- **Mechanism flags** (hypothesis.md tests, added 2026-07-24):
+  `--endpoint_bin` appends an exact σ=1.0 bin (input pure ε → any gap = the
+  Floor by construction; `--bins 0 --endpoint_bin` = endpoint-only run).
+  `--x_zero` zeroes the image in BOTH input and target on every grid
+  (captions + demoted shapes kept; implies no reenc arm) — isolates pure
+  graph-shape sensitivity. `--per_group` additionally emits per-group gaps
+  (15 module types incl. `lora_up` row-splits of the fused qkv/kv
+  projections, × 28 blocks; `cosg_floor`/`gapg_*` in rows and headline) —
+  bookkeeping over the same flat gradients, zero extra GPU cost. Per-group
+  gap_reenc is the per-group validity witness.
 - **Daemon-hardened**: `start_heartbeat()` (45 s stderr ticks) keeps the
   120 s daemon stall-watchdog from killing long silent accumulation loops
   (`project_sigma_lowres_phase0` gotcha).

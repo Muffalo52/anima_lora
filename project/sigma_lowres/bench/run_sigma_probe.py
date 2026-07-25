@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -73,6 +74,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_per_artist", type=int, default=None)
     p.add_argument("--score_limit", type=int, default=None)
     p.add_argument("--no_reenc_control", action="store_true")
+    p.add_argument(
+        "--per_group",
+        action="store_true",
+        help="additionally report per-parameter-group gaps (Q2 J-decomposition): "
+        "module types (incl. lora_up row-splits of the fused qkv/kv projs — "
+        "the RoPE q/k-vs-v discriminator) x 28 blocks. Bookkeeping only — "
+        "same forwards/backwards, per-slice cosines of the same flat "
+        "gradient vectors.",
+    )
+    p.add_argument(
+        "--endpoint_bin",
+        action="store_true",
+        help="append an exact sigma=1.0 bin (input = pure noise; any gap there "
+        "is the target x graph floor — the S2/S3 term of the two-term account)",
+    )
+    p.add_argument(
+        "--x_zero",
+        action="store_true",
+        help="zero the image in BOTH input and target on every grid (input = "
+        "sigma*eps, target = eps; captions and latent shapes kept). Isolates "
+        "pure graph-shape gradient sensitivity — no content anywhere. Implies "
+        "--no_reenc_control (re-encode of nothing = the floor arm).",
+    )
     p.add_argument(
         "--grad_ckpt",
         action="store_true",
@@ -123,6 +147,83 @@ def bin_sigmas(bins: int, draws: int) -> torch.Tensor:
     b = torch.arange(bins, dtype=torch.float64).view(-1, 1)
     j = (torch.arange(draws, dtype=torch.float64) + 0.5).view(1, -1)
     return ((b + j / draws) / bins).to(torch.float32)
+
+
+def build_sigmas(bins: int, draws: int, endpoint: bool) -> torch.Tensor:
+    """Uniform-bin grid, optionally with an exact σ=1.0 bin appended.
+    ``--bins 0 --endpoint_bin`` gives an endpoint-only grid."""
+    parts = []
+    if bins > 0:
+        parts.append(bin_sigmas(bins, draws))
+    if endpoint:
+        parts.append(torch.ones(1, draws, dtype=torch.float32))
+    if not parts:
+        raise SystemExit("need --bins > 0 and/or --endpoint_bin")
+    return torch.cat(parts, dim=0)
+
+
+GROUP_RE = re.compile(r"^lora_unet_blocks_(\d+)_(.+)$")
+
+
+def build_groups(network) -> dict[str, list[tuple[int, int]]]:
+    """Group -> flat-vector ranges (sorted-name order — must match
+    ``grad_estimate_binned``'s flatten), at two levels: ``type:<module minus
+    block prefix>`` and ``block:<idx>``.
+
+    Fused projections additionally get row-block sub-groups on ``lora_up``
+    (rows are contiguous in the row-major flatten): ``self_attn_qkv_proj`` →
+    ``type:self_attn_up_{q,k,v}`` and ``cross_attn_kv_proj`` →
+    ``type:cross_attn_up_{k,v}``. RoPE touches self-attn q/k only, so the
+    q/k-vs-v contrast is the RoPE discriminator; ``lora_down`` is shared
+    across the fused heads and stays only in the module-level group."""
+    named = [(n, p) for n, p in sorted(network.named_parameters()) if p.requires_grad]
+    groups: dict[str, list[tuple[int, int]]] = {}
+    pos = 0
+    for name, p in named:
+        s, e = pos, pos + p.numel()
+        pos = e
+        m = GROUP_RE.match(name.split(".")[0])
+        keys = (
+            (f"type:{m.group(2)}", f"block:{int(m.group(1)):02d}")
+            if m
+            else ("type:other", "block:other")
+        )
+        for k in keys:
+            groups.setdefault(k, []).append((s, e))
+        if m and name.endswith(".lora_up.weight"):
+            typ = m.group(2)
+            if typ == "self_attn_qkv_proj":
+                third = p.numel() // 3  # rows are [q; k; v] blocks
+                for j, sub in enumerate(("q", "k", "v")):
+                    groups.setdefault(f"type:self_attn_up_{sub}", []).append(
+                        (s + j * third, s + (j + 1) * third)
+                    )
+            elif typ == "cross_attn_kv_proj":
+                half = p.numel() // 2  # rows are [k; v] blocks
+                for j, sub in enumerate(("k", "v")):
+                    groups.setdefault(f"type:cross_attn_up_{sub}", []).append(
+                        (s + j * half, s + (j + 1) * half)
+                    )
+    return groups
+
+
+def grouped_cosine(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    groups: dict[str, list[tuple[int, int]]],
+) -> dict[str, float]:
+    """Per-group cosine of two flat gradient vectors over each group's
+    flat-vector ranges."""
+    out = {}
+    for g, ranges in groups.items():
+        d = na = nb = 0.0
+        for s, e in ranges:
+            va, vb = a[s:e], b[s:e]
+            d += float(va.dot(vb))
+            na += float(va.dot(va))
+            nb += float(vb.dot(vb))
+        out[g] = d / (na**0.5 * nb**0.5) if na > 0 and nb > 0 else 0.0
+    return out
 
 
 def grad_estimate_binned(
@@ -180,9 +281,12 @@ def main() -> None:
     args = parse_args()
     start_heartbeat()
     edges = [int(e) for e in args.demote_edges.split(",") if e]
+    if args.x_zero:
+        args.no_reenc_control = True
     reenc_control = not args.no_reenc_control
     device = torch.device("cuda")
-    total_draws = args.bins * args.draws_per_bin
+    sigmas = build_sigmas(args.bins, args.draws_per_bin, args.endpoint_bin)
+    total_draws = int(sigmas.numel())
 
     log.info("scoring corpus + selecting probe set (3a-compatible)…")
     artists = args.artists.split(",") if args.artists else None
@@ -200,6 +304,9 @@ def main() -> None:
 
     log.info(f"encoding demoted arms ({edges}) + reenc={reenc_control}…")
     extra_latents = encode_probe_latents(probe, edges, args.vae, device, reenc_control)
+    if args.x_zero:
+        # keep the exact demoted grid shapes, drop all content
+        extra_latents = {k: torch.zeros_like(v) for k, v in extra_latents.items()}
 
     from library.runtime.harness import build_anima, compile_blocks_for_training
 
@@ -225,7 +332,13 @@ def main() -> None:
             grad_ckpt=False,
         )
 
-    sigmas = bin_sigmas(args.bins, args.draws_per_bin)
+    groups: dict[str, list[tuple[int, int]]] | None = None
+    if args.per_group:
+        groups = build_groups(bundle.network)
+        n_type = sum(1 for g in groups if g.startswith("type:"))
+        n_block = sum(1 for g in groups if g.startswith("block:"))
+        log.info(f"per-group: {n_type} type groups + {n_block} block groups")
+
     centers = [round(float(s), 4) for s in sigmas.mean(dim=1)]
     run_dir = make_run_dir(
         "sigma_lowres", args.label, root=Path(__file__).resolve().parent / "results"
@@ -241,6 +354,8 @@ def main() -> None:
             continue
         crossattn = crossattn.unsqueeze(0).to(device=device, dtype=torch.bfloat16)
         native = load_cached_latents(r.npz_path)[0]
+        if args.x_zero:
+            native = torch.zeros_like(native)
 
         def seeds(arm_idx: int) -> list[int]:
             base = args.seed * 1_000_000 + i * 10_000 + arm_idx * 1_000
@@ -258,6 +373,20 @@ def main() -> None:
             "cos_floor": [round(c, 5) for c in floor],
             "gnorm_native": [round(0.5 * (x + y), 3) for x, y in zip(n_a, n_b)],
         }
+        floor_g: list[dict[str, float]] = []
+        if args.per_group:
+            floor_g = [grouped_cosine(a, b, groups) for a, b in zip(g_a, g_b)]
+            row["cosg_floor"] = {g: [round(fb[g], 5) for fb in floor_g] for g in groups}
+
+        def grouped_gaps(g_arm: list[torch.Tensor]) -> dict[str, list[float]]:
+            out: dict[str, list[float]] = {g: [] for g in groups}
+            for bi, (a, b, d) in enumerate(zip(g_a, g_b, g_arm)):
+                ca = grouped_cosine(a, d, groups)
+                cb = grouped_cosine(b, d, groups)
+                for g in groups:
+                    out[g].append(round(floor_g[bi][g] - 0.5 * (ca[g] + cb[g]), 5))
+            return out
+
         arm_idx = 2
         if reenc_control:
             re_lat = extra_latents[(r.stem, "reenc")]
@@ -268,6 +397,8 @@ def main() -> None:
             c = [0.5 * (cosine(a, g) + cosine(b, g)) for a, b, g in zip(g_a, g_b, g_re)]
             row["cos_reenc"] = [round(v, 5) for v in c]
             row["gap_reenc"] = [round(f - v, 5) for f, v in zip(floor, c)]
+            if args.per_group:
+                row["gapg_reenc"] = grouped_gaps(g_re)
         for e in edges:
             lat = extra_latents[(r.stem, f"demote{e}")]
             g_d, n_d = grad_estimate_binned(
@@ -278,6 +409,8 @@ def main() -> None:
             row[f"cos_{e}"] = [round(v, 5) for v in c]
             row[f"gap_{e}"] = [round(f - v, 5) for f, v in zip(floor, c)]
             row[f"gnorm_{e}"] = [round(v, 3) for v in n_d]
+            if args.per_group:
+                row[f"gapg_{e}"] = grouped_gaps(g_d)
         rows.append(row)
         with rows_path.open("a") as f:
             f.write(json.dumps(row) + "\n")
@@ -298,7 +431,9 @@ def main() -> None:
         return {
             "mean": [round(float(v), 5) for v in mean],
             "sem": [round(float(v), 5) for v in sem],
-            "spearman_sigma": round(spearman(np.arange(len(mean)), mean), 4),
+            "spearman_sigma": round(spearman(np.arange(len(mean)), mean), 4)
+            if len(mean) > 1
+            else None,
             "splithalf_pearson": round(float(np.corrcoef(h1, h2)[0, 1]), 4)
             if len(mean) > 2
             else None,
@@ -318,6 +453,39 @@ def main() -> None:
         headline["gap_reenc"] = bin_stats("gap_reenc")
     for e in edges:
         headline[f"gap_{e}"] = bin_stats(f"gap_{e}")
+
+    if args.per_group:
+
+        def group_stats(key: str) -> dict:
+            out = {}
+            for g in rows[0][key]:
+                m = np.array([r[key][g] for r in rows])
+                mean = m.mean(axis=0)
+                sem = m.std(axis=0, ddof=1) / np.sqrt(m.shape[0])
+                h1, h2 = m[0::2].mean(axis=0), m[1::2].mean(axis=0)
+                out[g] = {
+                    "mean": [round(float(v), 5) for v in mean],
+                    "sem": [round(float(v), 5) for v in sem],
+                    "splithalf_pearson": round(float(np.corrcoef(h1, h2)[0, 1]), 4)
+                    if len(mean) > 2
+                    else None,
+                }
+            return out
+
+        for key in [k for k in rows[0] if k.startswith("gapg_")]:
+            headline[key] = group_stats(key)
+        for e in edges:
+            stats = headline.get(f"gapg_{e}")
+            if not stats:
+                continue
+            tg = {
+                g[5:]: v["mean"][-1] for g, v in stats.items() if g.startswith("type:")
+            }
+            ranked = sorted(tg.items(), key=lambda kv: -kv[1])
+            log.info(
+                f"[per-group] {e} type gaps @ last bin: "
+                + ", ".join(f"{n}={v:+.3f}" for n, v in ranked)
+            )
 
     log.info(json.dumps(headline, indent=2))
     write_result(
