@@ -805,6 +805,73 @@ def _subject_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     )
 
 
+def _subject_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject-edit staging: mine delta-caption edit pairs (directedit_ec Phase 2.5).
+
+    ``easycontrol_adapters/tools/subject_edit_pairs.py`` — subject_pairs contract
+    (reads its ``[staging]`` table, rewrites the blueprint tail in place), but the
+    staged ``.txt`` files are REAL files holding the tag delta vs the cond partner,
+    not caption symlinks. Still CPU-only; the TE encode over the delta captions is
+    the preprocess step."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_edit_pairs",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
+
+
+def _subject_edit_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject-edit preprocess: rebuild ``cond/`` + TE-encode the delta captions.
+
+    The delta captions are new text, so the shared LoRA TE cache does not apply —
+    ``cache_text_embeddings.py`` runs over ``{base}/staging`` into ``{base}/text``
+    (the blueprint's ``text_cache_dir``). Knobs from the ``[preprocess]`` table
+    (shuffle variants on, tag dropout OFF — dropping part of an instruction leaves
+    the target unexplained; ``min_pixels=0`` — low-tier resized images sit under
+    the script's 0.5MP default). VAE latents + PE ride the shared cache untouched.
+    Re-run after re-mining (pass ``--overwrite`` — delta texts change but stems
+    don't, and the existence check can't see that)."""
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_edit_pairs",
+            "--config",
+            str(_easy_cfg_path(adapter)),
+            "--cond-only",
+        ]
+    )
+    from library.env import default_checkpoints
+
+    ck = default_checkpoints()
+    knobs = _toml_table_to_argv(cfg.get("preprocess") or {})
+    run(
+        [
+            PY,
+            "scripts/preprocess/cache_text_embeddings.py",
+            "--dir",
+            f"{base}/staging",
+            "--recursive",
+            "--cache_dir",
+            f"{base}/text",
+            "--qwen3",
+            ck.text_encoder,
+            "--dit",
+            ck.dit,
+            *knobs,
+            *list(extra or []),
+        ]
+    )
+
+
 # Per-adapter materialization bodies (training is generic via _easy_train_extra);
 # only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter. Both
 # receive ``(adapter, cfg, base, extra)``. ``sanitize`` reuses the near-twin miner
@@ -815,6 +882,10 @@ _EASY_ADAPTERS = {
     "colorize": {"stage": _colorize_stage, "preprocess": _colorize_preprocess},
     "inpaint": {"stage": _inpaint_stage, "preprocess": _inpaint_preprocess},
     "subject": {"stage": _subject_stage, "preprocess": _subject_preprocess},
+    "subject_edit": {
+        "stage": _subject_edit_stage,
+        "preprocess": _subject_edit_preprocess,
+    },
 }
 
 

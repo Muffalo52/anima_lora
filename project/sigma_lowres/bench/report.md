@@ -163,6 +163,64 @@ module type** — late-half-only updates would see gap ≈ 0.03 (768 x-zero) to
 0.09 (768 endpoint) vs 0.12 full. Quantitatively that does NOT yet clear the
 reenc band at 768 on its own; it is a lever, not a free win.
 
+## Pooled-gradient addendum (2026-07-25): the SGD-aggregate view agrees, harder
+
+Run: `results/20260725-2155-pool4/` — the probe's new `--pool` mode (40
+images sorted by redundancy, strata of 4, 4 uniform bins + σ=1 endpoint,
+4 draws/bin). Per stratum and for the all-images aggregate, per-image
+bin-gradients are **summed across images before cosines** — the
+batch-gradient object SGD actually follows — in two variants: unweighted
+(training-realistic, gnorm-weighted) and per-image-normalized. Pooled floors
+carry their own noise-redraw + image-split-half nulls; pooled numbers are NOT
+comparable to the per-image ±0.04 band.
+
+Aggregate (n=40) pooled gap curves, bins 0.125 / 0.375 / 0.625 / 0.875 / 1.0:
+
+| | 0.125 | 0.375 | 0.625 | 0.875 | 1.0 |
+|---|---|---|---|---|---|
+| cos_floor | .921 | .837 | .982 | .992 | .992 |
+| gap_reenc | .028 | −.008 | .009 | .001 | .001 |
+| gap_896 | .210 | .447 | **.019** | **.005** | **−.002** |
+| gap_768 | .132 | .308 | .104 | **.013** | **.023** |
+| norm_gap_896 | .103 | .115 | .015 | .009 | .013 |
+| norm_gap_768 | .137 | .256 | .054 | .012 | .042 |
+
+- **The σ-structure sharpens in the aggregate.** Pooled gap_896 collapses to
+  ≈ 0 (within the pooled reenc control) at every bin σ ≥ 0.625 — the
+  per-image residual (~0.05–0.10 per-image in this run) largely **averages
+  out across images**: what survives pooling at high σ is the shared
+  cross-image gradient component, and demotion preserves it. Even pooled
+  gap_768 nearly vanishes at σ ≥ 0.875. Low σ is the mirror image: pooled
+  gaps 0.10–0.45, far above floor noise.
+- **Gnorm-weighting artifact**: unweighted pooled gap_896 > gap_768 at low σ
+  (0.45 vs 0.31) — an inversion driven by a few large-gnorm images dominating
+  the unweighted sum; the normalized side-channel restores the expected
+  tier ordering (0.115 vs 0.256). Read tier ordering from `norm_`, magnitude
+  realism from unweighted.
+- **Redundancy trend: null.** Stratum-level Spearman(redundancy → pooled gap
+  @ σ=1) = −0.07 (896) / −0.05 (768) across 10 strata spanning redundancy
+  0.49–0.93. Consistent with the tier_routing 3a closure: demotion cost is
+  flat in redundancy — there is no "demote the redundant images first" lever
+  in the pooled view either. Individual strata are unstable at n=4 (s3–s5
+  show floors 0.74–0.88 and wild gaps incl. one +1.0 read); only the
+  aggregate and the 10-stratum trend are verdict quantities.
+- Validity: pooled gap_reenc ≈ 0 everywhere (|·| ≤ 0.028); imgsplit floor
+  tracks the redraw floor (0.78–0.99, same shape).
+
+**Implication for Q4**: the gradient-level case for the {1024→896 @ σ>0.5}
+route is now stronger than "within the reenc band per-image" — in the
+aggregate gradient the route costs ≈ nothing at σ ≥ 0.625 while per-image
+deviations cancel. This is still not the Phase-1b CMMD A/B (integration over
+thousands of steps + optimizer state is untested), but the most SGD-like
+static object we can measure now agrees.
+
+Ops note: `--pool` initially OOM-killed the box (two ~19 GB fp32 accumulator
+sets + ~8 GB per-image temps vs 46 GB RAM). Fixed in `run_sigma_probe.py`:
+the aggregate accumulator is disk-memmap-backed (`release()`/`ensure_open()`
+between merges — ~19 GB transient under the run dir, deleted at the end) and
+per-image gradient lists are freed eagerly. Verified bit-identical to the
+in-RAM path.
+
 ## Caveats
 
 - Single operating point (`anima_soup_sincos`, trained at native tiers). An

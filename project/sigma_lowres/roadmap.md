@@ -1,9 +1,13 @@
 # sigma_lowres — roadmap
 
 Status: Phase 0 DONE (spectral mechanism refuted, σ-map measured), Phase 1a
-DONE (ratio transfer FAILED). Safe set = {1024→896 @ σ>0.5}, ~13–14%
-wall-clock ceiling. The line is **paused at a decision point**: the payoff is
-real but small, and the next cheap probe (1280→1024) decides whether it grows.
+DONE (ratio transfer FAILED), pooled-gradient probe DONE 2026-07-25 (the
+SGD-aggregate view: gap_896 ≈ 0 at σ ≥ 0.625 — per-image residuals cancel in
+the batch gradient; redundancy trend null, so no image-targeting lever). Safe
+set = {1024→896 @ σ>0.5}, ~13–14% wall-clock ceiling, now supported at both
+per-image and batch-aggregate level. The line is **paused at a decision
+point**: the payoff is real but small, and the next cheap probe (1280→1024)
+decides whether it grows.
 
 ## Next: the 1280→1024 discriminating probe (observability, cheap)
 

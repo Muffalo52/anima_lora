@@ -48,6 +48,14 @@ integrates thousands of demoted steps. Only the Phase-1b fixed-steps CMMD
 non-inferiority A/B answers this. If CMMD regresses, the residual gap is the
 suspect — the line closes (proposal's pre-commitment).
 
+**Strengthened 2026-07-25** (report.md pooled addendum, `20260725-2155-pool4`):
+in the batch-aggregate gradient (per-image gradients summed before cosines —
+the object SGD follows), gap_896 is ≈ 0 at every bin σ ≥ 0.625 — the
+per-image residual averages out across images rather than accumulating. Also:
+stratifying by redundancy shows a null trend (Spearman ≈ −0.07), so there is
+no per-image demotion-targeting lever. Still gradient-level; the CMMD A/B
+remains the closer.
+
 ## Q5 — Do the bespoke loops inherit anything?
 
 - **EasyControl**: structurally clean (frozen DiT, cached paired latents) but

@@ -19,6 +19,15 @@ landed the edit (+5) preserved nothing. Two adapters, two very different
 training sets, same mutually-exclusive shape — weak evidence for the
 architectural branch, not yet decisive.
 
+**Arm 2 (2026-07-25): first evidence for the data-owned branch.** At the
+subject-probe level (no DirectEdit in the loop) the open-gate adapter's
+response is *graded*, not cliff-shaped: inert at the trained point →
+position-free retrieval at +2/+3 → global-appearance leak at +4 → verbatim
+copy at +6…+8, a ≥2-unit-wide qualitatively distinct middle regime. Whether
+that width survives composition with inversion + anchor is exactly gate (a),
+still to run. If it does, the cliff was data-owned (arm 1's shut-gate training)
+and the per-block/per-σ gate-schedule proposal stays shelved.
+
 ## Q2 — Can a trained prior do associative (position-free) retrieval?
 
 The geometry row proved the inpaint prior is position-locked: with a
@@ -39,6 +48,19 @@ cond K/V reproduces a spatially-aligned cond and floods on a mismatched one —
 and needs no training, so arm 1's cond stream contributed essentially nothing.
 The retrieval question needs an arm trained with the gate open.
 
+**Arm 2 (2026-07-25): YES — at the probe level.** The open-gate retrain
+(`b_cond_init=-4`, `cond_res_scale=1.0`, epoch-4 checkpoint of 8) shows
+position-free retrieval at b_offset +2/+3: the prompt's composition is kept
+while cond-specific attributes (hairstyle, hair ornaments absent from both
+prompt and noec control) migrate into it, artifact-free, consistent across
+pairs. Above that band the mechanism degrades into the architectural copy
+path arm 1 exposed (+4 global leak, +6…+8 verbatim patch-copy) — both
+behaviors coexist in one adapter, selected by operating point. Caveats:
+train-set pairs (upper bound), so a held-out check is owed; and the
+vinj_t6-parity target on the 1b geometry edit is still gate (b)'s to answer.
+Run dirs: `bench/results/20260725-2318-…-engaged/` and
+`…2326-…-midgate/`.
+
 ## Q8 — Does `b_cond` ever learn? (new, 2026-07-25)
 
 Both trained checkpoints saved `b_cond` at exactly their init (subject −8.0,
@@ -51,6 +73,14 @@ itself controls, making a shut gate self-sustaining. Consequences if true:
 front, and a gate warmup/schedule (or a mass-normalized parameterization)
 would be the general fix. Worth a direct instrumented check — log
 `b_cond.grad` over the first ~100 steps of the next arm.
+
+**Arm 2 datum (2026-07-25): the answer is no even with the gate open.** The
+arm-2 epoch-4 checkpoint saved all 28 `b_cond` at exactly the −4.0 init,
+despite ~220× arm 1's cond attention mass (1.8e-2) — so the "shut gate
+starves its own gradient" story is insufficient on its own; drift is below
+bf16 resolution (~0.03 at −4) even when the cond stream demonstrably carries
+content. Treat `b_cond_init` as fully fixed. The instrumented `b_cond.grad`
+check is still the open item if we ever want the mechanism.
 
 ## Q3 — What owns the hard-image ceiling?
 

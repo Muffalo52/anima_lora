@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import sys
 import threading
 import time
@@ -96,6 +97,22 @@ def parse_args() -> argparse.Namespace:
         "sigma*eps, target = eps; captions and latent shapes kept). Isolates "
         "pure graph-shape gradient sensitivity — no content anywhere. Implies "
         "--no_reenc_control (re-encode of nothing = the floor arm).",
+    )
+    p.add_argument(
+        "--pool",
+        type=int,
+        default=0,
+        help="stratified gradient-pooling: sort the probe set by redundancy, "
+        "chunk into strata of N images, and ADDITIONALLY report pooled gap "
+        "curves — per stratum the per-image bin-gradients are summed across "
+        "images (gradient accumulation = the batch-SGD aggregate object) "
+        "before cosines, in two variants: unweighted (training-realistic, "
+        "large-gnorm images dominate) and per-image-normalized (side-channel), "
+        "plus an all-images aggregate. Pooled cosines are dominated by the "
+        "shared cross-image gradient component, so pooled floors/gaps are NOT "
+        "comparable to per-image gaps or the ±0.04 instrument band — each "
+        "stratum carries its own noise-redraw floor and an image-split-half "
+        "floor. Per-image rows are still written unchanged.",
     )
     p.add_argument(
         "--grad_ckpt",
@@ -226,6 +243,152 @@ def grouped_cosine(
     return out
 
 
+class PoolAccumulator:
+    """Cross-image gradient accumulator for one stratum (or the aggregate).
+
+    Holds, per arm and per σ-bin, the running sum of per-image bin-gradient
+    vectors (``sums``, unweighted — the batch-SGD object) and of per-image
+    L2-normalized vectors (``nsums`` — the equal-weight side-channel), plus a
+    parity split of the native (a+b) sum for the image-split-half floor.
+    Everything is float32 CPU; memory is O(arms x bins) vectors regardless of
+    stratum size — but each vector is a full flat LoRA gradient (~311 MB at
+    77M params), so one accumulator is ~19 GB at 5 arms x 5 bins. With
+    ``backing_dir`` set, every accumulator vector lives in a disk memmap
+    instead of RAM (pages are cache-evictable) — used for the all-images
+    aggregate, which is written 10x but read once at the end. Without it the
+    aggregate + stratum accumulators together OOM a 46 GB box. ``release()``
+    additionally closes the memmap handles between merges: mapped file pages
+    count against process RSS while a handle is open even though they're
+    reclaimable, so a released aggregate costs ~zero RSS outside merges.
+    """
+
+    def __init__(self, backing_dir: Path | None = None) -> None:
+        self.backing_dir = backing_dir
+        self._numel: int | None = None
+        self.sums: dict[str, list[torch.Tensor]] = {}
+        self.nsums: dict[str, list[torch.Tensor]] = {}
+        self.halves: dict[int, list[torch.Tensor]] = {}
+        self.n = 0
+        self.redundancy: list[float] = []
+
+    def _stores(self) -> tuple[tuple[str, dict], ...]:
+        return ("sums", self.sums), ("nsums", self.nsums), ("halves", self.halves)
+
+    def _open(self, name: str, key, idx: int, mode: str) -> torch.Tensor:
+        mm = np.memmap(
+            self.backing_dir / f"{name}_{key}_{idx}.f32",
+            dtype=np.float32,
+            mode=mode,
+            shape=(self._numel,),
+        )
+        return torch.from_numpy(mm)
+
+    def _materialize(self, name: str, key, idx: int, v: torch.Tensor) -> torch.Tensor:
+        if self.backing_dir is None:
+            return v
+        self.backing_dir.mkdir(parents=True, exist_ok=True)
+        self._numel = v.numel()
+        t = self._open(name, key, idx, "w+")
+        t.copy_(v)
+        return t
+
+    def _add(
+        self,
+        name: str,
+        store: dict,
+        key,
+        vecs: list[torch.Tensor],
+        scales: list[float] | None = None,
+    ) -> None:
+        if scales is None:
+            scales = [1.0] * len(vecs)
+        if key not in store:
+            store[key] = [
+                self._materialize(name, key, i, v * s)
+                for i, (v, s) in enumerate(zip(vecs, scales))
+            ]
+        else:
+            for acc, v, s in zip(store[key], vecs, scales):
+                acc += v * s
+
+    def release(self) -> None:
+        """Backed mode: replace each vector list with its length, dropping the
+        memmap handles (data is on disk). Reopened by ``ensure_open``."""
+        if self.backing_dir is None:
+            return
+        for _, store in self._stores():
+            for key, vecs in store.items():
+                if not isinstance(vecs, int):
+                    store[key] = len(vecs)
+
+    def ensure_open(self) -> None:
+        if self.backing_dir is None:
+            return
+        for name, store in self._stores():
+            for key, val in store.items():
+                if isinstance(val, int):
+                    store[key] = [self._open(name, key, i, "r+") for i in range(val)]
+
+    def add_image(self, arms: dict[str, list[torch.Tensor]], redundancy: float) -> None:
+        for key, vecs in arms.items():
+            self._add("sums", self.sums, key, vecs)
+            self._add(
+                "nsums",
+                self.nsums,
+                key,
+                vecs,
+                [1.0 / (float(v.norm()) + 1e-12) for v in vecs],
+            )
+        native = [a + b for a, b in zip(arms["a"], arms["b"])]
+        self._add("halves", self.halves, self.n % 2, native)
+        self.n += 1
+        self.redundancy.append(redundancy)
+
+    def merge(self, other: "PoolAccumulator") -> None:
+        self.ensure_open()
+        for name, mine in self._stores():
+            theirs = getattr(other, name)
+            for key, vecs in theirs.items():
+                self._add(name, mine, key, vecs)
+        self.n += other.n
+        self.redundancy.extend(other.redundancy)
+
+
+def pool_stats(acc: PoolAccumulator, arm_keys: list[str]) -> dict:
+    """Pooled-cosine curves for one accumulator: noise-redraw floor
+    (pooled-a vs pooled-b over the same images), per-arm cos/gap, the
+    normalized variant (``norm_`` prefix), and the image-split-half floor
+    (pooled native over even- vs odd-indexed images — includes image-sampling
+    variance, which the redraw floor does not)."""
+    acc.ensure_open()
+    out: dict = {
+        "n_images": acc.n,
+        "redundancy_mean": round(float(np.mean(acc.redundancy)), 4),
+        "redundancy_range": [
+            round(min(acc.redundancy), 4),
+            round(max(acc.redundancy), 4),
+        ],
+    }
+    for prefix, store in (("", acc.sums), ("norm_", acc.nsums)):
+        a, b = store["a"], store["b"]
+        floor = [cosine(x, y) for x, y in zip(a, b)]
+        out[f"{prefix}cos_floor"] = [round(v, 5) for v in floor]
+        for key in arm_keys:
+            d = store[key]
+            c = [0.5 * (cosine(x, g) + cosine(y, g)) for x, y, g in zip(a, b, d)]
+            out[f"{prefix}cos_{key}"] = [round(v, 5) for v in c]
+            out[f"{prefix}gap_{key}"] = [round(f - v, 5) for f, v in zip(floor, c)]
+    out["gnorm_pooled"] = [
+        round(0.5 * (float(x.norm()) + float(y.norm())), 3)
+        for x, y in zip(acc.sums["a"], acc.sums["b"])
+    ]
+    if len(acc.halves) == 2:
+        out["imgsplit_floor"] = [
+            round(cosine(h0, h1), 5) for h0, h1 in zip(acc.halves[0], acc.halves[1])
+        ]
+    return out
+
+
 def grad_estimate_binned(
     bundle,
     latents: torch.Tensor,
@@ -296,6 +459,12 @@ def main() -> None:
     )
     if not probe:
         raise SystemExit(f"no complete tier-{args.tier} records in the scored pool")
+    if args.pool:
+        probe = sorted(probe, key=lambda r: r.redundancy)
+        log.info(
+            f"pool mode: {args.pool} images/stratum, sorted by redundancy "
+            f"({probe[0].redundancy:.3f}..{probe[-1].redundancy:.3f})"
+        )
     log.info(
         f"probe set: {len(probe)} images, {len({r.artist for r in probe})} artists; "
         f"{args.bins} σ-bins × {args.draws_per_bin} draws × "
@@ -345,6 +514,28 @@ def main() -> None:
     )
     rows_path = run_dir / "per_image.jsonl"
     rows: list[dict] = []
+    arm_keys = (["reenc"] if reenc_control else []) + [str(e) for e in edges]
+    pool_strata: list[dict] = []
+    pool_spill = run_dir / "pool_agg_spill"
+    pool_agg = PoolAccumulator(backing_dir=pool_spill)
+    cur_pool = PoolAccumulator()
+
+    def finalize_stratum() -> None:
+        if not args.pool or cur_pool.n == 0:
+            return
+        stats = pool_stats(cur_pool, arm_keys)
+        pool_strata.append(stats)
+        pool_agg.merge(cur_pool)
+        pool_agg.release()  # drop memmap handles — RSS-free between merges
+        cur_pool.__init__()
+        gaps = " ".join(f"gap_{k}@last={stats[f'gap_{k}'][-1]:+.4f}" for k in arm_keys)
+        log.info(
+            f"[pool s{len(pool_strata) - 1}] n={stats['n_images']} "
+            f"redundancy {stats['redundancy_range'][0]:.2f}"
+            f"-{stats['redundancy_range'][1]:.2f} "
+            f"floor@last={stats['cos_floor'][-1]:.4f} {gaps}"
+        )
+
     t0 = time.time()
 
     for i, r in enumerate(probe):
@@ -387,6 +578,7 @@ def main() -> None:
                     out[g].append(round(floor_g[bi][g] - 0.5 * (ca[g] + cb[g]), 5))
             return out
 
+        arms: dict[str, list[torch.Tensor]] = {"a": g_a, "b": g_b}
         arm_idx = 2
         if reenc_control:
             re_lat = extra_latents[(r.stem, "reenc")]
@@ -399,6 +591,7 @@ def main() -> None:
             row["gap_reenc"] = [round(f - v, 5) for f, v in zip(floor, c)]
             if args.per_group:
                 row["gapg_reenc"] = grouped_gaps(g_re)
+            arms["reenc"] = g_re
         for e in edges:
             lat = extra_latents[(r.stem, f"demote{e}")]
             g_d, n_d = grad_estimate_binned(
@@ -411,6 +604,16 @@ def main() -> None:
             row[f"gnorm_{e}"] = [round(v, 3) for v in n_d]
             if args.per_group:
                 row[f"gapg_{e}"] = grouped_gaps(g_d)
+            arms[str(e)] = g_d
+        if args.pool:
+            cur_pool.add_image(arms, r.redundancy)
+            if cur_pool.n == args.pool:
+                finalize_stratum()
+        # free this image's ~8 GB of flat gradient vectors now — otherwise
+        # the locals keep them resident through the next image's compute
+        for vecs in arms.values():
+            vecs.clear()
+        g_a = g_b = arms = None  # noqa: F841
         rows.append(row)
         with rows_path.open("a") as f:
             f.write(json.dumps(row) + "\n")
@@ -421,6 +624,7 @@ def main() -> None:
 
     if not rows:
         raise SystemExit("no per-image rows produced")
+    finalize_stratum()  # remainder stratum (may be smaller than --pool)
 
     def bin_stats(key: str) -> dict:
         m = np.array([r[key] for r in rows])  # (n_images, bins)
@@ -453,6 +657,24 @@ def main() -> None:
         headline["gap_reenc"] = bin_stats("gap_reenc")
     for e in edges:
         headline[f"gap_{e}"] = bin_stats(f"gap_{e}")
+
+    if args.pool and pool_strata:
+        # stratum-level redundancy trend: spearman of stratum redundancy mean
+        # vs pooled gap at the last (highest-σ) bin, per demote edge
+        trend = {}
+        if len(pool_strata) > 2:
+            red = np.array([s["redundancy_mean"] for s in pool_strata])
+            for e in edges:
+                g = np.array([s[f"gap_{e}"][-1] for s in pool_strata])
+                trend[f"spearman_redundancy_gap_{e}"] = round(spearman(red, g), 4)
+        headline["pool"] = {
+            "size": args.pool,
+            "strata": pool_strata,
+            "aggregate": pool_stats(pool_agg, arm_keys),
+            **trend,
+        }
+        del pool_agg  # release memmap handles before removing the spill
+        shutil.rmtree(pool_spill, ignore_errors=True)
 
     if args.per_group:
 
