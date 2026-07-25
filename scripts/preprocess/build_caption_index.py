@@ -43,7 +43,7 @@ from pathlib import Path
 
 # Shared torch-free tag-shape primitives, kept in sync with the Anima Tagger
 # vocab build (scripts/anima_tagger/vocab.py).
-from library.captioning.taxonomy import CAPTION_RATINGS, is_artist_tag, is_count_tag
+from library.captioning.taxonomy import is_artist_tag, is_count_tag, is_rating_tag
 from library.datasets.image_utils import IMAGE_EXTENSIONS
 from library.datasets.subsets import filter_paths_by_glob
 from library.io.cache import caption_key
@@ -224,7 +224,7 @@ def _classify(
                     or tag in seen["count"]
                 ):
                     continue
-                if tag in CAPTION_RATINGS or is_count_tag(tag) or _PAREN_RE.match(tag):
+                if is_rating_tag(tag) or is_count_tag(tag) or _PAREN_RE.match(tag):
                     continue
                 if _norm_words(tag) & copy_words:
                     continue  # franchise sub-title of a known copyright
