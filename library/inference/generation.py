@@ -1250,6 +1250,16 @@ def _setup_easycontrol(args, anima, device, shared_models):
         **create_kwargs,
     )
     network.load_weights(ec_weight)
+    # b_cond is a live logit bias (not baked into the KV cache), so an additive
+    # offset after load_weights shifts cond softmax mass ~e× per unit. Must run
+    # before apply_to/precompute so every block's closure captures the shifted
+    # Parameter. Mirrors scripts/edit.py.
+    b_offset = getattr(args, "easycontrol_b_offset", None)
+    if b_offset is not None:
+        with torch.no_grad():
+            for b in network.b_cond:
+                b += float(b_offset)
+        logger.info("EasyControl: b_cond offset %+g applied to every block", b_offset)
     network.to(device, dtype=torch.bfloat16)
     network.apply_to(text_encoders=None, unet=anima)
 

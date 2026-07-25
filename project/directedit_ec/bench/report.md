@@ -1,5 +1,113 @@
 # directedit_ec — EasyControl cond stream as a learned preservation prior for DirectEdit
 
+## Phase 2: cross-image subject descriptor (2026-07-25)
+
+**Train:** `anima_easycontrol_subject`, 8928 steps / 8 epochs over the 1116-pair
+set, 1h45m, `loss/epoch_average` 0.0797, no anomalies. Pair data verified: cond
+latents symlink to a *different* image of the same character (73% cross-artist).
+
+**Runs:** `results/20260725-0930-phase2a-boffset` (offsets 0..+4),
+`-0949-…-hi` (+6/+8), `-0953-…-fine` (+5/+7) — one b_offset curve, same
+seed/config, cross-run comparable · `-1000-phase2-retrieval` (geometry,
+`--phase 2`) · `-1014-phase2-subject-probe-engaged` (DirectEdit-free retrieval).
+
+### Verdict: both gates FAIL — but the run does NOT test the Phase-2 hypothesis
+
+The gates fail, and the kill criterion's *conclusion* ("pairing wasn't the
+constraint") is **not** supported: the cond stream was closed for the entire
+train, so cross-image pairing was never actually exercised.
+
+**The gate never opened during training.** `b_cond` is empirically non-learning
+— the checkpoint saved exactly `-8.0` on all 28 blocks, as the inpaint
+checkpoint saved exactly `-6.0` (bf16 resolution at that magnitude is 0.0625,
+so |drift| < 0.03 over 8928 AdamW steps at lr 2e-5). It *is* wired to train
+(in the optimizer via `get_trainable_params`, analytical gradient in
+`easycontrol_attention.py`), it simply sits at a near-stationary point. With
+`b_cond=-8` and `cond_res_scale=0.5` (S_c/S_t ≈ 0.25) the cond keys carried
+
+    cond attention mass ≈ 0.25·e⁻⁸ ≈ 8.4e-5   (0.008%)
+
+versus inpaint's `2.5e-3` at `b=-6, cond_res_scale=1` — **29.5× more**. The
+weights corroborate it: cond-LoRA up-projections (zero-init) reached only
+|w| ≈ 1.2e-4, while the adaln LoRA — which feeds the *target* stream and is not
+gated by `b_cond` — moved 8× further. The cond path got almost no gradient
+because the gate was shut.
+
+**Gate (a) — sweet-spot width: FAIL (0 usable units, vs inpaint's ~1).** The
+preservation band exists but is displaced ~7 units; MSE vs source, edit = +glasses:
+
+| arm | dan_9596032 | 10473210 | 7538087 |
+|---|---|---|---|
+| base_t0 (pure anchor) | 0.13988 | 0.05723 | 0.02324 |
+| vinj_t6 | 0.01594 | 0.00811 | 0.00549 |
+| ec_s1 (offset 0 = trained point) | 0.14454 | 0.06598 | 0.03024 |
+| ec_b4 | 0.15791 | 0.05846 | 0.02013 |
+| ec_b5 | 0.15001 | 0.05391 | 0.01850 |
+| ec_b6 | 0.09146 | 0.01666 | 0.00881 |
+| ec_b7 | **0.01068** | **0.00498** | **0.00147** |
+| ec_b8 | 0.00451 | 0.00236 | 0.00101 |
+
+At +7 preservation beats `vinj_t6` on all three images — but the **edit is
+suppressed across the whole band**. Render-judged (face crops), +glasses lands
+only at +5, where preservation is nil (0.150). Preserve-and-land is empty:
+usable width **0**. Inpaint had ~1 unit (b−1 on dan). The width did not
+improve; it got worse.
+
+**Gate (b) — geometry parity: FAIL to demonstrate retrieval.** `--phase 2` adds
+the arm 1b could not express: cond left **whole** (identity available
+position-free) with only the Δz anchor released full-frame. 1b's geometry row
+gray-fills the *entire* cond, so a subject descriptor gets zero identity to
+retrieve — it degenerates to unanchored generation for any adapter.
+
+| arm | dan (squatting→standing) | 10473210 (+arms up) | 7538087 (→sitting) |
+|---|---|---|---|
+| vinj_t6 | pose unchanged | pose unchanged | pose unchanged |
+| ec_anch (offset 0) | stands, keeps **nothing** | no change | no change |
+| ec_anch_b6 | pose unchanged, source kept | no change | no change |
+| ec_anch_b8 | ≈ source (clamped) | ≈ source | ≈ source |
+
+Preservation and edit stay mutually exclusive — the same cliff as inpaint. EC
+ties `vinj_t6` only by both failing. No arm lands the pose *and* keeps identity.
+
+**The decisive check: no position-free retrieval was learned.**
+`run_subject_probe.py` drops DirectEdit entirely and replays the adapter's own
+training task as plain generation — cond = image A, prompt = caption of image B
+(different image, same character), against a no-EC control at the same seed (the
+control matters: the prompt already carries the character name as a tag). On
+train-set pairs, i.e. an upper bound:
+
+- offset 0 (trained point): `ec_b0` ≈ `noec` on all 3 pairs — the adapter
+  contributes essentially nothing.
+- offsets +6/+7/+8: the image **degrades** — washed out at +6, muddy at +7,
+  collapsed to noise at +8. Identity does not transfer.
+
+So what appears at +7/+8 in the edit bench is not learned retrieval, it is the
+**architectural** copy path: extended self-attention over cond K/V reproduces
+the cond whenever it is spatially aligned with the target (in the edit bench
+cond *is* the source), and floods the attention with mismatched features when it
+is not. That path exists without any training; the subject pairs contributed
+almost nothing to it.
+
+### What this does and does not settle
+
+- **Does not settle** whether cross-image pairing can teach position-free
+  retrieval — the mechanism that would carry it was closed at ~8e-5 mass for
+  the whole run. This is a training-configuration failure, not a refutation.
+- **Does settle** that `b_cond_init` is a load-bearing hyperparameter that does
+  *not* self-correct, and that `-8` (with `cond_res_scale=0.5`) is far too
+  closed to train through. Next arm: `b_cond_init ≈ -2` (mass 3.3e-2) and/or
+  `cond_res_scale=1.0`, same cost as this run (~1h45m).
+- **Untested combination:** the shipped 1a/1b mask recipe (`ec_mask_anch`) at
+  the subject adapter's engaged point (+7). Given the probe result it would at
+  best reproduce inpaint behavior, but it was not run.
+- Q4 (hole-style artifact) is **not** answered — it needs the mask recipe at an
+  engaged offset.
+
+Wiring shipped alongside: `inference.py --easycontrol_b_offset` (the dial existed
+only in `scripts/edit.py`; this checkpoint is unusable from the main inference
+path without it), `EASYADAPTER=subject` for `test-easycontrol`, and
+`run_bench.py --phase 2`.
+
 ## Phase 1a: masked-cond probe (2026-07-24)
 
 **Runs:** `results/20260724-1827-phase1a` (3 img × 7 arms), `results/20260724-1844-phase1a-anchmask` (+2 arms, same seed/config — cross-run comparable) · Edit: caption + ", glasses", CFG 4, 28 steps, seed 42, b_offset 0 everywhere.

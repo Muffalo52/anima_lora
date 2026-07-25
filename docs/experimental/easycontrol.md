@@ -213,6 +213,14 @@ inference-side change.
   (the shipped colorize default) or use a mild `s` ≥ 0.7 only if a bench shows
   boundary fidelity holds.
 
+**Compile.** The cond stream carries its **own** dynamic-seq band. `compile_cond_stream`
+derives it from the target's token band scaled by `s²` (`_cond_seq_range`), because
+marking the cond seq axis with the target band raises
+`ConstraintViolationError: <cond_tokens> not in range [lo, hi]` on the first step of
+any `s < 1` run. On cond≠target subsets the cond image can also free-fit to its own
+shape (even another tier), so the band self-widens at runtime with a one-line log and
+a single dynamo recompile (`_fit_cond_seq_range`) rather than crashing.
+
 **Equivalence.** At `cond_res_scale = 1.0` the downscale block is skipped and
 the cond RoPE is the native-position table — bit-exact to the pre-PAI path, so
 existing checkpoints are unaffected. The `b_cond` step-0 baseline equivalence is

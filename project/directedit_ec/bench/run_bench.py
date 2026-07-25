@@ -31,12 +31,22 @@ trained on (gray hole over the intended edit region, face box per image) and
 run at b_offset 0, no tuning. Adds an outside/inside-hole MSE split for every
 arm; gate = ec_mask's outside-hole MSE ≤ 2× recon_base's, per image.
 
+Phase 2 (--phase 2): associative-retrieval probe for the cross-image subject
+descriptor. Geometry row only, and the cond is the FULL, UNMASKED source with
+the Δz anchor released over the whole frame — the arm 1b's geometry row could
+not express (its full-frame cond hole leaves the prior no identity to retrieve
+from, so it degenerates to unanchored generation). Render-judged: does identity
+survive while the prompt owns the pose?
+
 Usage:
     uv run python project/directedit_ec/bench/run_bench.py --smoke      # 1 img, 4 arms
     uv run python project/directedit_ec/bench/run_bench.py              # full sweep
     uv run python project/directedit_ec/bench/run_bench.py --edit smile --n_images 4
     uv run python project/directedit_ec/bench/run_bench.py --phase 1a   # masked-cond
     uv run python project/directedit_ec/bench/run_bench.py --phase 1b   # edit types
+    uv run python project/directedit_ec/bench/run_bench.py --phase 2 \
+        --ec_weight output/ckpt/anima_easycontrol_subject.safetensors \
+        --ec_b_offsets 2,4                                              # retrieval
 """
 
 from __future__ import annotations
@@ -199,6 +209,23 @@ def build_arms(
             Arm("ec_b-1", 0, 1.0, edit=True, b_offset=-1.0),
             Arm("ec_b-2", 0, 1.0, edit=True, b_offset=-2.0),
             Arm("ec_mask_anch", 0, 1.0, edit=True, mask=True, anchor_mask=True),
+        ]
+    if phase == "2":
+        # Associative retrieval (questions.md Q2). The 1b geometry row can NOT
+        # test this: its full-frame hole gray-fills the whole cond image, so a
+        # subject descriptor gets zero identity to retrieve — the arm degenerates
+        # to unanchored generation for any adapter. Here the cond stays whole and
+        # only the ANCHOR is released (full-frame `--mask`), so the prompt owns
+        # pose/layout and the cond is the sole identity source. ec_mask_anch is
+        # kept as the 1b degenerate baseline (what "keeps nothing" looks like).
+        return [
+            Arm("base_t0", 0, None, edit=True),
+            Arm("vinj_t6", 6, None, edit=True),
+            Arm("ec_mask_anch", 0, 1.0, edit=True, mask=True, anchor_mask=True),
+            Arm("ec_anch", 0, 1.0, edit=True, anchor_mask=True),
+        ] + [
+            Arm(f"ec_anch_b{o:g}", 0, 1.0, edit=True, anchor_mask=True, b_offset=o)
+            for o in b_offsets
         ]
     arms = (
         [
@@ -416,13 +443,16 @@ def main() -> None:
     p.add_argument(
         "--phase",
         default="0",
-        choices=["0", "1a", "1b"],
+        choices=["0", "1a", "1b", "2"],
         help="'1a' = masked-cond probe: fixed arm set {recon_base, recon_ec, "
         "base_t0, vinj_t6, ec_b-1, ec_b-2, ec_mask} with per-image face-box "
         "masks + outside/inside-hole MSE split (proposal Phase 1a). "
         "'1b' = edit-type matrix (EDITS_1B: remove/replace/expression/"
         "geometry per image) × {base_t0, vinj_t6, ec_b-1, ec_b-2, ec_mask}; "
-        "gate is render-judged.",
+        "gate is render-judged. "
+        "'2' = associative-retrieval probe: EDITS_1B geometry row only, cond "
+        "left WHOLE with only the anchor released (arm ec_anch, plus one "
+        "ec_anch_b<off> per --ec_b_offsets); render-judged.",
     )
     p.add_argument(
         "--mask_box",
@@ -493,10 +523,14 @@ def main() -> None:
     for image in images:
         stem = image.stem
         cap = image.with_suffix(".txt").read_text(encoding="utf-8").strip()
-        if args.phase == "1b":
+        if args.phase in ("1b", "2"):
             specs = EDITS_1B.get(stem)
             if specs is None:
-                raise SystemExit(f"phase 1b: no EDITS_1B specs for stem {stem!r}")
+                raise SystemExit(f"phase {args.phase}: no EDITS_1B specs for {stem!r}")
+            if args.phase == "2":
+                # Retrieval probe = the geometry row only (the one edit type a
+                # position-locked prior provably cannot serve).
+                specs = {"geometry": specs["geometry"]}
             for edit_key, spec in specs.items():
                 tar = apply_edit(cap, spec["drop"], spec["add"])
                 jobs.append((image, cap, edit_key, tar, spec["box"]))

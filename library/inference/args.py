@@ -111,6 +111,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override EasyControl scale (default: ss_cond_scale from the checkpoint, typically 1.0).",
     )
     parser.add_argument(
+        "--easycontrol_b_offset",
+        type=float,
+        default=None,
+        help="Additive offset on every block's b_cond gate — the continuous "
+        "cond-attention dial (each +1 gives ~e× more cond softmax mass). Applied "
+        "live after load_weights, NOT baked into the KV cache. Needed when a "
+        "checkpoint's b_cond_init leaves the cond stream disengaged at its "
+        "trained point (the subject descriptor engages around +7). Mirrors "
+        "scripts/edit.py's flag of the same name.",
+    )
+    parser.add_argument(
         "--easycontrol_image_match_size",
         action="store_true",
         help="Auto-pick --image_size by free-fitting the reference image's aspect ratio "

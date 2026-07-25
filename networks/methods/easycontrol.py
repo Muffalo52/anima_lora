@@ -644,8 +644,12 @@ class EasyControlNetwork(AdapterNetworkBase):
         # forward marks the target/cond seq axes dynamic so the two-stream inner
         # compiles one graph instead of one per (target × cond) token-count pair
         # (mirrors library/anima/models.py::_run_blocks). Range bounds the marks.
+        # The cond axis gets its OWN bound: at cond_res_scale<1 the cond stream
+        # runs a downscaled grid (~scale² of the target token count), so reusing
+        # the target band raises ConstraintViolationError on the cond mark.
         self._dynamic_seq: bool = False
         self._dynamic_seq_range: Optional[tuple] = None
+        self._dynamic_seq_cond_range: Optional[tuple] = None
 
         n_scaled = sum(
             1
@@ -808,6 +812,7 @@ class EasyControlNetwork(AdapterNetworkBase):
                 from library.datasets.buckets import token_count_range
 
                 self._dynamic_seq_range = token_count_range([1024])
+            self._dynamic_seq_cond_range = self._cond_seq_range(self._dynamic_seq_range)
 
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
@@ -819,8 +824,56 @@ class EasyControlNetwork(AdapterNetworkBase):
         logger.info(
             f"EasyControl: compiled two-stream cond forward on "
             f"{len(self._block_modules)} blocks (backend={backend}, mode={mode}, "
-            f"dynamic_seq={dynamic_seq} seq∈{self._dynamic_seq_range}, "
+            f"dynamic_seq={dynamic_seq} seq∈{self._dynamic_seq_range} "
+            f"cond_seq∈{self._dynamic_seq_cond_range}, "
             f"recompile_limit pinned to {per_obj})"
+        )
+
+    def _cond_seq_range(self, seq_range: tuple) -> tuple:
+        """Token-count band for the COND stream, given the target's band.
+
+        Position-Aware Interpolation (``encode_cond_latent``) downscales the cond
+        latent by ``cond_res_scale`` per axis, so its patch grid is
+        ``(round(gh*s), round(gw*s))`` and its token count lands near ``s²`` of the
+        target's. Marking the cond seq axis with the *target* band therefore raises
+        ``ConstraintViolationError: <cond_tokens> not in range [lo, hi]`` the moment
+        ``cond_res_scale < 1``.
+
+        The per-axis rounding means the exact count isn't ``s²·n`` — it drifts by up
+        to ``0.5·s·(gh+gw)`` either way (a few percent at realistic aspect ratios) —
+        and the true grids aren't known here, so pad the ``s²`` band generously.
+        These are only *bounds* on a symbolic axis: too wide costs nothing but a
+        slightly more general kernel, too narrow is a hard error.
+        """
+        lo, hi = int(seq_range[0]), int(seq_range[1])
+        s = float(self.cond_res_scale)
+        if s >= 1.0:
+            return (lo, hi)
+        lo_c = max(1, int(math.floor(lo * s * s * 0.7)))
+        hi_c = max(lo_c + 1, int(math.ceil(hi * s * s * 1.4)))
+        return (lo_c, hi_c)
+
+    def _fit_cond_seq_range(self, n: int) -> None:
+        """Widen the cond band in place if ``n`` tokens fall outside it.
+
+        ``_cond_seq_range`` is an *estimate* — and the cond latent is not always a
+        scaled copy of the target's grid: on a cond≠target subset the cond is a
+        paired but distinct image that free-fit can land at another shape, even
+        another tier (``library/datasets/base.py::_load_cond_latent``). Rather than
+        crash with a ConstraintViolationError deep in dynamo, widen (with headroom
+        so a shape pool doesn't re-widen per image) and let dynamo recompile once.
+        """
+        rng = self._dynamic_seq_cond_range
+        if rng is None or rng[0] <= n <= rng[1]:
+            return
+        lo = min(rng[0], max(1, int(n * 0.8)))
+        hi = max(rng[1], int(math.ceil(n * 1.25)))
+        self._dynamic_seq_cond_range = (lo, hi)
+        logger.info(
+            f"EasyControl: cond seq {n} outside the marked band {rng} — widened to "
+            f"{self._dynamic_seq_cond_range} (one dynamo recompile of the two-stream "
+            f"inner; expected on cond≠target subsets where the cond image free-fits "
+            f"to its own shape)"
         )
 
     def remove_from(self):
@@ -1578,6 +1631,10 @@ def _make_patched_block_forward(
         if ec_net._dynamic_seq:
             _compiled_inner = inner
             _lo, _hi = ec_net._dynamic_seq_range
+            # The cond stream carries its own band — at cond_res_scale<1 its token
+            # count sits near scale² of the target's and is NOT inside [_lo, _hi].
+            ec_net._fit_cond_seq_range(cond_x_in.shape[1])
+            _clo, _chi = ec_net._dynamic_seq_cond_range or (_lo, _hi)
 
             def inner(
                 x_,
@@ -1593,13 +1650,15 @@ def _make_patched_block_forward(
                 _ci=_compiled_inner,
                 _lo=_lo,
                 _hi=_hi,
+                _clo=_clo,
+                _chi=_chi,
             ):
                 torch._dynamo.mark_dynamic(x_, 2, min=_lo, max=_hi)
-                torch._dynamo.mark_dynamic(cond_x_, 1, min=_lo, max=_hi)
-                for _r in (rope_, cond_rope_):
+                torch._dynamo.mark_dynamic(cond_x_, 1, min=_clo, max=_chi)
+                for _r, _rlo, _rhi in ((rope_, _lo, _hi), (cond_rope_, _clo, _chi)):
                     if _r is not None:
-                        torch._dynamo.mark_dynamic(_r[0], 0, min=_lo, max=_hi)
-                        torch._dynamo.mark_dynamic(_r[1], 0, min=_lo, max=_hi)
+                        torch._dynamo.mark_dynamic(_r[0], 0, min=_rlo, max=_rhi)
+                        torch._dynamo.mark_dynamic(_r[1], 0, min=_rlo, max=_rhi)
                 return _ci(
                     x_,
                     emb_,

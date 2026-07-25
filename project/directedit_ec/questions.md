@@ -9,6 +9,16 @@ NOT improve over inpaint's (~1 b_offset unit), the pairing wasn't the binding
 constraint — the cliff is architectural (gate granularity), and the next
 lever is per-block/per-σ gate schedules (a different, smaller proposal).
 
+**Phase-2 arm 1 (2026-07-25): still OPEN, and the arm-1 answer does not
+count.** Measured width was 0 usable units (worse than inpaint's ~1), but the
+adapter trained with its cond gate shut (~8.4e-5 attention mass), so the
+"data-owned" branch was never exercised. Re-ask after an arm with the gate
+open. One genuinely new datum: **the cliff shape survived** — across the whole
++6…+8 preservation band the edit stayed suppressed, and the only offset that
+landed the edit (+5) preserved nothing. Two adapters, two very different
+training sets, same mutually-exclusive shape — weak evidence for the
+architectural branch, not yet decisive.
+
 ## Q2 — Can a trained prior do associative (position-free) retrieval?
 
 The geometry row proved the inpaint prior is position-locked: with a
@@ -16,6 +26,31 @@ full-frame hole it produces the pose but keeps nothing. Phase 2 trains
 retrieval that positional copying cannot satisfy (cond = image A, target =
 image B of the same character). Falsifiable target: parity with vinj_t6 on
 the 1b geometry edit.
+
+**Phase-2 arm 1 (2026-07-25): NO for this checkpoint, hypothesis still open.**
+`bench/run_subject_probe.py` tests it without DirectEdit in the loop (cond =
+image A, prompt = caption of image B, vs a no-EC control at the same seed —
+the control is essential, since the prompt already carries the character name
+as a tag). Result on train-set pairs: inert at the trained point (`ec_b0` ≈
+`noec`), and progressive image *degradation* at +6/+7/+8 rather than identity
+transfer. Mechanistic reading: the aligned-cond copy path that engages at
++7/+8 in the edit bench is **architectural** — extended self-attention over
+cond K/V reproduces a spatially-aligned cond and floods on a mismatched one —
+and needs no training, so arm 1's cond stream contributed essentially nothing.
+The retrieval question needs an arm trained with the gate open.
+
+## Q8 — Does `b_cond` ever learn? (new, 2026-07-25)
+
+Both trained checkpoints saved `b_cond` at exactly their init (subject −8.0,
+inpaint −6.0, all 28 blocks; bf16 resolution 0.0625 there, so |drift| < 0.03
+over 8928 AdamW steps). It is in the optimizer and has an analytical gradient
+(`easycontrol_attention.py`), so this is a near-stationary point, not missing
+wiring — plausibly because the gradient scales with the cond mass the gate
+itself controls, making a shut gate self-sustaining. Consequences if true:
+`b_cond_init` is a *fixed* hyperparameter that must be chosen correctly up
+front, and a gate warmup/schedule (or a mass-normalized parameterization)
+would be the general fix. Worth a direct instrumented check — log
+`b_cond.grad` over the first ~100 steps of the next arm.
 
 ## Q3 — What owns the hard-image ceiling?
 

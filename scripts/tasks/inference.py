@@ -288,6 +288,15 @@ def cmd_test_easycontrol(extra):
             "ref_dir": ROOT / "post_image_dataset" / "resized",
             "empty_prompt": False,
         },
+        # subject: cross-image descriptor — the ref is a DIFFERENT image of the
+        # character to retrieve, and the prompt owns layout/pose, so a caption is
+        # required for the test to mean anything (never force an empty prompt).
+        "subject": {
+            "weight": "anima_easycontrol_subject",
+            "out": "subject",
+            "ref_dir": ROOT / "post_image_dataset" / "resized",
+            "empty_prompt": False,
+        },
     }
     spec = _ADAPTERS.get(adapter, _DEFAULT)
     weight_name = spec["weight"]
