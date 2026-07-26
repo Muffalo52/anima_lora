@@ -44,6 +44,39 @@ def is_alive(pid: Optional[int], ct: Optional[float], *, tol: float = 1.0) -> bo
     return abs(actual - ct) <= tol
 
 
+def tree_cpu_seconds(pid: Optional[int]) -> Optional[float]:
+    """Total CPU seconds (user+system) burned by ``pid`` and every descendant.
+
+    The liveness signal for a job that legitimately writes nothing for minutes:
+    an embed/eval loop is *quiet but computing*, while a wedged process (stalled
+    socket, deadlock, symlink-cycle walk) burns no CPU. Sampled twice and
+    differenced by the stall watchdog. ``None`` when the tree can't be read at
+    all (pid gone / no permission), so the caller can fall back to its
+    output-mtime-only verdict rather than treating "unknown" as "alive".
+    """
+    if pid is None:
+        return None
+    try:
+        parent = psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+    total = 0.0
+    seen_any = False
+    family = [parent]
+    try:
+        family.extend(parent.children(recursive=True))
+    except psutil.NoSuchProcess:
+        pass
+    for p in family:
+        try:
+            t = p.cpu_times()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        total += float(t.user) + float(t.system)
+        seen_any = True
+    return total if seen_any else None
+
+
 def spawn_detached(
     cmd: list[str],
     *,

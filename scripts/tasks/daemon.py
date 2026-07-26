@@ -1,11 +1,17 @@
 """CLI surface for the local training daemon (``make daemon*``).
 
-Four verbs, mapped to the lifecycle guarantees in ``plan.md`` Phase 1:
+Lifecycle verbs, mapped to the guarantees in ``plan.md`` Phase 1:
 
     daemon            start (idempotent — no-op if already up), wait /health
     daemon-attach     non-owning viewer; ctrl-C detaches only, training lives on
     daemon-kill       abort the running (or JOB=<id>) job, free GPU; daemon stays up
     daemon-terminate  shut the whole daemon down (active job dies too)
+
+plus the submit/observe front door:
+
+    daemon-run        submit an arbitrary command job (attach-by-default)
+    daemon-wait       block until JOB=<id> is terminal; print record + result
+    daemon-status     one-shot JSON (health + jobs, or JOB=<id>/--job <id>)
 
 ``daemon`` starts the daemon **console-detached** (see ``proc.spawn_detached``),
 so the terminal's SIGINT reaches only the foreground group, never the daemon.
@@ -19,6 +25,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+import time
+from pathlib import Path
 
 from anima_daemon import client as _client
 from anima_daemon import config as _cfg
@@ -31,6 +40,24 @@ def _job_arg(extra) -> str | None:
     if not job and extra and not extra[0].startswith("-"):
         job = extra[0]
     return job or None
+
+
+def _read_result_envelope(record: dict) -> dict | None:
+    """The bench ``result.json`` this job lifted, inlined (or ``None``).
+
+    A GPU job that called ``bench/_common.write_result`` under the daemon dropped
+    a ``result_path.json`` pointer in its job dir, which the daemon followed onto
+    ``record["result_path"]`` (see ``manager._lift_result``). Reading it here is
+    what makes "where did my run land, and what did it say" one command.
+    """
+    path = record.get("result_path")
+    if not path:
+        return None
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def cmd_daemon(extra):
@@ -71,6 +98,12 @@ _STATUS_JOB_FIELDS = (
     "ended_at",
     "error",
     "ckpt_path",
+    # Where a finished bench/gen job landed its envelope — "where did my run
+    # land" without a job-dir spelunk. Only the *pointer* here: a bench
+    # `metrics` blob can run to hundreds of lines (per-pair records, per-step
+    # curves), which would swamp a 15-job overview. `--job <id>` inlines the
+    # whole envelope for the one job you actually want.
+    "result_path",
     "chained_job_id",
 )
 
@@ -83,17 +116,32 @@ _STATUS_DEFAULT_LIMIT = 15
 # Shorthand state groups for `--running` / `--failed` / `--done`.
 _STATUS_ACTIVE_STATES = frozenset({"running", "paused"})
 _STATUS_FAILED_STATES = frozenset({"error", "stopped"})
+# Every legal job state — `--state` is validated against this. A typo (or a job
+# id passed where a state belongs) used to filter everything out and print
+# `jobs_shown: 0`, which reads exactly like "the job vanished".
+_STATUS_ALL_STATES = frozenset(
+    {"queued", "running", "paused", "done", "error", "stopped"}
+)
 
 
 def _parse_status_flags(extra):
     """Parse the ``daemon-status`` filter flags out of ``extra``.
 
     ``--full`` (raw records) · ``--all`` (no cap) · ``--limit N`` ·
-    ``--state s[,s]`` · ``--running``/``--active`` · ``--failed`` · ``--done``.
-    Unknown tokens are ignored (forward-compatible with the make ARGS shim).
+    ``--state s[,s]`` · ``--running``/``--active`` · ``--failed`` · ``--done`` ·
+    ``--job <id>`` (one record, no list). Unknown tokens are ignored
+    (forward-compatible with the make ARGS shim); a bad ``--state`` value is not
+    — it lands in ``opts["bad_states"]`` for the caller to error out on.
     """
     extra = list(extra or [])
-    opts = {"full": False, "all": False, "states": None, "limit": _STATUS_DEFAULT_LIMIT}
+    opts = {
+        "full": False,
+        "all": False,
+        "states": None,
+        "bad_states": None,
+        "job": None,
+        "limit": _STATUS_DEFAULT_LIMIT,
+    }
     i = 0
     while i < len(extra):
         a = extra[i]
@@ -109,7 +157,14 @@ def _parse_status_flags(extra):
             opts["states"] = {"done"}
         elif a == "--state" and i + 1 < len(extra):
             i += 1
-            opts["states"] = {s.strip() for s in extra[i].split(",") if s.strip()}
+            asked = {s.strip() for s in extra[i].split(",") if s.strip()}
+            bad = asked - _STATUS_ALL_STATES
+            if bad:
+                opts["bad_states"] = sorted(bad)
+            opts["states"] = asked & _STATUS_ALL_STATES
+        elif a == "--job" and i + 1 < len(extra):
+            i += 1
+            opts["job"] = extra[i]
         elif a == "--limit" and i + 1 < len(extra):
             i += 1
             try:
@@ -153,14 +208,49 @@ def cmd_daemon_status(extra):
     than the current on-disk ``anima_daemon/*`` — the next submit will eagerly
     restart it (Phase 0a).
 
-    Jobs are compact summaries (id/state/error/ckpt_path/… plus a derived
-    ``target`` = what the job operates on), **newest first** and capped to the
-    most-recent ``_STATUS_DEFAULT_LIMIT``; ``jobs_total`` vs ``jobs_shown`` report
-    any truncation. Filter flags: ``--full`` (raw records) · ``--all`` (no cap) ·
-    ``--limit N`` · ``--state s[,s]`` · ``--running`` · ``--failed`` · ``--done``.
+    Jobs are compact summaries (id/state/error/ckpt_path/result_path/… plus a
+    derived ``target`` = what the job operates on), **newest first** and capped to
+    the most-recent ``_STATUS_DEFAULT_LIMIT``; ``jobs_total`` vs ``jobs_shown``
+    report any truncation. Filter flags: ``--full`` (raw records) · ``--all`` (no
+    cap) · ``--limit N`` · ``--state s[,s]`` · ``--running`` · ``--failed`` ·
+    ``--done`` · ``--job <id>`` / ``JOB=<id>`` (that one record, full, with the
+    bench ``result.json`` it lifted inlined under ``result`` — no
+    list-then-eyeball step, and it reads the on-disk record when the daemon is
+    down). An unknown ``--state`` value errors out (exit 2) instead of silently
+    filtering everything away, which read like "the job vanished".
     """
     opts = _parse_status_flags(extra)
+    if opts["bad_states"]:
+        print(
+            f"unknown job state(s): {', '.join(opts['bad_states'])}\n"
+            f"  valid: {', '.join(sorted(_STATUS_ALL_STATES))}\n"
+            "  (looking up one job? use --job <id> or JOB=<id>)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     cl = _client.DaemonClient()
+    job_id = opts["job"] or os.environ.get("JOB")
+    if job_id:
+        # Single-record mode: reads the on-disk job.json when the daemon is down,
+        # so a post-mortem lookup works without resurrecting a daemon.
+        record = cl.job_record(job_id)
+        if record is None:
+            print(
+                json.dumps(
+                    {
+                        "up": cl.health() is not None,
+                        "error": "no such job",
+                        "job_id": job_id,
+                    },
+                    indent=2,
+                )
+            )
+            sys.exit(2)
+        envelope = _read_result_envelope(record)
+        if envelope is not None:
+            record = {**record, "result": envelope}
+        print(json.dumps(record, indent=2))
+        return
     health = cl.health()
     if health is None:
         print(json.dumps({"up": False, "base_url": None, "jobs": []}))
@@ -199,10 +289,38 @@ def cmd_daemon_status(extra):
     )
 
 
+# How often an idle attach prints "still here, still quiet". A GPU bench between
+# prints and a wedged daemon look identical on a silent pipe, and the silence can
+# legitimately run minutes — so say so periodically rather than leaving the reader
+# (or an agent parsing the pipe) to guess.
+_ATTACH_TICK_SECONDS = 30.0
+
+
+def _start_attach_ticker(stop: threading.Event, last_line: list[float]) -> None:
+    """Print ``[attached Ns — no output yet]`` while the stream stays silent."""
+    t0 = time.time()
+
+    def tick() -> None:
+        while not stop.wait(_ATTACH_TICK_SECONDS):
+            quiet = time.time() - last_line[0]
+            if quiet >= _ATTACH_TICK_SECONDS:
+                print(
+                    f"[attached {time.time() - t0:.0f}s — no output for {quiet:.0f}s]",
+                    flush=True,
+                )
+
+    threading.Thread(target=tick, daemon=True).start()
+
+
 def cmd_daemon_attach(extra):
     """Read-only viewer. ``JOB=<id>`` follows that job's stdout; otherwise the
     daemon event stream. Ctrl-C detaches this terminal only — never the daemon
-    or the training subprocess (we are the parent of nothing)."""
+    or the training subprocess (we are the parent of nothing).
+
+    Every write is flushed: stdout to a pipe is block-buffered, so an unflushed
+    banner made a piped attach look like zero bytes / a hang. On a job that is
+    already terminal this now returns as soon as the log is drained (the SSE
+    endpoint closes the connection at ``eof``)."""
     if not _client.is_running():
         print("no daemon; `make daemon` to start.", file=sys.stderr)
         sys.exit(1)
@@ -210,14 +328,119 @@ def cmd_daemon_attach(extra):
     job = _job_arg(extra)
     stream = cl.stream_logs(job) if job else cl.stream_events()
     what = f"job {job}" if job else "daemon events"
-    print(f"attached to {what} ({cl.base}) — ctrl-C to detach\n")
+    print(f"attached to {what} ({cl.base}) — ctrl-C to detach\n", flush=True)
+    stop = threading.Event()
+    last_line = [time.time()]
+    _start_attach_ticker(stop, last_line)
     try:
         for line in stream:
+            last_line[0] = time.time()
+            # The log stream's terminator is a {"ev":"eof","state":…} event. Now
+            # that the connection actually closes (rather than parking), every
+            # attach reaches it — so render it instead of leaking raw JSON.
+            if line.startswith("{") and '"eof"' in line:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    ev = None
+                if isinstance(ev, dict) and ev.get("ev") == "eof":
+                    print(f"\n[job {job} ended: {ev.get('state')}]", flush=True)
+                    break
             print(line, flush=True)
     except KeyboardInterrupt:
-        print("\ndetached (training continues).")
+        print("\ndetached (training continues).", flush=True)
     except Exception as e:  # noqa: BLE001 — socket reset on daemon shutdown, etc.
-        print(f"\nstream ended: {e}")
+        print(f"\nstream ended: {e}", flush=True)
+    finally:
+        stop.set()
+
+
+def cmd_daemon_wait(extra):
+    """Block until ``JOB=<id>`` (or the active job) is terminal, then print its
+    record + any bench result envelope as JSON. Exits with the job's own exit code
+    (``done`` → 0), so ``make daemon-wait JOB=… && next-step`` composes.
+
+    The non-streaming half of "submit → wait → read the result": no log volume,
+    and it reads the persisted ``job.json`` if the daemon restarts mid-wait. Ctrl-C
+    detaches (exit 130) — the job keeps running. ``ARGS="--timeout 600"`` bounds the
+    wait (exit 124, like ``timeout(1)``).
+    """
+    extra = list(extra or [])
+    timeout = None
+    if "--timeout" in extra:
+        i = extra.index("--timeout")
+        if i + 1 < len(extra):
+            try:
+                timeout = float(extra[i + 1])
+            except ValueError:
+                print(f"bad --timeout value: {extra[i + 1]!r}", file=sys.stderr)
+                sys.exit(2)
+            del extra[i : i + 2]
+    cl = _client.DaemonClient()
+    job = _job_arg(extra)
+    if not job:
+        health = cl.health() or {}
+        job = health.get("active_job")
+    if not job:
+        print(
+            "nothing to wait for: pass JOB=<id> (no job is active).\n"
+            "  make daemon-status         # what has run / is queued",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    from anima_daemon.cli import _wait_and_report
+
+    sys.exit(_wait_and_report(cl, job, timeout=timeout))
+
+
+def cmd_daemon_run(extra):
+    """Submit an arbitrary GPU command job (``ARGS="<script.py> [flags…]"``).
+
+    The generic front door for "run this on the serial GPU queue": a bench script,
+    a one-off probe, anything that would otherwise be started from a background
+    shell and silently SIGKILLed by an agent harness after ~60s. Same run modes as
+    the train/gen targets — attach by default (stream stdout, exit with the job's
+    code, ctrl-C detaches), ``--queue`` to detach, ``--inline`` to bypass the
+    daemon. ``--stall-timeout S`` sets this job's stall-watchdog budget (0 = off)
+    for a legitimately quiet loop; the label defaults to the script basename and
+    ``--label NAME`` overrides it.
+    """
+    from scripts.tasks import _common
+
+    extra = list(extra or [])
+    label = None
+    stall_timeout = None
+    for flag in ("--label", "--stall-timeout"):
+        if flag in extra:
+            i = extra.index(flag)
+            if i + 1 >= len(extra):
+                print(f"{flag} needs a value", file=sys.stderr)
+                sys.exit(2)
+            value = extra[i + 1]
+            del extra[i : i + 2]
+            if flag == "--label":
+                label = value
+            else:
+                try:
+                    stall_timeout = float(value)
+                except ValueError:
+                    print(f"bad --stall-timeout value: {value!r}", file=sys.stderr)
+                    sys.exit(2)
+    mode, argv = _common._resolve_run_mode(extra)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        print(
+            'nothing to run. e.g. make daemon-run ARGS="project/x/bench/run_probe.py '
+            '--limit 5"',
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    from anima_daemon.cli import _label_for
+
+    _common.run_command(
+        label or _label_for(argv), argv, mode=mode, stall_timeout=stall_timeout
+    )
 
 
 def cmd_daemon_kill(extra):

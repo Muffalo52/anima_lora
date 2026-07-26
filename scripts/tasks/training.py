@@ -872,6 +872,26 @@ def _subject_edit_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     )
 
 
+def _twin_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Stage the aligned-pair instruction-edit tree from the Phase-0 census
+    manifest (direction-doubled delta-caption pairs + empty-instruction
+    identity no-ops). CPU-only symlinks; the tool self-reads its ``[staging]``
+    table and rewrites the blueprint tail (near_twins pattern)."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.twin_edit_pairs",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
+
+
 # Per-adapter materialization bodies (training is generic via _easy_train_extra);
 # only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter. Both
 # receive ``(adapter, cfg, base, extra)``. ``sanitize`` reuses the near-twin miner
@@ -886,6 +906,9 @@ _EASY_ADAPTERS = {
         "stage": _subject_edit_stage,
         "preprocess": _subject_edit_preprocess,
     },
+    # Aligned-pair instruction editor: bespoke staging over the census manifest,
+    # then the near_twins preprocess pass verbatim (same _tags/_no_tags shape).
+    "twin_edit": {"stage": _twin_edit_stage, "preprocess": _near_twins_preprocess},
 }
 
 

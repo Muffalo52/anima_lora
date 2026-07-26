@@ -7,8 +7,12 @@ can't reach them) and follows each run by tailing its Phase-0
 ``127.0.0.1`` only) consumed by the CLI (``make daemon*``), the ComfyUI trainer
 node, and (Phase 3) an MCP server.
 
-    python -m anima_daemon [port]       # run the daemon (normally detached)
+    python -m anima_daemon [port]                  # run the daemon (normally detached)
+    python -m anima_daemon submit -- <argv…>       # enqueue a command job
+    python -m anima_daemon wait <job_id>           # block until it's terminal
+    python -m anima_daemon status [job_id]         # one-shot JSON status
 
-Public surface lives in submodules: ``client.DaemonClient`` / ``ensure_daemon``
-for callers, ``manager.JobManager`` + ``server.serve`` for the process itself.
+Public surface lives in submodules: ``client.DaemonClient`` (aliased ``Client``)
+/ ``ensure_daemon`` for callers, ``manager.JobManager`` + ``server.serve`` for
+the process itself, ``cli`` for the submit/wait/status verbs above.
 """

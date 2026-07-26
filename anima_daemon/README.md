@@ -30,6 +30,28 @@ python tasks.py daemon-status     # one JSON object: health + resolved base_url
 curl -s 127.0.0.1:8765/health     # {"ok":true,"pid":…,"active_job":…,"paused":…}
 ```
 
+**Submit → wait → read the result**, the whole agent/bench loop, without writing
+any Python:
+
+```bash
+python tasks.py daemon-run project/directedit_ec/bench/run_bench.py --n 5   # attach + stream
+python tasks.py daemon-run --stall-timeout 0 my_quiet_loop.py       # quiet loop, no watchdog
+python tasks.py daemon-run --queue long_sweep.py                    # detach instead
+JOB=<id> python tasks.py daemon-wait          # block; print record + result envelope
+JOB=<id> python tasks.py daemon-status        # one record, envelope inlined
+```
+
+`daemon-run` exits with the job's own exit code (so `&&` chains work), ctrl-C
+detaches, and `--label NAME` overrides the auto-derived label. The same three
+verbs exist inside the package for callers that can't import `tasks.py` (a
+vendored node tree, a bare checkout):
+
+```bash
+python -m anima_daemon submit [--label L] [--stall-timeout S] [--wait] [--hold] -- <argv…>
+python -m anima_daemon wait <job_id> [--timeout S]      # exit = job's exit code, 124 on timeout
+python -m anima_daemon status [job_id]
+```
+
 `daemon-status` is the one-shot answer to "is anything running and where do I
 talk to it" — scripts and agents should start there instead of assuming a port.
 Each compact job carries a derived `target` (what it operates on — the soup
@@ -44,7 +66,14 @@ python tasks.py daemon-status --state done     # exact state(s), comma-separated
 python tasks.py daemon-status --limit 40       # raise/lower the cap
 python tasks.py daemon-status --all            # no cap (full history)
 python tasks.py daemon-status --full           # raw records, not compact
+python tasks.py daemon-status --job <id>       # ONE record, full, + its result envelope
 ```
+
+`--state` validates its argument against the six real states and errors (exit 2)
+on anything else — a typo (or a job id passed where a state belongs) used to
+return `jobs_shown: 0`, which reads exactly like "the job vanished". To look up
+one job use `--job <id>` (or `JOB=<id>`); that path also reads the on-disk record
+when the daemon is down, so post-mortems don't need a live daemon.
 
 The port is **not** guaranteed to be 8765: if a stranger holds that port the
 daemon falls back to an OS-chosen one and records it in the pidfile. Always
@@ -109,10 +138,22 @@ Command job:
   "argv": ["tasks.py", "preprocess-config", "..."],
   "extra_env": {"FOO": "bar"},
   "chain_train": {"method": "lora", "preset": "default", "methods_subdir": "gui-methods", "overrides": {}},
+  "stall_timeout": 600,
   "start": true
 }
 ```
 `argv` is required (non-empty list). `chain_train` is optional.
+
+`stall_timeout` (seconds) overrides the **stall watchdog** budget for this job —
+the daemon kills a command job whose `stdout.log` + `progress.jsonl` have both
+frozen for 120 s by default, so a wedged download can't park the queue. A
+legitimately quiet loop (embed/eval between prints) should raise it, or pass `0`
+to opt out entirely, rather than teach the script about the watchdog. Two other
+guards make false kills unlikely: the watchdog also samples the job's
+**process-tree CPU time** and spares a quiet-but-computing tree (up to 8× the
+budget, after which a busy-spinning deadlock is still killed), and
+`bench/_common.py::start_heartbeat()` is a one-line stdout keep-alive for scripts
+that prefer to self-announce.
 
 `start` controls the queue gate: `true` → run now (resume queue), `false` → add
 but hold the queue paused, omitted/`null` → leave the gate as-is.
@@ -131,14 +172,8 @@ The job record plus two live fields:
 - `latest` — last event from `progress.jsonl` (training progress; `null` for command jobs)
 - `stale_for` — seconds since the last progress tick (heartbeat staleness)
 
-A GPU job that writes a bench envelope (`write_result` in `bench/_common.py`) gets two
-more fields on the terminal transition (Phase 1a — result-envelope lift): the
-daemon exports `ANIMA_DAEMON_JOB_ID` / `ANIMA_DAEMON_JOB_DIR` into every job's
-env, the script drops a `result_path.json` pointer into its job dir, and the
-monitor lifts it into `result_path` (abs path to `result.json`) +
-`result_summary` (`{label, metrics}` digest). Both `null` for a job that wrote
-no envelope (training, inference). The artifacts stay under
-`bench/<m>/results/`; the daemon holds only a pointer + digest.
+plus `result_path` / `result_summary` once terminal — see *Where did my run land*
+below.
 
 ### `GET /jobs/{id}/progress` — query the structured progress stream
 
@@ -232,7 +267,7 @@ Pure stdlib (`urllib`) — imports without dragging in `library.*`/torch, so it'
 safe to call from anywhere.
 
 ```python
-from anima_daemon.client import DaemonClient, ensure_daemon
+from anima_daemon.client import DaemonClient, ensure_daemon   # `Client` is an alias
 
 client = ensure_daemon()          # start-if-needed, returns a live client
 # or: client = DaemonClient()     # attach only; assumes one is up
@@ -247,16 +282,11 @@ r = client.submit(
 )
 job_id = r["job_id"]
 
-# poll to completion
-import time
-while True:
-    job = client.get(job_id)
-    if job["state"] in ("done", "error", "stopped"):
-        break
-    time.sleep(2.0)
-print(job["state"], job.get("error"), job.get("ckpt_path"))
+# block until it's terminal (don't hand-roll a poll loop)
+job = client.wait(job_id)                     # optional: poll=…, timeout=…
+print(job["state"], job.get("error"), job.get("result_path"))
 
-# stream logs instead of polling
+# stream logs instead of waiting (ends on its own once the job is terminal)
 for line in client.stream_logs(job_id):
     print(line)
 
@@ -267,12 +297,56 @@ client.stop(job_id)               # or client.stop() for the active job
 client.list_jobs()
 ```
 
-`submit_command(label=…, argv=[…], chain_train=…)` submits a command job. All
-methods map 1:1 onto the endpoints above.
+`submit_command(label=…, argv=[…], chain_train=…, stall_timeout=…)` submits a
+command job. All methods map 1:1 onto the endpoints above, with two client-side
+extras:
+
+- **`wait(job_id, poll=5.0, timeout=None)`** — block to a terminal state and
+  return the final record. Interval ramps 0.25s → `poll`, so a one-second command
+  job returns promptly and a 12-hour run costs one cheap request per `poll`.
+  Raises `LookupError` for an unknown id and `TimeoutError` on `timeout` (a
+  still-running job must never read as an outcome).
+- **`job_record(job_id)`** — one record, falling back to the on-disk `job.json`
+  when HTTP fails. This is why `wait` survives the eager stale-code restart
+  mid-poll.
 
 `ensure_daemon(expected_root=…)` refuses to attach to a daemon belonging to a
 different checkout if that daemon still has live jobs — pass your repo root when
 correctness across checkouts matters.
+
+## Where did my run land — the result-envelope lift
+
+A GPU job that produces an artifact record gets it **lifted onto the job record**
+on the terminal transition (Phase 1a), so "where did my run land, and what did it
+say" is one command instead of a job-dir spelunk. Two producers ship today:
+
+| producer | writes | typical job |
+|----------|--------|-------------|
+| `bench/_common.py::write_result` | `bench/<m>/results/<ts>[-label]/result.json` | any bench / probe script |
+| `inference.py::write_gen_manifest` | `<job_dir>/gen_manifest.json` | `make gen` batch generation |
+
+The mechanism is one pointer file. The daemon exports `ANIMA_DAEMON_JOB_ID` /
+`ANIMA_DAEMON_JOB_DIR` into every job's env; a producer that sees `JOB_DIR` drops
+`<job_dir>/result_path.json` → `{"path": "<abs path to the envelope>"}`; the
+monitor follows it and records `result_path` (absolute) plus `result_summary`
+(`{label, metrics}`, lifted opaquely — the envelope schema stays bench-owned).
+Both stay `null` for a job that wrote no envelope (training, plain inference), and
+the artifacts themselves never move: the daemon holds a pointer and a digest.
+
+**Writing one** needs no daemon-specific code — `write_result(run_dir,
+script=__file__, args=args, metrics={…})` already drops the pointer when it's
+running under the daemon, and is a plain envelope write when it isn't. **Reading
+one back**:
+
+```bash
+JOB=<id> python tasks.py daemon-status   # full record + envelope inlined under "result"
+JOB=<id> python tasks.py daemon-wait     # block first, then the same
+python tasks.py daemon-status --all      # every job's result_path (pointer only)
+```
+
+The compact `daemon-status` list carries `result_path` but **not**
+`result_summary`: a bench `metrics` blob can run hundreds of lines (per-pair
+records, per-step curves) and would swamp the overview.
 
 ## Observing without HTTP
 
@@ -336,8 +410,16 @@ becomes real again.
 
 - **Localhost only.** No remote, no auth — the caller must run on the same machine.
 - **Serial queue.** One job runs at a time; submitting while one runs enqueues.
-- **No blocking wait.** Completion is poll-based (`GET /jobs/{id}`) or stream-based
-  (`/jobs/{id}/logs` ends with an `eof` event); there is no "submit and block" call.
+- **No blocking wait *endpoint*.** The HTTP surface is poll-based
+  (`GET /jobs/{id}`) or stream-based (`/jobs/{id}/logs`, which ends with an `eof`
+  event and then closes the connection). Blocking lives on the client:
+  `DaemonClient.wait()` / `make daemon-wait JOB=<id>`.
+- **SSE responses are one-per-connection.** `_open_sse` sends `Connection: close`
+  and sets `close_connection`: an SSE body has no `Content-Length` and no chunked
+  framing, so the client's only EOF signal is the socket closing. Keeping the
+  connection alive (the HTTP/1.1 default) made every consumer hang forever *after*
+  the `eof` event — including `make daemon-attach` on an already-finished job.
+  Don't "optimize" that header back to keep-alive.
 - **Port drift.** Resolve from the pidfile, not a constant — the daemon may bind
   an ephemeral port. `DaemonClient()` and `ensure_daemon()` handle this.
 - **`config_snapshot` vs re-resolve.** Without a snapshot/file the daemon
@@ -345,6 +427,16 @@ becomes real again.
   snapshot when you need bit-stable config across a queued delay.
 - **Command-job progress.** `latest`/`progress.jsonl` are training-only; a
   command job exposes only `state` + `stdout.log` until it exits.
+- **Stall watchdog on quiet command jobs.** 120 s of frozen output is a kill by
+  default (with a process-tree CPU cross-check). If your loop is legitimately
+  silent for longer, submit with `stall_timeout` (`--stall-timeout` on
+  `daemon-run` / `python -m anima_daemon submit`; `0` disables) or call
+  `bench/_common.py::start_heartbeat()`. The kill shows up as `state: error` with
+  `stalled: no output for …` in `error`.
+- **Agent-launched GPU work must go through the daemon.** A GPU process started
+  from an agent's background shell gets SIGKILLed by the harness sandbox after
+  ~1 min with no trace; `daemon-run` (or `POST /jobs` kind=command) is the
+  supported path.
 
 ## MCP bridge (`mcp.py`)
 

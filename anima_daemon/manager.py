@@ -44,6 +44,18 @@ logger = logging.getLogger("anima.daemon")
 _POLL_INTERVAL = 1.0  # seconds between liveness checks
 _SENTINEL = "__stop__"
 
+# Stall watchdog, CPU-activity arm (see _stall_reason / _tree_cpu_advancing).
+# Once a job's output has frozen past its budget we sample its process tree's
+# CPU time: a *quiet but computing* job (an embed/eval loop between prints) keeps
+# burning cycles, while a wedged one (stalled socket, deadlock) burns none. Only
+# a frozen-and-idle job is killed — until `budget × _STALL_CPU_GRACE` of silence,
+# after which we kill regardless, so a busy-spinning deadlock can't park the
+# queue forever. job_id → (wall, cpu_seconds, verdict).
+_CPU_SAMPLES: dict[str, tuple[float, float, bool]] = {}
+_CPU_SAMPLE_MIN_GAP = 5.0  # seconds between samples (a short gap measures noise)
+_CPU_BUSY_FRAC = 0.05  # ≥5% of one core, averaged over the gap → "computing"
+_STALL_CPU_GRACE = 8.0  # hard ceiling multiplier on the configured budget
+
 # Signal → user-actionable hint, for a process that died without writing a
 # run_end event. POSIX ``Popen.poll()`` reports a signal death as a negative
 # number; a shell/launcher layer (``accelerate launch``) relays it as 128+N.
@@ -154,6 +166,7 @@ class JobManager:
         config_file: Optional[str] = None,
         start: Optional[bool] = None,
         captured_env: Optional[dict] = None,
+        stall_timeout: Optional[float] = None,
     ) -> Job:
         """Enqueue a plain ``python <argv>`` task (preprocess / mask).
 
@@ -166,7 +179,11 @@ class JobManager:
         ``chain_train`` (``{method, preset, methods_subdir}``) makes this an
         auto-chain step: on successful completion the daemon enqueues that
         training job itself (see ``_finalize``), so the chain runs to the end
-        even if the GUI that started it has since closed."""
+        even if the GUI that started it has since closed.
+
+        ``stall_timeout`` overrides the 120 s command-job stall budget for this
+        job (0 disables it) — the supported way to run a legitimately quiet
+        embed/eval loop without a stdout heartbeat (see ``_stall_reason``)."""
         job = Job(
             id=new_job_id(),
             method=label,
@@ -176,6 +193,7 @@ class JobManager:
             extra_env=dict(extra_env or {}),
             captured_env=dict(captured_env or {}),
             chain_train=dict(chain_train) if chain_train else None,
+            stall_timeout=stall_timeout,
         )
         self._attach_config_file(
             job, config_snapshot=config_snapshot, config_file=config_file
@@ -558,12 +576,25 @@ class JobManager:
         (it never legitimately goes quiet for more than a model-load), while a
         train job is unwatched by default (budget 0 → skipped here) because its
         silent first-step torch.compile trace would false-positive; it can be
-        opted in via ANIMA_DAEMON_JOB_STALL_TIMEOUT.
+        opted in via ANIMA_DAEMON_JOB_STALL_TIMEOUT. A submitter that knows its
+        loop goes quiet sets ``stall_timeout`` on the job (0 → unwatched), which
+        wins over both defaults — the supported alternative to hand-rolling a
+        stdout heartbeat in every long-quiet bench script.
+
+        Frozen output alone is not proof of a wedge: an embed/eval loop is quiet
+        *and computing*. So past the budget we also sample the process tree's CPU
+        time and only fire once the tree has gone idle too — up to
+        ``_STALL_CPU_GRACE ×`` the budget, after which we fire regardless so a
+        busy-spinning deadlock can't hold the queue forever.
         """
         timeout = (
-            config.CMD_STALL_TIMEOUT
-            if job.kind == "command"
-            else config.JOB_STALL_TIMEOUT
+            job.stall_timeout
+            if getattr(job, "stall_timeout", None) is not None
+            else (
+                config.CMD_STALL_TIMEOUT
+                if job.kind == "command"
+                else config.JOB_STALL_TIMEOUT
+            )
         )
         if not timeout or timeout <= 0 or job.started_at is None:
             return None
@@ -577,13 +608,49 @@ class JobManager:
                 continue
         idle = time.time() - last
         if idle < timeout:
+            _CPU_SAMPLES.pop(job.id, None)  # output flowing again → forget samples
+            return None
+        busy = JobManager._tree_cpu_advancing(job)
+        if busy and idle < timeout * _STALL_CPU_GRACE:
             return None
         where = JobManager._last_output_line(job)
         detail = f" last output: {where!r}" if where else " (no output captured)"
+        if busy:
+            detail += (
+                f" (process tree still burning CPU, but silent past "
+                f"{_STALL_CPU_GRACE:g}× the budget — raise or disable it with "
+                "stall_timeout on submit if this run is healthy)"
+            )
         return (
             f"stalled: no output for {int(idle)}s (limit {int(timeout)}s); daemon "
             f"killed the job so the queue can advance.{detail}"
         )
+
+    @staticmethod
+    def _tree_cpu_advancing(job: Job) -> bool:
+        """True iff the job's process tree has burned CPU since the last sample.
+
+        Two samples ``_CPU_SAMPLE_MIN_GAP`` apart are needed for a meaningful
+        rate, so the first look (and any call inside the gap) reuses the previous
+        verdict — starting optimistic, since a job we've never sampled is more
+        likely mid-compute than wedged. Unreadable CPU times (pid gone, no
+        permission) return False so the watchdog falls back to its historical
+        output-mtime-only behaviour rather than becoming un-fireable.
+        """
+        cpu = proc.tree_cpu_seconds(getattr(job, "pid", None))
+        if cpu is None:
+            return False
+        now = time.time()
+        prev = _CPU_SAMPLES.get(job.id)
+        if prev is None:
+            _CPU_SAMPLES[job.id] = (now, cpu, True)
+            return True
+        gap = now - prev[0]
+        if gap < _CPU_SAMPLE_MIN_GAP:
+            return prev[2]
+        verdict = (cpu - prev[1]) / gap >= _CPU_BUSY_FRAC
+        _CPU_SAMPLES[job.id] = (now, cpu, verdict)
+        return verdict
 
     @staticmethod
     def _last_output_line(job: Job, *, max_bytes: int = 8192) -> Optional[str]:
@@ -644,6 +711,7 @@ class JobManager:
         error: Optional[str] = None,
         detail: Optional[str] = None,
     ) -> None:
+        _CPU_SAMPLES.pop(job.id, None)  # drop the watchdog's CPU-rate samples
         with self._lock:
             job.state = state
             job.ended_at = time.time()

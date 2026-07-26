@@ -53,6 +53,11 @@ GPU_GUARD_DELAY = float(os.environ.get("ANIMA_DAEMON_GPU_DELAY", "2.0"))
 # first step is legitimately silent for the whole torch.compile trace (can reach
 # minutes), and a false kill mid-compile costs more than the rare hung run. Opt
 # training in via ANIMA_DAEMON_JOB_STALL_TIMEOUT.
+#
+# Both are only *defaults*: a submitter that knows its loop goes quiet passes
+# `stall_timeout` on POST /jobs (0 → unwatched) and that wins per job. The
+# watchdog also cross-checks process-tree CPU time before firing, so a
+# quiet-but-computing job isn't killed for being silent (manager._stall_reason).
 CMD_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_CMD_STALL_TIMEOUT", "120"))
 JOB_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_JOB_STALL_TIMEOUT", "0"))
 

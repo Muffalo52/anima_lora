@@ -66,6 +66,13 @@ class Job:
     chain_train: Optional[dict] = None
     chained_job_id: Optional[str] = None
 
+    # Per-job stall-watchdog budget in seconds, overriding the per-kind default
+    # (config.CMD_STALL_TIMEOUT / JOB_STALL_TIMEOUT). 0 disables the watchdog for
+    # this job; None means "use the default". Quiet-but-alive is the normal shape
+    # of an embed/eval loop, so a submitter that knows its loop goes silent for
+    # minutes sets this instead of hand-rolling a stdout heartbeat.
+    stall_timeout: Optional[float] = None
+
     # Set on a chain-spawned follow-on train job → skip the pre-launch GPU guard:
     # the daemon just ran the preceding step on this same serial queue, so
     # guarding here only races the just-exited step's not-yet-released VRAM.
