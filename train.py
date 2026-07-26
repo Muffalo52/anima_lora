@@ -145,9 +145,16 @@ import logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+def init_compile():
+    """
+    PyTorch 2.x ContextVars 스레드 로컬 설정 대응:
+    Dynamo 재컴파일 한도를 8192로 늘려 FailOnRecompileLimitHit 방지
+    """
+    torch._dynamo.config.cache_size_limit = 8192
 
 class AnimaTrainer:
     def __init__(self):
+        init_compile()
         self.sample_prompts_te_outputs = None
         self._padding_mask_cache = {}
         # Per-method extensions (EasyControl, IP-Adapter, …). Resolved
@@ -2125,6 +2132,7 @@ class AnimaTrainer:
         )
 
     def train(self, args):
+        init_compile()
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
         normalize_sample_args(args)
