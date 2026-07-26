@@ -703,6 +703,11 @@ def _log_step(
                 logs["opt/grad_l1_ema"] = pg.get("grad_l1_ema", 0.0)
                 logs["opt/function_value_ema"] = pg.get("function_value_ema", 0.0)
                 logs["opt/ip_term"] = pg.get("ip_term", 0.0)
+
+        if hasattr(raw_opt, "kourkoutas_helper") and raw_opt.kourkoutas_helper is not None:
+            kb_stats = getattr(raw_opt.kourkoutas_helper, "last_beta2_stats", {})
+            if "mean" in kb_stats:
+                logs["opt/kourkoutas_beta2_mean"] = kb_stats["mean"]        
         # ----------------------------------------
         trainer.step_logging(state.accelerator, logs, state.global_step, epoch + 1)
 
