@@ -1,43 +1,47 @@
 # sigma_lowres — roadmap
 
 Status: Phase 0 DONE (spectral mechanism refuted, σ-map measured), Phase 1a
-DONE (ratio transfer FAILED), pooled-gradient probe DONE 2026-07-25 (the
-SGD-aggregate view: gap_896 ≈ 0 at σ ≥ 0.625 — per-image residuals cancel in
-the batch gradient; redundancy trend null, so no image-targeting lever). Safe
-set = {1024→896 @ σ>0.5}, ~13–14% wall-clock ceiling, now supported at both
-per-image and batch-aggregate level. The line is **paused at a decision
-point**: the payoff is real but small, and the next cheap probe (1280→1024)
-decides whether it grows.
+DONE (ratio transfer FAILED), pooled-gradient probe DONE 2026-07-25,
+**1280→1024 probe DONE 2026-07-26** (Q1 answered: ratio refuted as governor,
+capacity predicts the ordering, but the safe threshold is route-dependent —
+1280→1024 floors at σ ≥ ~0.75–0.875, not 0.5; report.md "1280→1024 probe").
+Safe set = {1024→896 @ σ>0.5, 1280→1024 @ σ>σ\*∈(0.625,0.875)}. The cheap
+harness for off-corpus tiers now exists (`prep_1280_probe.py` probe-local
+cache + `--data_root` — no corpus re-preprocess, ~47 min/probe).
 
-## Next: the 1280→1024 discriminating probe (observability, cheap)
+## Next: σ-window refinement (localize σ\* for 1280→1024)
 
-Settles ratio-vs-capacity (questions.md Q1). Steps:
+`run_sigma_probe.py --sigma_window 0.5,1.0 --bins 5` on the same probe-local
+cache — all bins in the crossover region (centers 0.55…0.95). **Started
+2026-07-26, deprioritized at 5/24 images** (partial rows
+`bench/results/20260726-2109/`; same command re-runs) in favor of the
+prior-distance discriminator, which landed the same day (groundings.md G6:
+no 1280 discontinuity, prior ↮ Floor — the Floor is graph-side). Payoff of resuming is gate-position-sensitive: σ\* ≈ 0.65 →
+~9% epoch saving on 1280-tier data, σ\* ≈ 0.75 → ~5%. Then the decision
+point:
 
-1. Re-preprocess a small set of high-res sources at `--target_res` including
-   the 1280 tier (probe set only — not the full corpus).
-2. VRAM check at 6300 tokens on the probe harness (may need `--grad_ckpt`;
-   remember [[feedback_default_block_compile]] — block-compile first on OOM).
-3. `run_sigma_probe.py --tier 1280 --demote_edges 1024,896` — pre-register:
-   capacity-governor predicts gap_1024 in the reenc band at σ ≥ 0.5;
-   ratio-governor predicts it stays elevated like 896→768.
+- The corpus has no 1280 tier today (`target_res = [1024, 896]`), so the new
+  route's practical value is conditional on adopting one; the map/paper value
+  (3-route boundary σ\*(route)) is already banked.
+- Phase 1b remains gated on judging {1024→896 @ σ>0.5} (~13–14%) + any
+  adopted-1280 increment worth the dual-cache complexity.
 
-Outcomes:
-- **PASS** → safe set gains its biggest per-draw route (0.65×); ceiling rises
-  above ~14% on high-tier-heavy data; Phase 1b becomes clearly worth building.
-- **FAIL** → ratio governs, the map is closed at one route, and Phase 1b is
-  a judgment call on ~14% alone (likely: line closes as a finding).
+## Phase 1b — trainer wiring **[BUILT 2026-07-26]** + the gate **[OPEN]**
 
-## Phase 1b — trainer wiring + the gate (build only after the probe)
+Wiring shipped opt-in (`--sigma_lowres`, route pinned to 1024→896 @ σ>0.5) —
+full description in `methods.md` §"Phase 1b trainer wiring". Key deviations
+from the sketch below: σ is drawn trainer-side (σ-first via
+`draw_flat_sigmas`, single source of density truth) rather than at batch
+assembly, and the sibling cache is an **in-npz key** (`demoted_{H}x{W}`, `make
+preprocess-demote`) rather than a stem-suffixed file — reconcile and bucket
+discovery needed no changes at all.
 
-- σ drawn at batch-assembly time; σ > 0.5 → fetch the one-tier-down sibling
-  cache (stem-suffixed, autoscale-emit pattern as design reference — its
-  runtime was stripped 2026-06-28, do not resurrect blindly).
-- Requires dual caches for demotable tiers (preprocess emit + reconcile
-  support) — the complexity that must be paid for by the measured ceiling.
-- **Gate**: fixed-steps A/B on ≥1 artist set — CMMD non-inferior (within-run
+- **Gate (still owed)**: fixed-steps A/B — CMMD non-inferior (within-run
   usage only, per `project_cmmd_val_signal`) + rendered spot-check + realized
-  wall-clock logged. Ship opt-in only. Pitch is wall-clock at fixed steps,
-  never "more steps in the same time" (autoscale lesson).
+  wall-clock logged. First A/B in flight: `tenth` preset × 4 epochs,
+  `--sigma_lowres` arm vs baseline. Pitch is wall-clock at fixed steps,
+  never "more steps in the same time" (autoscale lesson). CMMD regression →
+  close the line (pre-committed).
 
 ## Phase 1c — bespoke loops (EC / turbo) — gated on separate probes
 

@@ -331,6 +331,12 @@ class REPAMethodAdapter(MethodAdapter):
     """
 
     name = "repa"
+    # Grid-agnostic: aligns the PRIMARY forward's captured tokens to the
+    # encoder grid via adaptive pooling — a σ-demoted latent grid pools the
+    # same way (aspect/orientation preserved by demote_bucket_for), so the
+    # sigma_lowres swap is structurally sound here. Its aux-loss gradient at
+    # the demoted grid rides the same A/B gate as the FM loss.
+    sigma_demote_safe = True
 
     def __init__(self) -> None:
         self._captured: Optional[torch.Tensor] = None

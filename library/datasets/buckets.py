@@ -113,6 +113,53 @@ def token_counts_for_sample_prompts(prompts) -> set:
     return counts
 
 
+# The single measured-safe σ-demote route (sigma_lowres Phase 1b): images in the
+# 1024 tier train on an 896-tier sibling latent when the step's σ draw exceeds
+# the gate threshold. 896→768 FAILED its probe and 1280→1024 floors at a
+# different σ* — do not add routes here without their own per-σ-bin gradient
+# probe (project/sigma_lowres/bench/run_sigma_probe.py).
+SIGMA_DEMOTE_ROUTE: Tuple[int, int] = (1024, 896)
+
+
+def demote_bucket_for(
+    width: int,
+    height: int,
+    native_edge: int,
+    demote_edge: int,
+    max_ratio: "float | None" = None,
+) -> "tuple[int, int] | None":
+    """σ-demote sibling grid ``(W', H')`` for a native free-fit bucket, or None.
+
+    Returns the demoted free-fit bucket only when ``(width, height)`` actually
+    sits in ``native_edge``'s token band — images native to lower tiers (e.g.
+    896 originals on the 1024→896 route) return None and train as-is. Pure and
+    deterministic: the preprocess sibling emit and the trainer's σ-conditional
+    fetch both call this, so they derive the identical demoted grid.
+    """
+    if max_ratio is None:
+        max_ratio = DEFAULT_FREEFIT_MAX_RATIO
+    lo, hi = freefit_band_for_edge(native_edge)
+    tok = (width // 16) * (height // 16)
+    if not (lo <= tok <= hi):
+        return None
+    return freefit_bucket(width, height, freefit_band_for_edge(demote_edge), max_ratio)
+
+
+def demoted_token_counts(resos, native_edge: int, demote_edge: int) -> set:
+    """Distinct token counts the σ-demote siblings of ``resos`` will run at.
+
+    Unioned into the torch.compile token budget (``train.py::_derive_token_budget``)
+    when sigma_lowres is on, so a demoted forward lands inside the compiled
+    dynamic-seq range instead of raising ConstraintViolationError mid-run.
+    """
+    counts: set = set()
+    for w, h in resos:
+        bucket = demote_bucket_for(w, h, native_edge, demote_edge)
+        if bucket is not None:
+            counts.add((bucket[0] // 16) * (bucket[1] // 16))
+    return counts
+
+
 def choose_edge(width: int, height: int, target_res) -> int:
     """Assign an image to the tier that resizes it the *least*.
 

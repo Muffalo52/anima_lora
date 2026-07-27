@@ -260,6 +260,11 @@ COMMANDS = {
         'target_res (dry-run; ARGS="--delete" to act). Run after changing tiers.',
     ),
     "preprocess-vae": (preprocess.cmd_preprocess_vae, "Cache VAE latents"),
+    "preprocess-demote": (
+        preprocess.cmd_preprocess_demote,
+        "Emit σ-demote sibling latents (sigma_lowres: 1024→896 keys inside "
+        "the native npz) for --sigma_lowres training",
+    ),
     "preprocess-te": (preprocess.cmd_preprocess_te, "Cache text encoder embeddings"),
     "preprocess-captions": (
         preprocess.cmd_preprocess_captions,

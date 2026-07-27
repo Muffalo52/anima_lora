@@ -449,6 +449,36 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="Restrict training sigma range: maximum sigma (0.0~1.0). Default 1.0.",
     )
     parser.add_argument(
+        "--sigma_lowres",
+        action="store_true",
+        help="σ-conditional low-res training (sigma_lowres Phase 1b): when a "
+        "step's σ draw exceeds --sigma_lowres_threshold, train on the 896-tier "
+        "sibling latent (the demoted_* npz key emitted by `make "
+        "preprocess-demote`) instead of the native 1024-tier latent. Only the "
+        "measured-safe 1024→896 route; images native to other tiers train "
+        "as-is. Opt-in; plain train.py methods only (bespoke adapter loops "
+        "need their own operating-point probe).",
+    )
+    parser.add_argument(
+        "--sigma_lowres_threshold",
+        type=float,
+        default=0.5,
+        help="σ gate for --sigma_lowres: demote only when every σ in the batch "
+        "exceeds this. 0.5 is the measured-safe boundary for 1024→896 — lower "
+        "values are OUTSIDE the probe's safe region.",
+    )
+    parser.add_argument(
+        "--paired_step_rng",
+        action="store_true",
+        help="Common-random-numbers mode for A/B arms: draw each train step's "
+        "σ and noise from dedicated per-step-seeded generators (derived from "
+        "--seed + step counter) instead of the global torch stream. Arms "
+        "sharing a seed then see identical (data, σ, noise) sequences, so "
+        "checkpoint differences isolate the intervention (e.g. --sigma_lowres "
+        "thresholds) instead of noise-lottery divergence. Statistically "
+        "equivalent to the default draw; use for paired comparisons.",
+    )
+    parser.add_argument(
         "--loss_type",
         type=str,
         default="l2",

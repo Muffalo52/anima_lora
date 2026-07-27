@@ -556,6 +556,39 @@ def cmd_preprocess_vae(extra):
     )
 
 
+def cmd_preprocess_demote(extra):
+    """Emit σ-demote sibling latents (sigma_lowres Phase 1b, 1024→896).
+
+    Same VAE-load path as ``preprocess-vae``; appends a ``demoted_{H}x{W}``
+    key inside each 1024-tier image's existing native npz. Idempotent.
+    Requires ``preprocess-vae`` to have run first. Pass ``ARGS="--sigma_demote
+    N:D"`` to override the route (probe a new one before shipping it).
+    """
+    pp_args = _preprocess_path_pattern_args(extra)
+    route_args = [] if "--sigma_demote" in extra else ["--sigma_demote", "1024:896"]
+    run(
+        [
+            PY,
+            "scripts/preprocess/cache_latents.py",
+            "--dir",
+            _path("resized_image_dir", "post_image_dataset/resized"),
+            "--cache_dir",
+            _path("lora_cache_dir", "post_image_dataset/lora"),
+            "--vae",
+            "models/vae/qwen_image_vae.safetensors",
+            "--batch_size",
+            "1",
+            "--chunk_size",
+            "0",
+            "--recursive",
+            "--no_half_vae",
+            *route_args,
+            *pp_args,
+            *extra,
+        ]
+    )
+
+
 _QWEN3_TOKENIZER = "models/text_encoders/qwen_3_06b_base.safetensors"
 
 

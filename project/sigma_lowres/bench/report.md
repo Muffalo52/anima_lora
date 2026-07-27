@@ -114,7 +114,8 @@ probes passed: the σ=1 endpoint bin (`results/20260724-2101-endpoint/` —
 input pure ε, gaps −0.01/0.13/0.33 for 896/768/512, all in pre-committed
 bands) and the x-zero probe (`results/20260724-2136-xzero/` — x=0 in input
 AND target; 512 xz ≈ endpoint ⇒ Floor graph-dominated). See hypothesis.md
-for the full account and outcome matrix.
+for the account and groundings.md for the full test records (G1/G2) +
+outcome matrix.
 
 ## Phase Q2 (2026-07-25): per-module / per-block Floor localization
 
@@ -221,11 +222,146 @@ between merges — ~19 GB transient under the run dir, deleted at the end) and
 per-image gradient lists are freed eagerly. Verified bit-identical to the
 in-RAM path.
 
+## 1280→1024 probe (2026-07-26): ratio governor REFUTED; the threshold is route-dependent
+
+Run: `results/20260726-2017/` — the cheap variant (24 images, 4 uniform
+σ-bins × 4 draws + σ=1 endpoint, arms native×2 + reenc + 1024, `--pool 8`;
+**47 min vs Phase 0's 2.6 h**). Data: probe-local 1280-tier cache built by
+`prep_1280_probe.py` — **no corpus re-preprocess** (and none wanted: on-disk
+caches are the source of truth for training buckets, so an in-corpus 1280
+tier would silently leak into the next run). 36 sources ≥ 6300 native tokens
+(2454/3008 of the corpus qualify), redundancy-stratified ≤3/artist,
+production resize + VAE chains (so reenc stays a genuine encode-chain
+control), TE caches symlinked (text-only). `--data_root` threads the
+alternate root through the probe. Instrument valid: gap_reenc |mean| ≤
+0.048, split-half 0.56–0.89. No OOM at 6300 tokens under block compile
+(budget 0.99).
+
+| σ bin | 0.125 | 0.375 | 0.625 | 0.875 | 1.0 |
+|---|---|---|---|---|---|
+| gap_1024 | .176 | .160 | **.096** | **−.015** | .077† |
+| gap_reenc | .048 | −.005 | .047 | .020 | −.011 |
+| pooled gap_1024 | .080 | .082 | .031 | **.006** | **.007** |
+| pooled norm_gap_1024 | .101 | .093 | .029 | .002 | .025 |
+
+† endpoint mean is one outlier (`asou_(asabu202)/6278695`, gap +1.13, the
+highest-redundancy image in the set); median 0.008, mean without it ≈ 0.03,
+pooled 0.007 — the σ=1 bin is in-band by every robust read.
+
+- **Both single-governor pre-registrations miss, asymmetrically.** The
+  capacity prediction ("in band at σ ≥ 0.5") fails at the 0.625 bin (0.096
+  ± 0.028, ~2 SEM above its control). The ratio prediction ("stays elevated
+  like 896→768") fails harder: 896→768 never reached the band at any σ,
+  while 1280→1024 is cleanly in-band at 0.875 and σ=1, per-image and pooled.
+- **The ordering discriminates: ratio is refuted as the governor.**
+  1280→1024 (ratio 0.80) floors by σ ≈ 0.75 despite being *more aggressive
+  by ratio* than the never-flooring 896→768 (0.857). Absolute target
+  capacity (4116 vs 3012 tokens) predicts exactly this ordering.
+- **What replaces "σ > 0.5" is a route-dependent crossover σ\*(route)**:
+  ≈ 0.5 for 1024→896, somewhere in (0.625, 0.875) for 1280→1024, > 0.95 (or
+  nonexistent) for 896→768. Consistent with hypothesis.md's smoothness
+  reading — no universal invariant, safety = how well the coarse graph
+  approximates the fine one, which degrades with both ratio *and* absolute
+  coarseness.
+- Pool view agrees and sharpens (as in pool4): pooled gap ≈ 0 at σ ≥ 0.875,
+  0.031 at 0.625. Redundancy trend at 3 strata: −0.5, too few strata to
+  read (noted only).
+- **Practical residue is gate-position-sensitive**: per-draw saving on a
+  1280-tier image is 0.65×, but at the trainer's σ-density the mass above
+  the gate matters — σ > 0.75 captures ~14% of draws (~5% epoch saving) vs
+  ~27% if σ\* resolves near 0.65 (~9%). Hence the σ-window refinement below.
+  NB the corpus currently has **no 1280 tier** (`target_res = [1024, 896]`);
+  the route pays only if a 1280 tier is adopted — today's value is the
+  ratio-vs-capacity discrimination and the third point on the (route, σ) map.
+
+Follow-ups: the σ-window refinement (`--sigma_window 0.5,1.0`, bins packed
+into the crossover region) was started then **deprioritized at 5/24 images**
+(partial rows in `results/20260726-2109/`; same command re-runs it) in favor
+of the **forward-only prior-distance probe** (`run_prior_distance.py`,
+`results/20260726-2120/`, 4.5 min) — result in groundings.md G6
+("prior-distance probe"): no discontinuity at the training-distribution edge
+(the checkpoint's prior distinguishes 1280-vs-1024 as much as trained
+pairs), and prior distance dissociates from the gradient Floor → the
+Floor's route-ordering lives in the graph (J) factor, not the prior.
+Its σ-resolved v2 (`--sigmas`, mean-residual verdict object;
+`results/20260726-2133/`, 16 min) found the residual-distance σ-shape is
+strong but **route-uniform** — groundings.md G7 ("σ-resolved residual
+curve"): gap_e(σ) ≈ A_e·s(σ) + Floor_e with s universal and both A_e and Floor_e
+J-side; the σ\* ordering is not prediction-side. The **iso-severity
+discriminator** (1280→1120, ratio 0.875 matched to 1024→896;
+`results/20260726-2153/`) landed the same day — groundings.md G9:
+**A ~ ratio** (ratio-matched routes coincide despite 1.6× target-capacity
+difference; σ\*(1280→1120) ∈ (0.375, 0.625) ≈ 1024→896's). NB this does
+not conflict with "ratio is refuted as the governor" above — that verdict
+concerns the Floor/σ\*-route-ordering; G9 pins the *S1 amplitude*. The
+division of labor: ratio → S1 amplitude (A_e), absolute target capacity →
+Floor_e.
+
+## Phase 1b in-vivo weight-space A/B (2026-07-27): displacement orders by demoted fraction; the demote signature lives in LATE blocks
+
+First full-training read of the wiring (`--sigma_lowres`, tenth preset ×
+4 epochs, identical 10% subset). Four arms: base (never demote),
+σ>0.75 (~14% of steps demoted), σ>0.5 (~48%), threshold-0 (**every**
+1024-tier step demoted — the outside-safe-region control). Two sweeps:
+
+- **Unpaired (no seed — `tenth4p_*`)**: `train.py` draws a random seed when
+  none is set (`train.py:2282`), so every run gets fresh random-init
+  directions for the non-frozen modules + unseeded stochastics. All pairwise
+  ΔW cosines land at **0.09–0.10 regardless of arm** — the init/noise
+  lottery floor. Weight space is unreadable without pairing. (The lottery
+  was previously masked in whole-checkpoint cosines by the frozen Ortho/SVD
+  bases — compare ΔW = scale·up@down, never raw checkpoints.)
+- **Paired (`--seed 42 --paired_step_rng` — `tenth4s_*`)**: CRN mode (σ +
+  noise from per-step-seeded generators, `library/runtime/noise.py::
+  draw_flat_sigmas(generator=…)`). Lockstep witnessed in the logs: base ≡
+  σ>0.5 arm bit-exact at step 2, all arms tracking to 3–4 decimals through
+  step 10; residual ~1e-4 wobble between should-be-identical prefixes is
+  hardware nondeterminism (flash backward), which chaos then amplifies —
+  absolute cosines below understate similarity; the ordering is the read.
+
+Paired global ΔW cosines (rank-space `(UaᵀUb) ⊙ (DaDbᵀ)` accumulation —
+never materialize up@down; the full-ΔW version eats all RAM):
+
+| pair | cos | demote-set difference |
+|---|---|---|
+| base ↔ σ>0.75 | **0.395** | ~14% of steps |
+| base ↔ σ>0.5 | **0.320** | ~48% |
+| σ>0.75 ↔ σ>0.5 | 0.343 | ~34% |
+| σ>0.5 ↔ thr-0 | 0.245 | ~52% |
+| σ>0.75 ↔ thr-0 | 0.195 | ~86% |
+| base ↔ thr-0 | **0.184** | 100% |
+
+Monotone in demoted-fraction difference, all far above the 0.09 unpaired
+floor. **Depth profile**: the gated arms keep base's late-block structure
+(σ>0.75 vs base climbs to 0.62–0.80 over blocks 22–27; σ>0.5 to
+0.48–0.72) while the always-demote control collapses exactly there
+(0.15–0.19 across blocks 20–26 — its worst blocks, vs 0.42+ at block 27
+for everyone). Unconditional 896 training relearns the late
+(content/detail) blocks; σ-gated demotion largely preserves them. Blocks
+3–5/9–11 are everyone's most chaotic (0.09–0.21) — low-signal directions,
+not a demote effect (uniform across arms).
+
+Verdict: in-vivo confirmation of the map's shape at training scale —
+demote-induced displacement is real, scales with demoted fraction, and is
+concentrated where unconditional low-res training should bite; the σ>0.75
+arm is nearly as close to base as hardware chaos allows. NOT yet the gate:
+CMMD non-inferiority + rendered comparison still decide (renders:
+`output/tests/sigma_ab/` for the unpaired arms, seeds 0–3). Checkpoints:
+`output/ckpt/anima_lora_tenth4{p,s}_*.safetensors`.
+
 ## Caveats
 
 - Single operating point (`anima_soup_sincos`, trained at native tiers). An
   adapter trained mixed-res might equalize its own gradients — untested; any
   reopen should probe a mixed-res-trained operating point first.
+  **In-pool overlap checked (2026-07-26)**: the probe pool contains 2/40
+  `sincos/*` stems (the adapter's fine-tune set; Phase 1a pool has none).
+  No stem-level bias: their per-image gap percentiles scatter 0.0–0.9 with
+  no direction (the one high endpoint read, `7082181` gap_768 = 1.19, is
+  the G3 per-image estimator noise — the same stem ranks *lowest* in
+  Phase-0's high-σ bins), and leave-both-out shifts endpoint means ≤ 0.026
+  (768: 0.127→0.101, 512: 0.326→0.307) — every verdict stays in its
+  pre-registered band.
 - Uniform σ bins; per-bin cosines use 8 draws (floor correspondingly lower at
   mid-σ where ‖g‖ is small — gap subtraction controls this, and reenc stays
   ≈ 0, but absolute cosines across bins are not comparable).

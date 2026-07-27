@@ -1,8 +1,53 @@
 # sigma_lowres — implementation
 
-What exists in code for the σ-conditional low-res gradient line. Everything is
-**observability instrumentation** — no trainer wiring has been built (Phase 1b
-is design-only; see `roadmap.md`).
+What exists in code for the σ-conditional low-res gradient line: the
+observability instrumentation (Measurements A/B below) **and, since
+2026-07-26, the Phase 1b trainer wiring** (next section) — built opt-in
+(`--sigma_lowres`), gate (fixed-steps CMMD A/B) still owed.
+
+## Phase 1b trainer wiring (shipped 2026-07-26, opt-in)
+
+The 1024→896 @ σ>0.5 route, wired end-to-end on the train.py path:
+
+- **Sibling cache**: `make preprocess-demote` appends a `demoted_{H}x{W}` key
+  *inside* each 1024-tier image's existing native npz (pixel-space LANCZOS
+  downscale of the resized PNG to the 896-tier free-fit bucket → VAE
+  re-encode — the probe's measured-safe arm). No sibling files, so bucket
+  discovery, reconcile, and every `{stem}_*_anima.npz` glob consumer are
+  untouched; the key deliberately avoids the `latents_*` prefix (several
+  readers grab the first `latents_*` key). Idempotent per-key; emit lives in
+  `library/preprocess/latents.py::cache_demoted_latents`.
+- **Shared grid derivation**: `library/datasets/buckets.py::demote_bucket_for`
+  (+ `SIGMA_DEMOTE_ROUTE = (1024, 896)`) is the single pure function both the
+  emit and the trainer fetch call — off-route shapes (native-896 originals)
+  return None and always train native.
+- **Dataset**: a `SidecarSpec` channel (`base.py::_try_load_demoted_latent`,
+  enabled via `enable_sigma_demote`) carries `batch["demoted_latents"]`;
+  missing keys degrade that batch to native with a warn-once, never a crash.
+  Train datasets only — validation stays native for arm-comparable val loss.
+- **Trainer** (`train.py::_maybe_sigma_demote`): σ-first draw via
+  `library/runtime/noise.py::draw_flat_sigmas` (split out of
+  `get_noisy_model_input_and_timesteps`, bit-exact — pinned by
+  `tests/test_sigma_lowres.py`), swap to the demoted latent when **every**
+  sample's σ > `--sigma_lowres_threshold` (default 0.5). Exact at
+  `train_batch_size=1`; conservative (fewer demotes, never an unsafe one)
+  above. The σ marginal is untouched — drawn unconditionally from the same
+  density, merely before the noise. Everything downstream (noise, target,
+  padding mask, masked loss interpolation, REPA pooling) derives from the
+  swapped latent. Compile: demoted token counts are unioned into
+  `_derive_token_budget` so the demoted band sits inside the dynamic-seq
+  range. Method adapters are refused unless they declare `sigma_demote_safe`
+  (REPA does — grid-agnostic adaptive pooling; EasyControl/BYG/soft-tokens
+  are refused pending Q5 probes). Density `timestep_sampling` modes
+  (scheduler-grid fallback) have no flat draw → warn once, train native.
+- **Evidence in the run log**: `sigma_lowres ENABLED` at setup, a first-demote
+  INFO with the grid swap + σ, and a demoted-fraction INFO every 500 eligible
+  steps.
+
+Smoke-verified 2026-07-26 (satetsu, 8 steps): native grid (152,108) →
+(130,92) at σ=0.516, checkpoint saved. Invariant tests:
+`tests/test_sigma_lowres.py` (12 — demote grid purity, key-namespace
+isolation, σ-draw bit-exactness, emit round-trip/idempotence/loader).
 
 The line's benches are adopted into this home (`bench/`), including
 `bench/tier_routing/` (the closed Phase-3a gradient-equivalence probe —
@@ -54,7 +99,7 @@ across images, SEM ~0.02), not the per-image ranking that failed there.
 - **CLI**: `--tier <native_edge> --demote_edges <e1,e2,...>` selects the
   operating point (Phase 0 ran 1024→{896,768,512}; Phase 1a ran
   896→{768,512}).
-- **Mechanism flags** (hypothesis.md tests, added 2026-07-24):
+- **Mechanism flags** (groundings.md tests G1/G2, added 2026-07-24):
   `--endpoint_bin` appends an exact σ=1.0 bin (input pure ε → any gap = the
   Floor by construction; `--bins 0 --endpoint_bin` = endpoint-only run).
   `--x_zero` zeroes the image in BOTH input and target on every grid
@@ -78,7 +123,9 @@ across images, SEM ~0.02), not the per-image ranking that failed there.
 
 ## What deliberately does NOT exist
 
-- Trainer wiring (σ-drawn-at-batch-assembly cache switch). Design reference
-  if ever built: the autoscale-emit stem-suffixed sibling-cache pattern —
-  its runtime was stripped 2026-06-28; do not resurrect blindly.
 - Any latent-space downscale path (SwD found it inferior; untested here).
+- Demote routes other than 1024→896, and demotion under fixed-grid adapters
+  (EasyControl / BYG / soft-tokens) — both gated on their own probes (Q1/Q5).
+- Sibling cache *files*: the emit went with in-npz keys instead of the
+  autoscale-era stem-suffixed sibling files (which needed tier-collapse and
+  reconcile special-casing; that pattern stays retired).

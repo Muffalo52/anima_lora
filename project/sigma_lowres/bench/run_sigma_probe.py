@@ -30,7 +30,6 @@ import logging
 import re
 import shutil
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -40,7 +39,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from bench._common import make_run_dir, write_result  # noqa: E402
+from bench._common import make_run_dir, start_heartbeat, write_result  # noqa: E402
 from project.sigma_lowres.bench.tier_routing.redundancy import (  # noqa: E402
     score_corpus,
     select_probe_set,
@@ -69,8 +68,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_images", type=int, default=40)
     p.add_argument("--bins", type=int, default=8, help="uniform σ bins on (0,1)")
     p.add_argument("--draws_per_bin", type=int, default=8)
+    p.add_argument(
+        "--sigma_window",
+        default="0,1",
+        help="LO,HI sub-interval the uniform bins cover (e.g. 0.5,1.0 puts "
+        "every bin in the high-σ crossover region); --endpoint_bin unaffected",
+    )
     p.add_argument("--tier", type=int, default=1024)
     p.add_argument("--demote_edges", default="896,768")
+    p.add_argument(
+        "--data_root",
+        default=None,
+        help="alternate dataset root holding lora/ + resized/ (e.g. the "
+        "probe-local 1280 cache from prep_1280_probe.py); default = "
+        "post_image_dataset",
+    )
     p.add_argument("--artists", default=None, help="csv restriction on the corpus")
     p.add_argument("--max_per_artist", type=int, default=None)
     p.add_argument("--score_limit", type=int, default=None)
@@ -139,39 +151,26 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def start_heartbeat(interval: float = 45.0) -> None:
-    """Unconditional keep-alive line every ``interval`` seconds.
-
-    The daemon's command-job stall watchdog kills anything silent for 120 s
-    (``ANIMA_DAEMON_CMD_STALL_TIMEOUT``), and the probe's longest quiet
-    stretches — the first-call inductor compile and each 64-draw arm — exceed
-    that. A plain daemon thread outlives every silent phase.
-    """
-    t0 = time.time()
-
-    def beat() -> None:
-        while True:
-            time.sleep(interval)
-            print(f"[hb] {time.time() - t0:.0f}s", flush=True)
-
-    threading.Thread(target=beat, daemon=True).start()
-
-
-def bin_sigmas(bins: int, draws: int) -> torch.Tensor:
-    """(bins, draws) σ grid: uniform bins on (0,1), stratified midpoints
+def bin_sigmas(bins: int, draws: int, lo: float = 0.0, hi: float = 1.0) -> torch.Tensor:
+    """(bins, draws) σ grid: uniform bins on (lo, hi), stratified midpoints
     inside each bin. Uniform (not training-density) — per-bin means make the
-    marginal density irrelevant, and σ is the axis under test."""
+    marginal density irrelevant, and σ is the axis under test. The window
+    concentrates all bins in a sub-interval (crossover localization)."""
     b = torch.arange(bins, dtype=torch.float64).view(-1, 1)
     j = (torch.arange(draws, dtype=torch.float64) + 0.5).view(1, -1)
-    return ((b + j / draws) / bins).to(torch.float32)
+    u = (b + j / draws) / bins
+    return (lo + (hi - lo) * u).to(torch.float32)
 
 
-def build_sigmas(bins: int, draws: int, endpoint: bool) -> torch.Tensor:
-    """Uniform-bin grid, optionally with an exact σ=1.0 bin appended.
-    ``--bins 0 --endpoint_bin`` gives an endpoint-only grid."""
+def build_sigmas(
+    bins: int, draws: int, endpoint: bool, lo: float = 0.0, hi: float = 1.0
+) -> torch.Tensor:
+    """Uniform-bin grid over the (lo, hi) window, optionally with an exact
+    σ=1.0 bin appended. ``--bins 0 --endpoint_bin`` gives an endpoint-only
+    grid."""
     parts = []
     if bins > 0:
-        parts.append(bin_sigmas(bins, draws))
+        parts.append(bin_sigmas(bins, draws, lo, hi))
     if endpoint:
         parts.append(torch.ones(1, draws, dtype=torch.float32))
     if not parts:
@@ -448,12 +447,22 @@ def main() -> None:
         args.no_reenc_control = True
     reenc_control = not args.no_reenc_control
     device = torch.device("cuda")
-    sigmas = build_sigmas(args.bins, args.draws_per_bin, args.endpoint_bin)
+    lo, hi = (float(v) for v in args.sigma_window.split(","))
+    if not 0.0 <= lo < hi <= 1.0:
+        raise SystemExit(
+            f"--sigma_window must satisfy 0 <= LO < HI <= 1, got {lo},{hi}"
+        )
+    sigmas = build_sigmas(args.bins, args.draws_per_bin, args.endpoint_bin, lo, hi)
     total_draws = int(sigmas.numel())
 
     log.info("scoring corpus + selecting probe set (3a-compatible)…")
     artists = args.artists.split(",") if args.artists else None
-    records = score_corpus(artists=artists, k=args.quant_k, limit=args.score_limit)
+    records = score_corpus(
+        artists=artists,
+        k=args.quant_k,
+        limit=args.score_limit,
+        data_root=Path(args.data_root).resolve() if args.data_root else None,
+    )
     probe = select_probe_set(
         records, args.num_images, tier=args.tier, max_per_artist=args.max_per_artist
     )

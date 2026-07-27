@@ -1,6 +1,6 @@
 # sigma_lowres — open questions
 
-## Q1 — Ratio or absolute capacity: what governs demotion safety?
+## Q1 — Ratio or absolute capacity: what governs demotion safety? **[ANSWERED 2026-07-26]**
 
 1024→896 (ratio 0.875) passes; 896→768 (ratio 0.857) fails. Two candidate
 governors that the existing data cannot separate:
@@ -9,10 +9,16 @@ governors that the existing data cannot separate:
 - **Absolute target capacity**: safety needs enough tokens at the demoted grid
   (~4k?) → 1280→1024 (4116 tok target vs the passing 3012) should PASS.
 
-The **1280→1024 probe is the discriminating experiment** — and it carries the
-largest per-draw payoff (0.65× tokens) if capacity wins. Answering it turns
-the finding into a safety-boundary map over (route, σ) — the stronger paper
-shape. Blocked on a small 1280-tier re-preprocess + a 6300-token VRAM check.
+**Answer** (report.md "1280→1024 probe", `results/20260726-2017/`): **ratio
+is refuted** — 1280→1024 floors into the reenc band at σ ≥ 0.875 (per-image
+and pooled) despite being more aggressive by ratio than the never-flooring
+896→768; capacity predicts the ordering correctly. But the capacity
+prediction's *threshold* also missed: the 0.625 bin stays elevated (0.096),
+so the safe gate is **route-dependent** — σ\*(1024→896) ≈ 0.5,
+σ\*(1280→1024) ∈ (0.625, 0.875), σ\*(896→768) > 0.95 or absent. The map is
+a boundary σ\*(route), not a binary pass/fail; a `--sigma_window` refinement
+localizes the 1280→1024 crossover. Run cheaply via the probe-local 1280
+cache (`prep_1280_probe.py` + `--data_root`) — no corpus re-preprocess.
 
 ## Q2 — Where in the network does the gap live? **[ANSWERED 2026-07-25]**
 
@@ -22,7 +28,7 @@ geometry, seq-length-dependent normalization? A per-block / per-param-group
 gap decomposition (same probe, gradient split by module) would localize it —
 and might reveal a subset of parameters for which demotion IS safe.
 
-**Answer** (`hypothesis.md` + report.md Phase Q2; runs `*-endpoint-pg` /
+**Answer** (`groundings.md` G4 + report.md Phase Q2; runs `*-endpoint-pg` /
 `*-xzero-pg`): the Floor localizes in **depth, not module type** — early
 blocks (~0–9, peak 3–8) carry ~3× the late-block gap, uniformly across every
 param type within a block; RoPE is refuted as a concentrated mechanism
