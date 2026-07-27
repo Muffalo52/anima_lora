@@ -1,6 +1,8 @@
 import ast
 import importlib
+import inspect
 import logging
+import math
 from typing import Any, Optional
 
 import torch
@@ -66,6 +68,33 @@ def make_warmup_cosine_scheduler(
     return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=lr * eta_min_ratio)
 
 
+def get_rex_schedule_with_warmup(
+    optimizer: Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    d: float = 0.9,
+    last_epoch: int = -1,
+    **kwargs,
+):
+    from torch.optim.lr_scheduler import LambdaLR
+
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        
+        if progress >= 1.0:
+            return 0.0
+            
+        divider = (1 - d) + (d * (1 - progress))
+        return max(0.0, (1.0 - progress) / divider)
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
 def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     """
     Unified API to get any scheduler from its name.
@@ -104,7 +133,36 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
             lr_scheduler_module = importlib.import_module(".".join(values[:-1]))
             lr_scheduler_type = values[-1]
         lr_scheduler_class = getattr(lr_scheduler_module, lr_scheduler_type)
+
+        # --- 커스텀 스케줄러의 생성자 파라미터 자동 주입 로직 ---
+        sig = inspect.signature(lr_scheduler_class.__init__)
+        params = sig.parameters
+
+        # 1. Warmup 스텝 자동 주입
+        if "warmup_steps" in params and "warmup_steps" not in lr_scheduler_kwargs:
+            if num_warmup_steps is not None:
+                lr_scheduler_kwargs["warmup_steps"] = num_warmup_steps
+        elif "num_warmup_steps" in params and "num_warmup_steps" not in lr_scheduler_kwargs:
+            if num_warmup_steps is not None:
+                lr_scheduler_kwargs["num_warmup_steps"] = num_warmup_steps
+
+        # 2. 전체 학습 스텝 수(total_steps / num_training_steps) 자동 주입
+        if "num_training_steps" in params and "num_training_steps" not in lr_scheduler_kwargs:
+            lr_scheduler_kwargs["num_training_steps"] = num_training_steps
+        if "total_steps" in params and "total_steps" not in lr_scheduler_kwargs:
+            lr_scheduler_kwargs["total_steps"] = num_training_steps
+
+        # 3. num_cycles 자동 주입 (args.lr_scheduler_num_cycles 가 존재할 경우)
+        if "num_cycles" in params and "num_cycles" not in lr_scheduler_kwargs:
+            if hasattr(args, "lr_scheduler_num_cycles") and args.lr_scheduler_num_cycles is not None:
+                lr_scheduler_kwargs["num_cycles"] = args.lr_scheduler_num_cycles
+
         lr_scheduler = lr_scheduler_class(optimizer, **lr_scheduler_kwargs)
+
+        # warmup_steps가 정상적으로 주입되어 사용된 경우 불필요한 예외 검사를 우회
+        if "warmup_steps" in lr_scheduler_kwargs or "num_warmup_steps" in lr_scheduler_kwargs:
+            return lr_scheduler
+
         return wrap_check_needless_num_warmup_steps(lr_scheduler)
 
     # Gate on the literal value ("piecewise_constant") so the diffusers import
@@ -118,6 +176,22 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         name = DiffusersSchedulerType(name)
         schedule_func = DIFFUSERS_TYPE_TO_SCHEDULER_FUNCTION[name]
         return schedule_func(optimizer, **lr_scheduler_kwargs)
+
+    if name == "rex":
+        if num_warmup_steps is None:
+            raise ValueError(
+                f"{name} requires `num_warmup_steps`, please provide that argument."
+            )
+        if num_training_steps is None:
+            raise ValueError(
+                f"{name} requires `num_training_steps`, please provide that argument."
+            )
+        return get_rex_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            **lr_scheduler_kwargs,
+        )
 
     from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 

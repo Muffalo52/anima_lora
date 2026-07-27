@@ -697,6 +697,7 @@ def _log_step(
         raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
         if hasattr(raw_opt, "param_groups") and len(raw_opt.param_groups) > 0:
             pg = raw_opt.param_groups[0]
+            # AdamWScheduleFreePlus
             if "scheduled_lr" in pg:
                 logs["lr/scheduled_lr"] = pg["scheduled_lr"]
                 logs["lr/lr_max"] = pg.get("lr_max", 0.0)
@@ -704,6 +705,14 @@ def _log_step(
                 logs["opt/function_value_ema"] = pg.get("function_value_ema", 0.0)
                 logs["opt/ip_term"] = pg.get("ip_term", 0.0)
 
+            # ProdigyPlusScheduleFree
+            if raw_opt.__class__.__name__ == "ProdigyPlusScheduleFree":
+                eff_lr = pg.get("effective_lr", pg.get("lr", 0.0))
+                d_val = pg.get("d", 1.0)
+                logs["lr/effective_lr"] = eff_lr
+                logs["lr/d_effective_lr"] = d_val * eff_lr
+
+        #AdamW_adv
         if hasattr(raw_opt, "kourkoutas_helper") and raw_opt.kourkoutas_helper is not None:
             kb_stats = getattr(raw_opt.kourkoutas_helper, "last_beta2_stats", {})
             if "mean" in kb_stats:
