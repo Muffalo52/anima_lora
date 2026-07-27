@@ -84,7 +84,7 @@ def main() -> None:
     p.add_argument("--network_dim", type=int, default=32, help="max rank R_max")
     p.add_argument("--network_alpha", type=float, default=16.0)
     p.add_argument("--steps", type=int, default=3, help="synthetic training steps")
-    p.add_argument("--min_rank", type=int, default=1, help="T-LoRA floor at clean end")
+    p.add_argument("--min_rank", type=int, default=1, help="T-LoRA rank floor at the pure-noise end")
     p.add_argument(
         "--alpha_rank_scale",
         type=float,

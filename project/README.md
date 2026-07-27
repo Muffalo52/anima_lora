@@ -9,6 +9,7 @@ into an ongoing project with open phases. Each subdir is the line's home page:
 | `bench.md` | Digest of measured results — omitted when the line's bench lives in-tree (`bench/report.md` serves directly) |
 | `questions.md` | Open questions the line has not answered |
 | `roadmap.md` | Remaining phases, gates, and kill criteria |
+| `outcomes.md` | Shippable/practical artifacts the line produced (optional — appears once something is ship-shaped) |
 
 Canonical sources these digest (never duplicated wholesale):
 the line's proposal(s) (frozen designs) and its bench (`report.md` = raw
@@ -25,4 +26,6 @@ Active projects:
   discriminating probe (1280→1024) pending.
 - [`directedit_ec/`](directedit_ec/) — EasyControl cond stream as a learned
   preservation prior for DirectEdit. Phases 0–1b passed zero-training;
-  Phase 2 (cross-image subject descriptor) unblocked.
+  Phase 2.5 (delta-caption instruction editor) probe PASSED at the trained
+  point → EasyEdit ship proposal + paper prep
+  (`outcomes.md`, `docs/proposal/easyedit_comfy_node.md`).
