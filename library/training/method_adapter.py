@@ -137,6 +137,14 @@ class MethodAdapter:
 
     name: str = "base"
 
+    # sigma_lowres (σ>threshold → demote-tier latent swap) compatibility.
+    # Default False: an adapter that runs its own forwards / cond streams at a
+    # fixed grid (EasyControl, BYG, soft-tokens) needs its own operating-point
+    # probe before demotion is allowed under it (sigma_lowres Q5). Set True
+    # only for adapters that are grid-agnostic by construction (REPA: pools
+    # the primary forward's tokens to the encoder grid adaptively).
+    sigma_demote_safe: bool = False
+
     def on_network_built(self, ctx: SetupCtx) -> None:
         """Called once after ``network.apply_to``. Validate runtime contract,
         load auxiliary encoders, install forward hooks, assert preconditions."""

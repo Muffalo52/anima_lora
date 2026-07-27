@@ -1,6 +1,6 @@
 # sigma_lowres — open questions
 
-## Q1 — Ratio or absolute capacity: what governs demotion safety?
+## Q1 — Ratio or absolute capacity: what governs demotion safety? **[ANSWERED 2026-07-26]**
 
 1024→896 (ratio 0.875) passes; 896→768 (ratio 0.857) fails. Two candidate
 governors that the existing data cannot separate:
@@ -9,10 +9,16 @@ governors that the existing data cannot separate:
 - **Absolute target capacity**: safety needs enough tokens at the demoted grid
   (~4k?) → 1280→1024 (4116 tok target vs the passing 3012) should PASS.
 
-The **1280→1024 probe is the discriminating experiment** — and it carries the
-largest per-draw payoff (0.65× tokens) if capacity wins. Answering it turns
-the finding into a safety-boundary map over (route, σ) — the stronger paper
-shape. Blocked on a small 1280-tier re-preprocess + a 6300-token VRAM check.
+**Answer** (report.md "1280→1024 probe", `results/20260726-2017/`): **ratio
+is refuted** — 1280→1024 floors into the reenc band at σ ≥ 0.875 (per-image
+and pooled) despite being more aggressive by ratio than the never-flooring
+896→768; capacity predicts the ordering correctly. But the capacity
+prediction's *threshold* also missed: the 0.625 bin stays elevated (0.096),
+so the safe gate is **route-dependent** — σ\*(1024→896) ≈ 0.5,
+σ\*(1280→1024) ∈ (0.625, 0.875), σ\*(896→768) > 0.95 or absent. The map is
+a boundary σ\*(route), not a binary pass/fail; a `--sigma_window` refinement
+localizes the 1280→1024 crossover. Run cheaply via the probe-local 1280
+cache (`prep_1280_probe.py` + `--data_root`) — no corpus re-preprocess.
 
 ## Q2 — Where in the network does the gap live? **[ANSWERED 2026-07-25]**
 
@@ -22,7 +28,7 @@ geometry, seq-length-dependent normalization? A per-block / per-param-group
 gap decomposition (same probe, gradient split by module) would localize it —
 and might reveal a subset of parameters for which demotion IS safe.
 
-**Answer** (`hypothesis.md` + report.md Phase Q2; runs `*-endpoint-pg` /
+**Answer** (`groundings.md` G4 + report.md Phase Q2; runs `*-endpoint-pg` /
 `*-xzero-pg`): the Floor localizes in **depth, not module type** — early
 blocks (~0–9, peak 3–8) carry ~3× the late-block gap, uniformly across every
 param type within a block; RoPE is refuted as a concentrated mechanism
@@ -32,6 +38,18 @@ subset" is a **depth band**: late-half-only updates at 768 read gap
 0.03–0.09 vs 0.12 full — a lever, not yet a pass. Remaining mechanism
 question (why blocks 3–8 specifically) belongs to the paper phase (Q6), not
 to safety mapping.
+
+**Revised 2026-07-27 (G10, origin-side)**: the RoPE refutation above was a
+*landing-side* inference and is overturned for the mild route — a
+PI-aligned-RoPE arm (`--pi_align`, DyPE-motivated) erases the 768 Floor
+entirely (+0.080 → −0.001) and ~30% of 512's (+0.320 → +0.224).
+`Floor_e = RoPE_e + Resid_e`: the q/k-vs-v landing uniformity was
+propagation of a PE-originated perturbation. Resid_e keeps the depth
+localization and the capacity governor. **G11 qualifier (same day)**:
+rope alignment is NOT a practical lever — the stretch is off-manifold
+with content in the input (768pi *worse* than 768 through σ 0.56–0.81),
+so RoPE_e is removable only in the noise-dominated regime. Mechanism
+finding; no safe-subset lever came out of it.
 
 ## Q3 — Does mixed-res training equalize its own gradients?
 

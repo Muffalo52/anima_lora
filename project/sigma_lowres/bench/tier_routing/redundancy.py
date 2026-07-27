@@ -85,7 +85,9 @@ def _infer_tier(tokens: int) -> int | None:
     return None
 
 
-def score_image(npz_path: Path, k: int = 4) -> ImageRecord:
+def score_image(
+    npz_path: Path, k: int = 4, resized_root: Path | None = None
+) -> ImageRecord:
     d = np.load(npz_path)
     lat_key = next(key for key in d.files if key.startswith("latents_"))
     lat = d[lat_key].astype(np.float32)  # (16, H_lat, W_lat)
@@ -100,7 +102,7 @@ def score_image(npz_path: Path, k: int = 4) -> ImageRecord:
     # the latent key the *latent* one — strip by pattern, not by the key
     stem = re.sub(r"_\d+x\d+_anima\.npz$", "", npz_path.name)
     artist = npz_path.parent.name
-    resized_dir = REPO_ROOT / RESIZED_ROOT / artist
+    resized_dir = (resized_root or REPO_ROOT / RESIZED_ROOT) / artist
     h_lat, w_lat = lat.shape[1], lat.shape[2]
     return ImageRecord(
         stem=stem,
@@ -118,16 +120,23 @@ def score_image(npz_path: Path, k: int = 4) -> ImageRecord:
 
 
 def score_corpus(
-    artists: list[str] | None = None, k: int = 4, limit: int | None = None
+    artists: list[str] | None = None,
+    k: int = 4,
+    limit: int | None = None,
+    data_root: Path | None = None,
 ) -> list[ImageRecord]:
-    root = REPO_ROOT / CACHE_ROOT
+    """``data_root``: alternate dataset root holding ``lora/`` + ``resized/``
+    (a probe-local cache, e.g. the 1280-tier set built by
+    ``prep_1280_probe.py``); default = ``post_image_dataset``."""
+    root = data_root / "lora" if data_root else REPO_ROOT / CACHE_ROOT
+    resized = data_root / "resized" if data_root else None
     if artists:
         paths = sorted(p for a in artists for p in (root / a).glob("*_anima.npz"))
     else:
         paths = sorted(root.glob("*/*_anima.npz"))
     if limit:
         paths = paths[:limit]
-    return [score_image(p, k) for p in paths]
+    return [score_image(p, k, resized_root=resized) for p in paths]
 
 
 def select_probe_set(
@@ -179,6 +188,16 @@ def demoted_bucket(record: ImageRecord, edge: int) -> tuple[int, int]:
     pure down-resize of the exact pixels the native cache encodes — isolating
     the resolution effect from crop-anchor differences (ship-time 3b resizes
     from source instead).
+
+    Non-tier probe edges (e.g. the iso-severity 1120) get a synthetic band
+    around the nominal ``(edge/16)²`` token count with the same ±2.5%
+    fractional half-width ``freefit_band_for_edge`` applies to single-point
+    tier bands — probe-only, never a shippable cache tier.
     """
     w, h = record.cached_px
-    return freefit_bucket(w, h, freefit_band_for_edge(edge))
+    try:
+        band = freefit_band_for_edge(edge)
+    except ValueError:
+        nominal = (edge // 16) ** 2
+        band = (round(nominal * 0.975), round(nominal * 1.025))
+    return freefit_bucket(w, h, band)

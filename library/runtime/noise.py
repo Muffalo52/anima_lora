@@ -88,34 +88,79 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
     return weighting
 
 
-def get_noisy_model_input_and_timesteps(
-    args, noise_scheduler, latents: torch.Tensor, noise: torch.Tensor, device, dtype
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    bsz, h, w = latents.shape[0], latents.shape[-2], latents.shape[-1]
-    assert bsz > 0, "Batch size not large enough"
-    num_timesteps = noise_scheduler.config.num_train_timesteps
+def _restrict_sigma_range(args, sigmas: torch.Tensor) -> torch.Tensor:
+    """P-GRAFT-inspired timestep restriction: affine-map σ into [t_min, t_max]."""
+    t_min = getattr(args, "t_min", None)
+    t_max = getattr(args, "t_max", None)
+    if t_min is not None or t_max is not None:
+        lo = t_min if t_min is not None else 0.0
+        hi = t_max if t_max is not None else 1.0
+        sigmas = lo + sigmas * (hi - lo)
+    return sigmas
+
+
+def draw_flat_sigmas(
+    args, bsz: int, h: int, w: int, device, generator: "torch.Generator | None" = None
+) -> Optional[torch.Tensor]:
+    """Per-sample flat σ ∈ [0,1], shape ``(bsz,)`` — the draw half of
+    :func:`get_noisy_model_input_and_timesteps`, split out so σ-first callers
+    (sigma_lowres: pick the latent grid from σ, then noise it) share the exact
+    density with the default draw-inside path. ``t_min``/``t_max`` restriction
+    is applied here. Returns ``None`` for the scheduler-grid density modes
+    (``weighting_scheme`` fallback), which need ``latents.ndim`` broadcasting
+    and stay in the main body. ``h``/``w`` are the latent grid (flux_shift's
+    resolution-dependent shift); pass the *native* grid so the σ marginal is
+    identical whether or not a demote later swaps the latent.
+
+    ``generator`` (paired-step-RNG mode) decouples the draw from the global
+    torch stream so arms with identical seeds share the exact σ sequence.
+    """
     # logit-space mean shift; >0 skews σ toward high-noise, 0.0 (default) = unbiased
     sigmoid_bias = getattr(args, "sigmoid_bias", 0.0)
     if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
         if args.timestep_sampling == "sigmoid":
             sigmas = torch.sigmoid(
-                args.sigmoid_scale * torch.randn((bsz,), device=device) + sigmoid_bias
+                args.sigmoid_scale
+                * torch.randn((bsz,), device=device, generator=generator)
+                + sigmoid_bias
             )
         else:
-            sigmas = torch.rand((bsz,), device=device)
+            sigmas = torch.rand((bsz,), device=device, generator=generator)
     elif args.timestep_sampling == "shift":
         shift = args.discrete_flow_shift
-        sigmas = torch.randn(bsz, device=device)
+        sigmas = torch.randn(bsz, device=device, generator=generator)
         sigmas = sigmas * args.sigmoid_scale + sigmoid_bias
         sigmas = sigmas.sigmoid()
         sigmas = (sigmas * shift) / (1 + (shift - 1) * sigmas)
     elif args.timestep_sampling == "flux_shift":
-        sigmas = torch.randn(bsz, device=device)
+        sigmas = torch.randn(bsz, device=device, generator=generator)
         sigmas = sigmas * args.sigmoid_scale + sigmoid_bias
         sigmas = sigmas.sigmoid()
         mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
         sigmas = time_shift(mu, 1.0, sigmas)
     else:
+        return None
+    return _restrict_sigma_range(args, sigmas)
+
+
+def get_noisy_model_input_and_timesteps(
+    args,
+    noise_scheduler,
+    latents: torch.Tensor,
+    noise: torch.Tensor,
+    device,
+    dtype,
+    sigmas: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``sigmas`` (flat ``(bsz,)``, already range-restricted — e.g. a
+    :func:`draw_flat_sigmas` result) skips the internal draw; None (default)
+    preserves the original draw-inside behavior bit-exactly."""
+    bsz, h, w = latents.shape[0], latents.shape[-2], latents.shape[-1]
+    assert bsz > 0, "Batch size not large enough"
+    num_timesteps = noise_scheduler.config.num_train_timesteps
+    if sigmas is None:
+        sigmas = draw_flat_sigmas(args, bsz, h, w, device)
+    if sigmas is None:
         u = compute_density_for_timestep_sampling(
             weighting_scheme=args.weighting_scheme,
             batch_size=bsz,
@@ -129,14 +174,7 @@ def get_noisy_model_input_and_timesteps(
         sigmas = get_sigmas(
             noise_scheduler, sched_timesteps, device, n_dim=latents.ndim, dtype=dtype
         )
-
-    # restrict sigma range (P-GRAFT-inspired timestep restriction)
-    t_min = getattr(args, "t_min", None)
-    t_max = getattr(args, "t_max", None)
-    if t_min is not None or t_max is not None:
-        lo = t_min if t_min is not None else 0.0
-        hi = t_max if t_max is not None else 1.0
-        sigmas = lo + sigmas * (hi - lo)
+        sigmas = _restrict_sigma_range(args, sigmas)
 
     # σ∈[0,1] IS the DiT's time argument — nothing downstream rescales it. Keep the
     # flat per-sample σ as the returned `timesteps`; broadcast a copy for noising.

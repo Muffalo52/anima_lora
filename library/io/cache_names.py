@@ -26,6 +26,21 @@ LATENT_CACHE_SUFFIX = "_anima.npz"
 # Text-encoder cross-attention embeddings: ``{stem}_anima_te.safetensors``.
 TE_CACHE_SUFFIX = "_anima_te.safetensors"
 
+
+def demoted_latents_key(width: int, height: int) -> str:
+    """NPZ key of the σ-demote sibling latent (sigma_lowres Phase 1b).
+
+    Lives *inside* the image's native ``{stem}_{WxH}_anima.npz`` — no sibling
+    file, so bucket discovery, reconcile, and every ``{stem}_*_anima.npz`` glob
+    consumer stay oblivious. Deliberately NOT prefixed ``latents_``: several
+    readers grab the first ``latents_*`` key (``library/io/cache.py::
+    load_cached_latents``) and must never see the demoted entry.
+    ``(width, height)`` is the demoted *pixel* bucket; the key mirrors the
+    native ``latents_{H//8}x{W//8}`` latent-grid convention.
+    """
+    return f"demoted_{height // 8}x{width // 8}"
+
+
 # Default REPA / PE vision encoder. Its sidecars are named
 # ``{stem}_anima_pe_spatial.safetensors``; the PE-Core encoder (``pe``) writes
 # ``{stem}_anima_pe.safetensors``. The active encoder is configurable via the

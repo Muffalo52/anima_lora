@@ -1,167 +1,194 @@
-# sigma_lowres — mechanism hypothesis: the two-term account
+# sigma_lowres — mechanism hypothesis: the normalized two-term account
 
-Status: pre-registered 2026-07-24 (predictions committed before the runs
-finished); **Tests 1–2 landed the same day: the account HOLDS, and the Floor
-is graph-dominated** (row 1 of the outcome matrix). Written to answer "can we
-explain Phase 0 in principle?" (Q2/Q6 context).
+Status: **living account, v2.1 (2026-07-27).** v1 (the two-term account) was
+pre-registered 2026-07-24, survived its kill switch the same day, and has
+since absorbed four refinements (route-uniform residual shape, J-side
+amplitude/Floor, gradient-norm denominator, and the v2.1 Floor
+decomposition Floor_e = RoPE_e + Resid_e from the G10 origin-side probe). This file states the current
+account *cleanly* — every claim cites a grounding **G1–G8 in
+`groundings.md`**, which holds the test designs, pre-registration
+provenance, run pointers, tables, and falsifiers. Nothing here is
+un-grounded; nothing there is un-cited.
 
-## Claim
+## The claim
 
-The demotion gap measured by the σ-probe decomposes into two terms:
+The demotion gap measured by the σ-probe (`bench/run_sigma_probe.py`;
+gap = split-half floor cosine − cross-grid cosine, i.e. **cosine units:
+scale-free, a mismatch *fraction*, SEM ~0.02**) decomposes as:
 
 ```
-gap_e(σ)  ≈  S1_e(σ)  +  Floor_e
+gap_e(σ)  ≈  S1_e(σ)           +  Floor_e
+              └ input branch ┘      └ graph term ┘
+
+S1_e(σ)  ≈  A_e · m(σ) / G(σ)^p          (p ∈ [1, 2], schematic)
 ```
 
-- **S1 (input branch)** — the only term the SwD-style spectral argument
-  describes. Decays smoothly in σ (Wiener-like posterior shrinkage), with **no
-  hard gate** at the spectral crossover; it reads as "collapsed" wherever it
-  sinks below the instrument's reenc band (±0.04) — measured at σ ≈ 0.5, not
-  the RAPSD σ\* ≈ 0.14. The 3.5× discrepancy is expected, not anomalous.
-- **Floor (target × graph)** — σ-independent, grows with demotion severity,
-  and **structurally exempt from noise masking**, for two reasons:
+Four objects, each independently measured:
 
+| term | what it is | σ-shape | lives in | grounded by |
+|---|---|---|---|---|
+| `m(σ)` | universal residual-mismatch shape — how much the model's mean prediction error `r̄` differs across grids | monotone ↓ (0.89 → 0.36) | prediction side, **route-uniform** | G7 |
+| `G(σ)` | total gradient scale ‖g‖ — the cosine's denominator | **U-shaped** (2.6 → 0.4 @ σ≈0.3 → 9.3) | checkpoint anatomy | G8 |
+| `A_e` | route amplitude — how strongly the universal r-mismatch transmits into gradient mismatch | σ-independent | **J (graph)**; governed by route **ratio**, not target capacity | G5, G7, G9 |
+| `Floor_e` | σ-independent graph term (0 / 0.06–0.13 / ~0.3 for 896/768/512 from 1024); **decomposes as RoPE_e + Resid_e** — a coordinate-system share erasable by PI position alignment (≈ all of 768's, ~30% of 512's) plus a non-PE graph residue | flat | **J (graph)**, early-block | G1, G2, G4, G6, **G10** |
+
+Term by term:
+
+- **m(σ) — the universal numerator.** The mean FM residual
+  `r̄ = E_ε[v̂ − (ε − x)]` decorrelates across grids with a strong σ-shape
+  that is the *same for every route* (±0.02 across routes spanning Floors
+  0 → 0.3; G7). All route identity therefore lives in J, not in the
+  prediction. m decays smoothly — Wiener-like posterior shrinkage, **no
+  hard gate** at the spectral crossover, which is why gap curves read as
+  "collapsed" only where S1 sinks below the instrument's reenc band
+  (±0.04), not at the RAPSD σ\* ≈ 0.14.
+- **G(σ) — the denominator.** Because gap is a cosine, it measures the
+  mismatch *fraction*, not its magnitude. Total gradient norm is U-shaped:
+  at σ ≳ 0.85 the model is pulling composition out of the prior and the
+  residual is image-scale ("the high-σ residual *is* the image"); at
+  σ → 0 the residual is dominated by irreducible ε plus low-frequency
+  reconstruction both grids share (Anima latents are HF-quiet, RAPSD
+  P(f) < 1 above f ≈ 0.16). In between the model is merely refining and
+  ‖g‖ bottoms out — so a monotone absolute mismatch becomes an
+  **interior-peaked** cosine curve (peak σ ≈ 0.2–0.44, dip at the lowest
+  bin), which is exactly the measured Phase-0 shape (G8). Interpretive
+  cross-reference: the σ ≳ 0.85 "plan-writing window" is independently
+  located by the cross-attn drive measurement (`docs/inference/xattn_boost.md`).
+- **A_e — the route amplitude, in J.** The transmission strength of the
+  universal r-mismatch scales with route severity (0.80 is harsher than
+  0.875 → S1 stays above the band to higher σ), which retrodicts all
+  measured crossovers: 1024→896 σ\* ≈ 0.5; 1280→1024 σ\* ≈ 0.75;
+  896→768 moderate S1 atop a Floor already > band → never floors (G5).
+  The governor is **ratio, not target capacity** (G9, iso-severity
+  probe): 1280→1120 (ratio 0.875 matched to 1024→896, target capacity
+  1.6× larger) reproduces 1024→896's curve and σ\* ≈ 0.5, while the
+  same-native 1280→1024 (ratio 0.80) floors later. With Floor_1120 ≈ 0
+  this completes the hybrid's division of labor: **ratio sets A_e;
+  absolute target capacity sets Floor_e.**
+- **Floor_e — the graph term.** σ-independent, grows with demotion
+  severity, and **structurally exempt from noise masking**, for two
+  reasons that make the account principled rather than curve-fitted:
   1. **Expected gradients are never noise-masked.** "Noise power exceeds
-     signal power in band f" is a statement about a *single sample* of z_σ.
-     The trained quantity is E_ε[∇θL] — an expectation that averages noise
-     out and retains the signal at *any* SNR, merely attenuated. Sufficiency
-     of demotion for the input licenses inference equivalence, never
-     training-dynamics equivalence: mutual information is
-     representation-independent, gradients are parameterization-covariant.
+     signal power in band f" is a statement about a *single sample* of
+     z_σ. The trained quantity is E_ε[∇θL] — an expectation that averages
+     noise out and retains signal at any SNR, merely attenuated.
+     Sufficiency of demotion for the *input* licenses inference
+     equivalence, never training-dynamics equivalence.
   2. **The target carries the clean image at unit amplitude at every σ.**
      The FM target is v = ε − x; the input gets noise-masked as σ→1 but x
-     sits in the target at coefficient 1 even at σ = 0.94. At high σ the
-     prediction collapses toward the prior, so the residual r ≈ x − x̄_prior
-     — *the high-σ residual is the image*. The gradient g = Jᵀr then differs
-     across grids through both factors: r (per-token content density changes;
-     the base model's prior error is resolution-conditioned) and J (token
-     count changes the graph itself: attention softmax over N, RoPE phase
-     density, seq-dependent normalization — exactly Q2's candidate list).
+     sits in the target at coefficient 1 even at σ = 0.94. The gradient
+     g = Jᵀr then differs across grids through J itself: attention
+     softmax over N, RoPE phase density, seq-dependent normalization.
+  Measured properties: graph-dominated, not content (G1); real at σ=1
+  where the input is pure ε by construction (G2); localized in **depth**
+  (early blocks ~3×, all module types uniformly) (G4); **dissociated from
+  the checkpoint's forward prior** — prior distances are flat across
+  routes whose Floors span 0 → 0.3, so the Floor's route-ordering lives
+  in the J factor, not in x̂_prior (G6). Floor_e is also σ-independent
+  *in cosine units* — a transmission fraction of whatever residual
+  exists — which is why it reads as a flat plateau rather than being
+  divided by G like S1.
 
-Phase-0/1a numbers this account retrodicts: 896 plateau 0.03–0.05 (inside
-instrument noise → "safe"), 768 ≈ 0.06–0.12 (just outside → 1a FAIL), 512
-≈ 0.3 at σ = 0.94 where the latent is 97% noise (Floor alone). Corollary:
-**1024→896 safety is an empirical smoothness statement about Anima's function
-across nearby token counts, not an information statement** — there was never
-a reason to expect a universal ratio invariant (consistent with 1a), and Q1's
-absolute-capacity governor is the natural reading (Floor = how well the
-coarse graph approximates the fine graph's computation).
+  **Decomposition (v2.1, G10, qualified by G11): `Floor_e = RoPE_e +
+  Resid_e`.** An origin-side intervention (PI-stretched fractional RoPE
+  positions on the demoted grid, matching native relative phase geometry
+  exactly) removes the large majority of 768's Floor at the σ=1 endpoint
+  (+0.080 → −0.001 absolute; paired residual over reenc ≈ +0.05–0.07
+  across the two runs) and ~30% of 512's (+0.320 → +0.224). So the
+  mild-route Floor is mostly a **coordinate-system artifact** (RoPE
+  phase-density mismatch), while the harsh-route bulk is the genuine
+  graph residue (softmax-over-N / seq-normalization / capacity). Three
+  corollaries: (1) G4's "RoPE refuted" was a *landing-side* inference — a
+  PE-originated perturbation propagates through the block and lands
+  uniformly across module types, so landing uniformity never localized
+  origin (the depth profile is a property of both components); (2) the
+  capacity governor attaches to **Resid_e**, not to Floor_e as a whole;
+  (3) **RoPE_e is a noise-regime artifact only (G11)** — with content in
+  the input the stretched forward is off-manifold and *adds* error
+  (768pi worse than 768 through σ 0.56–0.81, better only at σ ≥ 0.94),
+  so the removal does not transfer into the training window and is a
+  mechanism finding, not a lever. In the commutator reading, PI alignment
+  zeroes the RoPE component of [D, J] exactly — but only where the
+  residual it transmits is position-geometry-dominated.
 
 The **latent-space quirk** (HF-quiet Qwen-VAE latents, non-scale-equivariant
-encoder) shapes S1 only — it is exonerated as the Floor's cause by two
-existing controls: gap_reenc ≈ 0 (encoder round-trip harmless) and the
-σ = 0.94 persistence (input statistics there are nearly identical Gaussians).
+encoder) shapes m only — exonerated as the Floor's cause by gap_reenc ≈ 0
+(encoder round-trip harmless) and the σ = 0.94 persistence (G2).
 
-## Pre-registered tests
+## What the account retrodicts
 
-### Test 1 — x-zero probe (isolates the J-term)
+1. **σ\* ≈ 0.5, not the RAPSD 0.14** — the spectral prediction is
+   numerator-only; the measured crossover is where A·m/G^p sinks below the
+   reenc band, a property of the *ratio* (and the denominator recovers
+   above σ ≈ 0.44, which helps push curves into the band). The 3.5×
+   discrepancy is expected, not anomalous.
+2. **Interior peak + low-σ dip** of every gap curve (G8: renormalizing by
+   G restores a low-σ-maximal, monotone-into-noise numerator; the dip at
+   σ = 0.06 flips to the maximum in every arm of both runs).
+3. **Tier ordering at every σ-bin** — A_e and Floor_e are both
+   severity-ordered.
+4. **High-σ persistence** — 768 ≈ 0.06–0.12 and 512 ≈ 0.3 at σ = 0.94
+   where the latent is ~97% noise: that's Floor alone (G2). 896's plateau
+   0.03–0.05 sits inside instrument noise → "safe".
+5. **Phase-1a FAIL** — 896→768's Floor is outside the band on its own, so
+   no σ-gate can rescue the route. (G10 briefly reopened a PI-aligned
+   variant; **G11 closed it same-day** — the stretch is off-manifold with
+   content in the input, and S1(1024→768) is fatal regardless. The FAIL
+   stands for every 768 route.)
+6. **1280→1024** — bigger A (harsher ratio) with Floor ≈ 0 → floors
+   later (σ\* ≈ 0.75) but cleanly (G5); breaks any pure-capacity
+   route-ordering story, hence the hybrid split of S1 (severity) vs Floor
+   (graph approximation quality).
+7. **Route-uniform σ-shape with route-ordered floors** (G7) — impossible
+   if the σ\* ordering were prediction-side; forced if m is universal and
+   A_e, Floor_e live in J.
 
-`run_sigma_probe.py --x_zero`: image zeroed in BOTH input and target on every
-grid (input = σε, target = ε; captions + exact demoted latent shapes kept).
-No content exists anywhere → any surviving gap is **pure graph-shape
-sensitivity**. Run: 40 images, 4 σ-bins + σ=1 endpoint, edges 896/768/512,
-8 draws/bin.
+Corollary: **1024→896 safety is an empirical smoothness statement about
+Anima's function across nearby token counts, not an information
+statement** — there was never a reason to expect a universal ratio
+invariant, and "Floor = how well the coarse graph approximates the fine
+graph's computation" is the natural reading.
 
-- **Read**: xz_gap ≈ endpoint gap → Floor is graph-dominated (S3) → Q2's
-  per-module split is the right next probe (RoPE/attention localization).
-  xz_gap ≪ endpoint gap → Floor is content-correspondence in the residual
-  (S2) → fix space is content-side (e.g. resolution-conditioned targets),
-  not architecture-side.
-- **Secondary prediction**: the xz curve is ~flat in σ (no content to fade).
-  Caveat: low-σ bins are off-manifold (input σε is norm-shrunk), so the
-  σ=1 / high-σ read is primary.
-- **Anomaly bar**: xz_gap substantially *above* the endpoint gap at matched
-  edge would not fit the account and reopens it.
+## What the account does NOT claim (open edges)
 
-**RESULT (2026-07-24, `results/20260724-2136-xzero/`): graph-dominated.**
-σ centers 0.125/0.375/0.625/0.875/1.0; SEM in parentheses at the endpoint:
+- **The formula is structural, not a quantitative fit.** m(σ) is measured
+  forward-side in rel-L2 units; the exponent p is fixed only to [1, 2] by
+  cosine geometry (2 in the small-orthogonal-mismatch limit); A_e absorbs
+  units. G8 shows the *shape* facts (dip removal, gap ∝ 1/G tracking),
+  not a fitted curve, and the renormalized proxy is meaningless at
+  σ ≳ 0.8 where (gap − Floor) ≈ 0 ± SEM gets multiplied by G² ≈ 86.
+- **A_e's governor — RESOLVED (2026-07-26, G9): A ~ ratio.** The
+  iso-severity 1280→1120 probe discriminated it (ratio-matched routes
+  coincide despite 1.6× capacity difference). Residual: the coarse bins
+  localize σ\*(1280→1120) only to (0.375, 0.625); a
+  `--sigma_window 0.375,0.625` run would pin it. Mechanism value only.
+- **RoPE_e/Resid_e — route question RESOLVED (G11), mechanism edges
+  remain.** The σ-resolved gate closed the PI-768 route (off-manifold
+  in-window + fatal S1 at ratio 0.75). Still open, mechanism-value only:
+  why the pi stretch is content-hostile (candidate: attention content
+  lobes calibrated to integer phase spacing per grid — would predict the
+  penalty grows with content share, i.e. toward low σ, as measured); the
+  1/40 scaled-rope outlier's grid dims.
+- **Floor checkpoint-dependence through J** — untested. The carving test
+  (fine-tune on the 1280 cache via `bench/prep_1280_probe.py`, re-probe;
+  if the 1280→1024 gap *opens*, the safety map is
+  operating-point-specific) is the discriminator. The prior-side form of
+  checkpoint-dependence ("base Anima never learned 1280") is already
+  refuted (G6).
+- **G(σ)'s anatomy is interpretive** — the plan-window / refinement /
+  ε-floor reading of the U-shape is consistent with xattn_boost's
+  independent measurement but nothing measures plan-commitment and the
+  gap in the same run.
+- **Single operating point** — all gradient probes ran `anima_soup_sincos`
+  trained at native tiers; a mixed-res-trained adapter might equalize its
+  own gradients (Q3's warning stands).
 
-| edge | xz gap across σ | xz @ σ=1 | endpoint (T2) @ σ=1 |
-|---|---|---|---|
-| 896 | .012 .039 .014 .031 .004 | 0.004 (.018) | −0.009 (.042) |
-| 768 | .062 .046 .033 .117 .064 | 0.064 (.028) | 0.127 (.054) |
-| 512 | .188 .135 .158 .260 .299 | 0.299 (.040) | 0.326 (.059) |
+## Paper framing (Q6)
 
-- **512: xz ≈ endpoint** (0.30 vs 0.33) — the Floor is essentially all
-  graph/function term; per-image data content contributes ~nothing.
-- **768: xz ≈ half the endpoint gap** (0.06 vs 0.13, SEM-overlapping) —
-  graph term is the bulk, a possible minority content-correspondence share.
-- **896: xz ≈ 0 everywhere**, matching endpoint ≈ 0.
-- **Flatness**: no S1-like decline anywhere (512 mildly *rises* with σ;
-  low-σ bins are the off-manifold regime, high-σ read primary). Anomaly bar
-  (xz ≫ endpoint) not triggered. Split-half 0.74–0.88 (768's noisier 0.28
-  driven by the wide 0.875 bin; endpoint bin is the verdict bin).
-- Bonus decomposition check against Phase 0 at LOW σ: xz(512) ≈ 0.13–0.19 vs
-  standard 0.35–0.47, xz(896) ≈ 0.01–0.04 vs standard 0.11–0.16 — i.e. the
-  low-σ elevation in Phase 0 is mostly S1, sitting on top of exactly this
-  Floor, as the two-term account requires.
-- Interpretation caveat (sharpened, not weakened): with x = 0 the residual is
-  ≈ −x̂_prior — the model's own grid-conditioned prior (xz ‖g‖ at σ=1 is 39.9,
-  large despite zero content). So "graph-dominated" means Jᵀx̂_prior mismatch
-  — the network function across token counts, including its
-  resolution-conditioned prior — NOT per-image data content. This is exactly
-  the object Q2's per-module split decomposes.
-
-### Test 2 — σ=1 endpoint bin (measures Floor by construction)
-
-`run_sigma_probe.py --bins 0 --endpoint_bin`: at σ = 1 the input is exactly ε
-— the input-information term is zero by construction; any measured gap IS the
-Floor. Run: standard arms (native ×2, reenc, 896/768/512), 16 draws.
-
-- **Prediction**: gap(σ=1) matches the Phase-0 high-σ plateau per edge —
-  roughly 896 ∈ [0, 0.08], 768 ∈ [0.04, 0.15], 512 ∈ [0.2, 0.4], tier
-  ordering preserved, gap_reenc within ±0.04.
-- **Falsifier**: endpoint gaps ≈ 0 for all edges. That would mean the σ=0.94
-  persistence was carried by the residual (1−σ) input signal after all — the
-  two-term account dies and a pure-input story revives. (This is the
-  account's cleanest kill switch.)
-
-**RESULT (2026-07-24, `results/20260724-2101-endpoint/`): prediction PASSES
-on all three edges; falsifier not triggered.** 40 images, 16 draws, σ=1.0
-exactly; cos_floor 0.86, ‖g‖ 63.9 (the σ→1 tail, as expected).
-
-| edge | gap @ σ=1 (SEM) | predicted band | verdict |
-|---|---|---|---|
-| reenc | −0.038 (.032) | within ±0.04 | instrument valid |
-| 896 | −0.009 (.042) | [0, 0.08] | ✓ ≈ 0 |
-| 768 | +0.127 (.054) | [0.04, 0.15] | ✓ |
-| 512 | +0.326 (.059) | [0.2, 0.4] | ✓ |
-
-Tier ordering preserved. At σ=1 the input contains **zero image information
-by construction**, yet the 768/512 gaps match the Phase-0 high-σ plateau —
-the Floor is real and the input branch cannot be its source. The two-term
-account survives its kill switch.
-
-### Test 3 — content-loss correlation on existing data (RUN — inconclusive)
-
-From Phase-0 `per_image.jsonl`: correlate per-image high-σ gap with content
-lost to demotion (latent down-up error; HF energy above demoted Nyquist).
-S2 predicts positive correlation; S3-only predicts none.
-
-**RESULT (2026-07-24): cannot be measured at 8 draws.** The reliability
-ceiling of the per-image high-σ gap — agreement between the two top σ-bins
-across the 40 images — is *negative* (r ≈ −0.09..−0.18 for all edges), i.e.
-the per-image gap is estimator noise with no stable image-level component
-(the same per-image-ranking failure as tier_routing 3a). All correlations
-null (|ρ| ≤ 0.23, p > 0.15) **against a ~0 ceiling** — reads as "instrument
-blind", not "no effect". The S2-vs-S3 question falls entirely to Test 1.
-
-## What the outcomes mean downstream
-
-| Endpoint (T2) | x-zero (T1) | Verdict |
-|---|---|---|
-| ≈ plateau | ≈ endpoint | **← MEASURED OUTCOME.** Two-term account holds, **graph-dominated** → Q2 per-module split (J-decomposition) is the mechanism probe; Q1 capacity governor favored |
-| ≈ plateau | ≪ endpoint | Two-term account holds, **content-dominated** → mechanism is resolution-conditioned prior error; per-module split less informative, content-side interventions open |
-| ≈ 0 | (any) | **Account falsified** — input branch explains everything; spectral story revives with a slower decay constant |
-| ≈ plateau | ≫ endpoint | Anomaly — account incomplete, reopen |
-
-Paper framing if the account survives (Q6): not just "a measured
-counterexample to spectral sufficiency" but *why it must be one* — the target
-branch of the FM objective is structurally exempt from noise masking.
-
-**Follow-up executed (2026-07-25)**: the Q2 per-module decomposition ran on
-the indicated (x-zero) arms — see report.md "Phase Q2". Outcome: Floor
-localizes in depth (early blocks ~3×, all module types uniformly; content
-share late-block), RoPE refuted as a concentrated mechanism (up_q/up_k ≈
-up_v). The account's J-mismatch is an early-block representation property,
-not a parameter circuit.
+Not just "a measured counterexample to spectral sufficiency" but *why it
+must be one*: the target branch of the FM objective is structurally exempt
+from noise masking (the two Floor reasons above), and the observable is a
+cosine — so spectral (numerator-only, magnitude-blind) reasoning
+mispredicts both the crossover location and the curve shape. The
+safety-boundary map over (route, σ) with the J-side Floor is the stronger
+paper shape.

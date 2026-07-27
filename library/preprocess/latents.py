@@ -23,6 +23,7 @@ import torch
 from PIL import Image
 
 from library.io.cache import LATENT_CACHE_SUFFIX, resolve_cache_path
+from library.io.cache_names import demoted_latents_key
 from library.datasets.image_utils import IMAGE_TRANSFORMS
 from library.preprocess._dataset import PreprocessStats, group_by_shape, walk_images
 from library.preprocess._progress import ProgressFn
@@ -158,6 +159,178 @@ def _save_batch(items: list[tuple[Path, np.ndarray, tuple[int, int]]]) -> None:
         kwargs[f"original_size{key_reso_suffix}"] = np.array(list(size))
         kwargs[f"crop_ltrb{key_reso_suffix}"] = np.array([0, 0, size[0], size[1]])
         np.savez(npz_path, **kwargs)
+
+
+def _demoted_cached(npz_path: Path, key: str) -> bool:
+    """True iff the native npz already carries the σ-demote sibling ``key``.
+    Missing/unreadable npz counts as not-cached (mirrors ``_latent_cached``)."""
+    if not npz_path.exists():
+        return False
+    try:
+        return key in np.load(npz_path)
+    except Exception:
+        return False
+
+
+def _demote_jobs(
+    data_dir: Path,
+    *,
+    native_edge: int,
+    demote_edge: int,
+    cache_dir: Path | None,
+    recursive: bool,
+    path_pattern: str | None,
+) -> "list[tuple[tuple[int, int], tuple[int, int], list[Path]]]":
+    """Enumerate σ-demote work: ``[(native_wh, demoted_wh, paths)]`` for every
+    resized-image shape group on the demote route (off-route groups, e.g.
+    native-896 images on 1024→896, are excluded entirely)."""
+    from library.datasets.buckets import demote_bucket_for
+
+    image_files = walk_images(data_dir, recursive=recursive, pattern=path_pattern)
+    jobs = []
+    for (w, h), paths in group_by_shape(image_files).items():
+        bucket = demote_bucket_for(w, h, native_edge, demote_edge)
+        if bucket is not None:
+            jobs.append(((w, h), bucket, paths))
+    return jobs
+
+
+def count_pending_demoted(
+    data_dir: Path,
+    *,
+    native_edge: int,
+    demote_edge: int,
+    cache_dir: Path | None = None,
+    recursive: bool = False,
+    path_pattern: str | None = None,
+    overwrite: bool = False,
+) -> tuple[int, int]:
+    """``(pending, eligible)`` σ-demote sibling latents, without loading the VAE.
+
+    ``eligible`` counts every image on the demote route (native-tier band);
+    ``pending`` those whose native npz lacks the ``demoted_*`` key. Reads only
+    NPZ headers. With ``overwrite`` every eligible image counts as pending."""
+    pending = eligible = 0
+    for (w, h), bucket, paths in _demote_jobs(
+        data_dir,
+        native_edge=native_edge,
+        demote_edge=demote_edge,
+        cache_dir=cache_dir,
+        recursive=recursive,
+        path_pattern=path_pattern,
+    ):
+        key = demoted_latents_key(*bucket)
+        for p in paths:
+            eligible += 1
+            npz_path = get_latents_npz_path(
+                p, (w, h), cache_dir=cache_dir, image_dir=data_dir
+            )
+            if overwrite or not _demoted_cached(npz_path, key):
+                pending += 1
+    return pending, eligible
+
+
+def _save_demoted_batch(items: "list[tuple[Path, str, np.ndarray]]") -> None:
+    """IO stage: append each ``(npz_path, key, latent)`` into the native npz
+    (read-modify-write, all existing keys preserved — same discipline as
+    ``_save_batch``)."""
+    for npz_path, key, lat_np in items:
+        npz = np.load(npz_path)
+        kwargs = {k: npz[k] for k in npz.files}
+        kwargs[key] = lat_np
+        np.savez(npz_path, **kwargs)
+
+
+def cache_demoted_latents(
+    data_dir: Path,
+    vae,
+    *,
+    native_edge: int,
+    demote_edge: int,
+    cache_dir: Path | None = None,
+    recursive: bool = False,
+    path_pattern: str | None = None,
+    batch_size: int = 4,
+    progress: ProgressFn | None = None,
+    overwrite: bool = False,
+) -> PreprocessStats:
+    """Emit σ-demote sibling latents (sigma_lowres Phase 1b, 1024→896 route).
+
+    For every resized image in ``native_edge``'s free-fit band: LANCZOS-downscale
+    the resized PNG to its demote-tier free-fit bucket (``demote_bucket_for`` —
+    the identical grid the trainer derives), VAE-encode, and store the latent as
+    a ``demoted_{H}x{W}`` key INSIDE the image's existing native npz. No sibling
+    files — bucket discovery, reconcile, and the ``{stem}_*_anima.npz`` glob
+    consumers never see the emit. Pixel-space downscale → VAE re-encode is the
+    probe's measured-safe arm (SwD "strategy B"; never latent-space downsample).
+
+    Requires the native latent cache to exist first (``make preprocess`` /
+    ``preprocess-vae``): an image without its native npz is counted in
+    ``stats.failed`` and skipped. Idempotent per-key; ``overwrite`` re-encodes.
+    """
+    from library.preprocess.images import resize_to_bucket
+
+    jobs = _demote_jobs(
+        data_dir,
+        native_edge=native_edge,
+        demote_edge=demote_edge,
+        cache_dir=cache_dir,
+        recursive=recursive,
+        path_pattern=path_pattern,
+    )
+    stats = PreprocessStats(seen=sum(len(paths) for _, _, paths in jobs))
+    if progress is not None:
+        progress(0, total=stats.seen)
+
+    for (w, h), bucket, paths in jobs:
+        key = demoted_latents_key(*bucket)
+        for start in range(0, len(paths), batch_size):
+            chunk = paths[start : start + batch_size]
+            kept: list[Path] = []
+            tensors: list[torch.Tensor] = []
+            for p in chunk:
+                npz_path = get_latents_npz_path(
+                    p, (w, h), cache_dir=cache_dir, image_dir=data_dir
+                )
+                if not npz_path.exists():
+                    stats.failed += 1
+                    if progress is not None:
+                        progress(1, detail=f"NO NATIVE NPZ {p.name}")
+                    continue
+                if not overwrite and _demoted_cached(npz_path, key):
+                    stats.skipped += 1
+                    if progress is not None:
+                        progress(1, detail=f"skip {p.name}")
+                    continue
+                try:
+                    img = Image.open(p).convert("RGB")
+                except Exception:
+                    stats.failed += 1
+                    if progress is not None:
+                        progress(1, detail=f"FAILED {p.name}")
+                    continue
+                px = resize_to_bucket(img, bucket)
+                tensors.append(IMAGE_TRANSFORMS(np.array(px)))
+                kept.append(p)
+            if not tensors:
+                continue
+            img_batch = torch.stack(tensors, dim=0).to(
+                device=vae.device, dtype=vae.dtype
+            )
+            with torch.no_grad():
+                latents = vae.encode_pixels_to_latents(img_batch).cpu()
+            items = []
+            for i, p in enumerate(kept):
+                npz_path = get_latents_npz_path(
+                    p, (w, h), cache_dir=cache_dir, image_dir=data_dir
+                )
+                items.append((npz_path, key, latents[i].float().numpy()))
+                stats.written += 1
+                if progress is not None:
+                    progress(1, detail=f"{p.name} → demote {bucket[0]}x{bucket[1]}")
+            _save_demoted_batch(items)
+
+    return stats
 
 
 def cache_latents(

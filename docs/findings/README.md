@@ -59,6 +59,7 @@ The leftmost column is the outcome — what the evidence settled:
 
 | Verdict | Doc | The trap |
 |---------|-----|----------|
+| TRAP + LANDED | [paired_dw_chaos_floor_deterministic.md](paired_dw_chaos_floor_deterministic.md) | Paired (CRN) training arms decorrelate to ΔW cos **0.413 with zero treatment** — flash-attn backward's atomic-add order is the one un-seedable RNG, chaos-amplified over 1200 steps. `--deterministic` (bit-identical checkpoints, twin-validated, ~33% slower) removes the floor — but buys **attribution, not magnitude**: real treatments saturate the same chaotic subspace (~0.4), so endpoint ΔW cosine is a detector with depth localization, never a ruler for treatment size. |
 | TRAP | [spectral_fraction_metric_inverts.md](spectral_fraction_metric_inverts.md) | A fraction-of-Δ spectral metric **inverts**, and per-block ablation can't see a cumulative artifact — before trusting a spectral probe's verdict. |
 | TRAP | [custom_autograd_removal_partitioner_oom.md](custom_autograd_removal_partitioner_oom.md) | Removing a numerically-inert custom autograd Function shifted the compile partitioner and OOMed: **numerically-inert ≠ memory-inert**. |
 | TRAP | [hang_fix.md](hang_fix.md) | Long runs die to a **recurring, loop-agnostic `Xid 8` GPU hang** — infra, not code, and not preventable. `journalctl -k` silently scopes to the current boot, which under-reported it 2→1. Defence is `--resume`, not debugging the loop. |
