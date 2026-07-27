@@ -1,9 +1,10 @@
 # sigma_lowres — mechanism hypothesis: the normalized two-term account
 
-Status: **living account, v2 (2026-07-26).** v1 (the two-term account) was
+Status: **living account, v2.1 (2026-07-27).** v1 (the two-term account) was
 pre-registered 2026-07-24, survived its kill switch the same day, and has
-since absorbed three refinements (route-uniform residual shape, J-side
-amplitude/Floor, gradient-norm denominator). This file states the current
+since absorbed four refinements (route-uniform residual shape, J-side
+amplitude/Floor, gradient-norm denominator, and the v2.1 Floor
+decomposition Floor_e = RoPE_e + Resid_e from the G10 origin-side probe). This file states the current
 account *cleanly* — every claim cites a grounding **G1–G8 in
 `groundings.md`**, which holds the test designs, pre-registration
 provenance, run pointers, tables, and falsifiers. Nothing here is
@@ -29,7 +30,7 @@ Four objects, each independently measured:
 | `m(σ)` | universal residual-mismatch shape — how much the model's mean prediction error `r̄` differs across grids | monotone ↓ (0.89 → 0.36) | prediction side, **route-uniform** | G7 |
 | `G(σ)` | total gradient scale ‖g‖ — the cosine's denominator | **U-shaped** (2.6 → 0.4 @ σ≈0.3 → 9.3) | checkpoint anatomy | G8 |
 | `A_e` | route amplitude — how strongly the universal r-mismatch transmits into gradient mismatch | σ-independent | **J (graph)**; governed by route **ratio**, not target capacity | G5, G7, G9 |
-| `Floor_e` | σ-independent graph term (0 / 0.06–0.13 / ~0.3 for 896/768/512 from 1024) | flat | **J (graph)**, early-block | G1, G2, G4, G6 |
+| `Floor_e` | σ-independent graph term (0 / 0.06–0.13 / ~0.3 for 896/768/512 from 1024); **decomposes as RoPE_e + Resid_e** — a coordinate-system share erasable by PI position alignment (≈ all of 768's, ~30% of 512's) plus a non-PE graph residue | flat | **J (graph)**, early-block | G1, G2, G4, G6, **G10** |
 
 Term by term:
 
@@ -80,13 +81,35 @@ Term by term:
      softmax over N, RoPE phase density, seq-dependent normalization.
   Measured properties: graph-dominated, not content (G1); real at σ=1
   where the input is pure ε by construction (G2); localized in **depth**
-  (early blocks ~3×, all module types uniformly; RoPE refuted as a
-  concentrated mechanism) (G4); **dissociated from the checkpoint's
-  forward prior** — prior distances are flat across routes whose Floors
-  span 0 → 0.3, so the Floor's route-ordering lives in the J factor, not
-  in x̂_prior (G6). Floor_e is also σ-independent *in cosine units* — a
-  transmission fraction of whatever residual exists — which is why it
-  reads as a flat plateau rather than being divided by G like S1.
+  (early blocks ~3×, all module types uniformly) (G4); **dissociated from
+  the checkpoint's forward prior** — prior distances are flat across
+  routes whose Floors span 0 → 0.3, so the Floor's route-ordering lives
+  in the J factor, not in x̂_prior (G6). Floor_e is also σ-independent
+  *in cosine units* — a transmission fraction of whatever residual
+  exists — which is why it reads as a flat plateau rather than being
+  divided by G like S1.
+
+  **Decomposition (v2.1, G10, qualified by G11): `Floor_e = RoPE_e +
+  Resid_e`.** An origin-side intervention (PI-stretched fractional RoPE
+  positions on the demoted grid, matching native relative phase geometry
+  exactly) removes the large majority of 768's Floor at the σ=1 endpoint
+  (+0.080 → −0.001 absolute; paired residual over reenc ≈ +0.05–0.07
+  across the two runs) and ~30% of 512's (+0.320 → +0.224). So the
+  mild-route Floor is mostly a **coordinate-system artifact** (RoPE
+  phase-density mismatch), while the harsh-route bulk is the genuine
+  graph residue (softmax-over-N / seq-normalization / capacity). Three
+  corollaries: (1) G4's "RoPE refuted" was a *landing-side* inference — a
+  PE-originated perturbation propagates through the block and lands
+  uniformly across module types, so landing uniformity never localized
+  origin (the depth profile is a property of both components); (2) the
+  capacity governor attaches to **Resid_e**, not to Floor_e as a whole;
+  (3) **RoPE_e is a noise-regime artifact only (G11)** — with content in
+  the input the stretched forward is off-manifold and *adds* error
+  (768pi worse than 768 through σ 0.56–0.81, better only at σ ≥ 0.94),
+  so the removal does not transfer into the training window and is a
+  mechanism finding, not a lever. In the commutator reading, PI alignment
+  zeroes the RoPE component of [D, J] exactly — but only where the
+  residual it transmits is position-geometry-dominated.
 
 The **latent-space quirk** (HF-quiet Qwen-VAE latents, non-scale-equivariant
 encoder) shapes m only — exonerated as the Floor's cause by gap_reenc ≈ 0
@@ -108,7 +131,10 @@ encoder) shapes m only — exonerated as the Floor's cause by gap_reenc ≈ 0
    where the latent is ~97% noise: that's Floor alone (G2). 896's plateau
    0.03–0.05 sits inside instrument noise → "safe".
 5. **Phase-1a FAIL** — 896→768's Floor is outside the band on its own, so
-   no σ-gate can rescue the route.
+   no σ-gate can rescue the route. (G10 briefly reopened a PI-aligned
+   variant; **G11 closed it same-day** — the stretch is off-manifold with
+   content in the input, and S1(1024→768) is fatal regardless. The FAIL
+   stands for every 768 route.)
 6. **1280→1024** — bigger A (harsher ratio) with Floor ≈ 0 → floors
    later (σ\* ≈ 0.75) but cleanly (G5); breaks any pure-capacity
    route-ordering story, hence the hybrid split of S1 (severity) vs Floor
@@ -136,6 +162,13 @@ graph's computation" is the natural reading.
   coincide despite 1.6× capacity difference). Residual: the coarse bins
   localize σ\*(1280→1120) only to (0.375, 0.625); a
   `--sigma_window 0.375,0.625` run would pin it. Mechanism value only.
+- **RoPE_e/Resid_e — route question RESOLVED (G11), mechanism edges
+  remain.** The σ-resolved gate closed the PI-768 route (off-manifold
+  in-window + fatal S1 at ratio 0.75). Still open, mechanism-value only:
+  why the pi stretch is content-hostile (candidate: attention content
+  lobes calibrated to integer phase spacing per grid — would predict the
+  penalty grows with content share, i.e. toward low σ, as measured); the
+  1/40 scaled-rope outlier's grid dims.
 - **Floor checkpoint-dependence through J** — untested. The carving test
   (fine-tune on the 1280 cache via `bench/prep_1280_probe.py`, re-probe;
   if the 1280→1024 gap *opens*, the safety map is

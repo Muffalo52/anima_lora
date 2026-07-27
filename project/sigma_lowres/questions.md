@@ -39,6 +39,18 @@ subset" is a **depth band**: late-half-only updates at 768 read gap
 question (why blocks 3–8 specifically) belongs to the paper phase (Q6), not
 to safety mapping.
 
+**Revised 2026-07-27 (G10, origin-side)**: the RoPE refutation above was a
+*landing-side* inference and is overturned for the mild route — a
+PI-aligned-RoPE arm (`--pi_align`, DyPE-motivated) erases the 768 Floor
+entirely (+0.080 → −0.001) and ~30% of 512's (+0.320 → +0.224).
+`Floor_e = RoPE_e + Resid_e`: the q/k-vs-v landing uniformity was
+propagation of a PE-originated perturbation. Resid_e keeps the depth
+localization and the capacity governor. **G11 qualifier (same day)**:
+rope alignment is NOT a practical lever — the stretch is off-manifold
+with content in the input (768pi *worse* than 768 through σ 0.56–0.81),
+so RoPE_e is removable only in the noise-dominated regime. Mechanism
+finding; no safe-subset lever came out of it.
+
 ## Q3 — Does mixed-res training equalize its own gradients?
 
 All measurements are at a native-res-trained operating point

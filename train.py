@@ -645,6 +645,30 @@ class AnimaTrainer:
         g_noise = torch.Generator(device=device).manual_seed((base + 1) & mask)
         return g_sigma, g_noise
 
+    @staticmethod
+    def _yarnsig_params(args):
+        """Parsed ``--sigma_lowres_yarnsig`` as ``(alpha, beta, center, gamma)``,
+        or None when off. Validates once; cached on the args namespace."""
+        raw = getattr(args, "sigma_lowres_yarnsig", None)
+        if not raw:
+            return None
+        cached = getattr(args, "_yarnsig_parsed", None)
+        if cached is not None:
+            return cached
+        try:
+            alpha, beta, center, gamma = (float(v) for v in raw.split(","))
+        except ValueError:
+            raise ValueError(
+                f"--sigma_lowres_yarnsig expects ALPHA,BETA,CENTER,GAMMA, got {raw!r}"
+            )
+        if not (0.0 <= alpha < beta and 0.0 < center < 1.0 and gamma > 0.0):
+            raise ValueError(
+                "--sigma_lowres_yarnsig needs 0<=ALPHA<BETA, 0<CENTER<1, "
+                f"GAMMA>0, got {raw!r}"
+            )
+        args._yarnsig_parsed = (alpha, beta, center, gamma)
+        return args._yarnsig_parsed
+
     def _maybe_sigma_demote(
         self, ctx: TrainCtx, batch, latents, is_train, generator=None
     ):
@@ -656,8 +680,14 @@ class AnimaTrainer:
         the batch carries ``demoted_latents`` (train datasets with the sidecar
         enabled and the emit present), and this is a train step. ``generator``
         (paired-step-RNG mode) sources the σ draw.
+
+        Side effect: ``self._yarnsig_step`` is (re)set every call — a
+        ``(h_scale, w_scale, alpha, beta, mu)`` tuple on a demoted step under
+        ``--sigma_lowres_yarnsig``, else None — consumed (and cleared) by the
+        primary forward.
         """
         args = ctx.args
+        self._yarnsig_step = None
         if not is_train or not getattr(args, "sigma_lowres", False):
             return latents, None
         demoted = batch.get("demoted_latents")
@@ -698,14 +728,42 @@ class AnimaTrainer:
         if bool((sigmas_flat > threshold).all()):
             native_hw = tuple(latents.shape[-2:])
             latents = demoted.to(device=latents.device, dtype=latents.dtype)
+            yarn = self._yarnsig_params(args)
+            if yarn is not None:
+                alpha, beta, center, gamma = yarn
+                # Patch-grid units (patch_spatial=2 on the latent grid) — the
+                # probe's per-axis stretch: demoted patch i sits at
+                # i · (native_patches / demoted_patches), spanning the native
+                # coordinate range. μ from the batch-min σ: the sample nearest
+                # the gate is the one the low-σ liability was measured on.
+                s = min(max(float(sigmas_flat.min()), 1e-6), 1.0 - 1e-6)
+                mu = 1.0 / (
+                    1.0
+                    + math.exp(
+                        -gamma
+                        * (math.log(s / (1.0 - s)) - math.log(center / (1.0 - center)))
+                    )
+                )
+                self._yarnsig_step = (
+                    (native_hw[0] // 2) / (latents.shape[-2] // 2),
+                    (native_hw[1] // 2) / (latents.shape[-1] // 2),
+                    alpha,
+                    beta,
+                    mu,
+                )
             demoted_n = getattr(self, "_sigma_lowres_demoted", 0) + 1
             self._sigma_lowres_demoted = demoted_n
             if demoted_n == 1:
                 logger.info(
-                    "sigma_lowres: first demoted step — latent grid %s → %s at σ=%s",
+                    "sigma_lowres: first demoted step — latent grid %s → %s at σ=%s%s",
                     native_hw,
                     tuple(latents.shape[-2:]),
                     [round(float(s), 3) for s in sigmas_flat],
+                    (
+                        f" (yarnsig μ={self._yarnsig_step[-1]:.3f})"
+                        if self._yarnsig_step is not None
+                        else ""
+                    ),
                 )
         else:
             demoted_n = getattr(self, "_sigma_lowres_demoted", 0)
@@ -1070,43 +1128,51 @@ class AnimaTrainer:
             2
         )  # 4D to 5D, [B, C, H, W] -> [B, C, 1, H, W]
 
-        with torch.set_grad_enabled(is_train), accelerator.autocast():
-            model_pred, cond = self._run_primary_forward(
-                ctx,
-                anima=anima,
-                noisy_model_input=noisy_model_input,
-                timesteps=timesteps,
-                tc=tc,
-                padding_mask=padding_mask,
-            )
-            self._attach_aux_losses(
-                ctx,
-                anima=anima,
-                batch=batch,
-                latents=latents,
-                noise=noise,
-                sigmas=sigmas,
-                timesteps=timesteps,
-                noisy_model_input=noisy_model_input,
-                cond=cond,
-                padding_mask=padding_mask,
-                is_train=is_train,
-            )
-            self._dispatch_adapter_extras(
-                ctx,
-                ForwardArtifacts(
-                    anima_call=anima,
+        # yarnsig: expose this demoted step's banded-rope params on the model
+        # for exactly the span of its forward(s); cleared in the finally so a
+        # later native/val/sample forward can never inherit them.
+        if getattr(self, "_yarnsig_step", None) is not None:
+            anima._sigma_lowres_yarn = self._yarnsig_step
+        try:
+            with torch.set_grad_enabled(is_train), accelerator.autocast():
+                model_pred, cond = self._run_primary_forward(
+                    ctx,
+                    anima=anima,
                     noisy_model_input=noisy_model_input,
                     timesteps=timesteps,
-                    crossattn_emb=cond.crossattn_emb,
+                    tc=tc,
                     padding_mask=padding_mask,
-                    forward_kwargs=cond.kw,
-                    model_pred=model_pred,
-                    noise=noise,
+                )
+                self._attach_aux_losses(
+                    ctx,
+                    anima=anima,
+                    batch=batch,
                     latents=latents,
+                    noise=noise,
+                    sigmas=sigmas,
+                    timesteps=timesteps,
+                    noisy_model_input=noisy_model_input,
+                    cond=cond,
+                    padding_mask=padding_mask,
                     is_train=is_train,
-                ),
-            )
+                )
+                self._dispatch_adapter_extras(
+                    ctx,
+                    ForwardArtifacts(
+                        anima_call=anima,
+                        noisy_model_input=noisy_model_input,
+                        timesteps=timesteps,
+                        crossattn_emb=cond.crossattn_emb,
+                        padding_mask=padding_mask,
+                        forward_kwargs=cond.kw,
+                        model_pred=model_pred,
+                        noise=noise,
+                        latents=latents,
+                        is_train=is_train,
+                    ),
+                )
+        finally:
+            anima._sigma_lowres_yarn = None
         model_pred = model_pred.squeeze(2)  # 5D to 4D, [B, C, 1, H, W] -> [B, C, H, W]
 
         # Note: do NOT clear timestep mask here -- gradient checkpointing recomputes the forward
@@ -1771,6 +1837,18 @@ class AnimaTrainer:
                 getattr(args, "sigma_lowres_threshold", 0.5),
                 enabled_on,
             )
+            yarn = self._yarnsig_params(args)  # validates the format up front
+            if yarn is not None:
+                logger.info(
+                    "sigma_lowres yarnsig ENABLED: banded rope on demoted "
+                    "steps, α,β=%s,%s, μ=sigmoid(%s·[logit(σ)−logit(%s)]).",
+                    *(yarn[0], yarn[1], yarn[3], yarn[2]),
+                )
+        elif getattr(args, "sigma_lowres_yarnsig", None):
+            raise ValueError(
+                "--sigma_lowres_yarnsig requires --sigma_lowres (it only "
+                "changes rope on demoted steps, which need the demote sidecar)."
+            )
 
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
@@ -2282,6 +2360,29 @@ class AnimaTrainer:
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
         set_seed(args.seed)
+
+        # --deterministic: close the one un-seedable noise source (flash-attn
+        # backward atomic-add order) plus the standard torch determinism knobs,
+        # so two runs of the identical command are bit-exact and paired A/B
+        # endpoint deltas are pure treatment. Must precede CUDA/cublas init and
+        # the first (possibly compiled) forward — the flash flag is read at
+        # trace time. warn_only: unexpected nondeterministic ops log rather
+        # than kill a run mid-flight. NB bespoke loops (turbo/spd/mod) do not
+        # inherit this — mirror explicitly if a paired A/B needs it there.
+        if getattr(args, "deterministic", False):
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            from networks import attention_dispatch
+
+            attention_dispatch.set_deterministic(True)
+            logger.info(
+                "deterministic mode: flash-attn deterministic backward + "
+                "torch.use_deterministic_algorithms(warn_only) + cudnn "
+                "deterministic (CUBLAS_WORKSPACE_CONFIG=%s)",
+                os.environ["CUBLAS_WORKSPACE_CONFIG"],
+            )
 
         # Whether inductor will have CUDAGraphs active -- governs whether the
         # training loop needs to call torch.compiler.cudagraph_mark_step_begin()

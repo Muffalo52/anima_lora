@@ -279,3 +279,85 @@ class TestPairedStepRng:
             s_b, n_b = arm_step(step, global_junk=3001)
             assert torch.equal(s_a, s_b)
             assert torch.equal(n_a, n_b)
+
+
+class TestYarnsigRope:
+    """--sigma_lowres_yarnsig: σ-gated YaRN banded rope on demoted steps.
+
+    Pins the two reduction identities the probe's read rests on (μ→0 ⇒
+    native integer spacing, i.e. the intervention vanishes below the gate;
+    all-bands-below-α ⇒ the uniform PI stretch) plus the μ gate formula and
+    the flag's parse/guard behavior.
+    """
+
+    @staticmethod
+    def _pe():
+        from library.anima.models import VideoRopePosition3DEmb
+
+        return VideoRopePosition3DEmb(
+            model_channels=1024, len_h=128, len_w=128, len_t=8, head_dim=128
+        )
+
+    # The live route's top free-fit bucket: (152,108) native latent →
+    # (130,92) demoted, patch grids (76,54) → (65,46).
+    _SHAPE = torch.Size([1, 1, 65, 46, 1024])
+    _HS, _WS = 76 / 65, 54 / 46
+
+    def test_mu_zero_reduces_to_native(self):
+        pe = self._pe()
+        native = pe.generate_embeddings(self._SHAPE)
+        yarn = pe.generate_embeddings_yarn(self._SHAPE, self._HS, self._WS, 1, 4, 0.0)
+        for a, b in zip(yarn, native):
+            assert torch.equal(a, b)
+
+    def test_all_bands_full_stretch_reduces_to_uniform_pi(self):
+        pe = self._pe()
+        scaled = pe.generate_embeddings_scaled(
+            self._SHAPE, h_scale=self._HS, w_scale=self._WS
+        )
+        yarn = pe.generate_embeddings_yarn(
+            self._SHAPE, self._HS, self._WS, 1e9, 2e9, 1.0
+        )
+        for a, b in zip(yarn, scaled):
+            # equal up to float association: (seq·s)⊗f vs seq⊗(f·s)
+            assert torch.allclose(a, b, atol=1e-5)
+
+    def test_static_yarn_between_native_and_pi(self):
+        pe = self._pe()
+        native = pe.generate_embeddings(self._SHAPE)
+        yarn = pe.generate_embeddings_yarn(self._SHAPE, self._HS, self._WS, 1, 4, 1.0)
+        assert not torch.allclose(yarn[0], native[0], atol=1e-4)
+
+    def test_mu_gate_formula(self):
+        from train import AnimaTrainer
+
+        args = SimpleNamespace(sigma_lowres_yarnsig="1,4,0.35,2")
+        alpha, beta, center, gamma = AnimaTrainer._yarnsig_params(args)
+        assert (alpha, beta, center, gamma) == (1.0, 4.0, 0.35, 2.0)
+
+        def mu(s):
+            import math
+
+            return 1.0 / (
+                1.0
+                + math.exp(
+                    -gamma
+                    * (math.log(s / (1.0 - s)) - math.log(center / (1.0 - center)))
+                )
+            )
+
+        assert abs(mu(0.35) - 0.5) < 1e-12  # center is the half-gate point
+        assert abs(mu(0.21) - 0.20) < 0.02  # probe's reported bin values
+        assert abs(mu(0.59) - 0.88) < 0.02
+        assert mu(0.999) > 0.99
+
+    def test_bad_params_rejected(self):
+        from train import AnimaTrainer
+
+        for bad in ("1,4", "4,1,0.35,2", "1,4,1.5,2", "1,4,0.35,0"):
+            with pytest.raises(ValueError):
+                AnimaTrainer._yarnsig_params(SimpleNamespace(sigma_lowres_yarnsig=bad))
+        assert (
+            AnimaTrainer._yarnsig_params(SimpleNamespace(sigma_lowres_yarnsig=None))
+            is None
+        )

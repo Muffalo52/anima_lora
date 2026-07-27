@@ -349,6 +349,337 @@ CMMD non-inferiority + rendered comparison still decide (renders:
 `output/tests/sigma_ab/` for the unpaired arms, seeds 0–3). Checkpoints:
 `output/ckpt/anima_lora_tenth4{p,s}_*.safetensors`.
 
+The rank-space ΔW comparison is now a permanent instrument:
+`bench/compare_ckpt_dw.py` (global + per-block cosines; reproduces this
+table exactly; paired runs only — unpaired arms read the 0.09 lottery floor
+regardless of intervention).
+
+## yarnsig in-vivo arm (2026-07-27): rope footprint is benign — no extra displacement from base, divergence-from-sigma lands in the low-signal blocks
+
+Trainer wiring for the SigMa-probe winner landed the same day
+(`--sigma_lowres_yarnsig`, bare flag = the probe's `1,4,0.35,2`;
+`methods.md` §"Phase 1b trainer wiring" for mechanics — μ from batch-min σ,
+rope swapped only on demoted forwards, invariants pinned in
+`tests/test_sigma_lowres.py::TestYarnsigRope`). Fifth paired arm trained
+into the tenth4s sweep (`anima_lora_tenth4s_yarnsig`, seed 42 CRN, 1200
+steps 10:10, 245/500 = 49% eligible steps demoted — lockstep with the
+sigma arm's demote set by construction; first demote σ=0.525 → μ=0.808;
+final avr_loss 0.0913 vs sigma's 0.0912). Existing base/sigma/σ0.75/896only
+checkpoints reused as pair partners (CRN makes them valid; the wiring
+change touches no RNG path). Comparison: `results/20260727-1944-dw-yarnsig/`.
+
+| pair | cos | differs by |
+|---|---|---|
+| base ↔ yarnsig | **0.319** | demotion + rope on ~48% of steps |
+| base ↔ sigma | 0.320 | demotion on ~48% (reference) |
+| sigma ↔ yarnsig | **0.402** | ONLY rope on the shared demoted ~48% |
+| yarnsig ↔ σ>0.75 | 0.340 | (sigma ↔ σ>0.75 = 0.343) |
+| yarnsig ↔ 896only | 0.240 | (sigma ↔ 896only = 0.245) |
+
+- **No added displacement from base**: base↔yarnsig 0.319 ≈ base↔sigma
+  0.320, per-block profiles overlapping everywhere (late blocks 0.49–0.73
+  vs 0.48–0.72) — switching the demoted steps' rope to yarnsig moves the
+  final weights no further from never-demote than plain demotion already
+  does.
+- **The rope intervention's footprint is below noise resolution**
+  [corrected same day by the twin-floor measurement, next section; then
+  RESOLVED by the deterministic re-run, section after — footprint real,
+  0.396 pure-treatment]: sigma↔yarnsig 0.402 ≈ the identical-command twin
+  floor 0.413 — at this instrument's nondeterministic resolution the rope
+  change displaces weights no more than hardware nondeterminism does, so
+  nothing could be attributed from this pair.
+- **Location in weight space unchanged**: yarnsig's cosines to every third
+  arm track sigma's within 0.005 — it occupies the same neighborhood, i.e.
+  the σ-gated rope is a refinement of the sigma arm, not a third regime.
+
+Verdict: no in-vivo red flag for the yarnsig refinement — weight-space
+behavior is indistinguishable-from-plain-demotion where that matters
+(distance from base, late-block structure) while carrying the probe's
+alignment wins on demoted steps. The Phase-1b fixed-steps CMMD A/B remains
+the only shipping gate, now three-armed: base vs `--sigma_lowres` vs
+`--sigma_lowres --sigma_lowres_yarnsig`.
+
+## Twin controls + `--deterministic` (2026-07-27): the chaos floor is 0.413, and it is now REMOVABLE
+
+The tenth4s table's absolute cosines rode an unmeasured floor: CRN locks
+every seedable draw (init, data order, σ, noise), but the flash-attn
+**backward** accumulates dK/dV with atomic adds — the reduction order is
+un-seedable, giving ~1e-4/step wobble that chaos amplifies over 1200 steps
+even for the *identical command*. Two controls, run 2026-07-27 evening:
+
+- **Twin floor (nondeterministic)**: `tenth4s_base_twin` = the base arm's
+  exact command re-run. **cos(base, base_twin) = 0.413** with zero
+  treatment difference — late blocks 0.6–0.83, early/mid 3–11 at
+  0.14–0.24, the same depth profile every treated pair shows. Calibration
+  of the existing table: base↔σ>0.75 0.395 and sigma↔yarnsig 0.402 are
+  **at the floor** (treatment footprint unresolved); base↔sigma 0.320,
+  sigma↔896only 0.245, base↔896only 0.184 are **below** it (real
+  displacement beyond noise, ordering intact).
+- **`--deterministic` (new train.py flag)**: flash-attn
+  `deterministic=True` backward (the missing un-seedable source; global
+  set in `networks/attention_dispatch.py`, read at trace time) +
+  `torch.use_deterministic_algorithms(warn_only)` + cuDNN determinism +
+  `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Twin validation `tenth4s_det_{a,b}`:
+  two full compiled 1200-step runs are **bit-identical** — 0/1092 tensors
+  differ, max abs diff 0.0. Cost ~33% throughput (1.23–1.30 vs 1.95 it/s
+  on tenth). Bespoke loops (turbo/spd/mod) do NOT inherit the flag —
+  mirror explicitly if a paired A/B needs it there.
+
+Under `--deterministic`, paired-arm cosines have no floor: any deviation
+from 1.0 is pure treatment. Deterministic re-runs of the three A/B arms
+(det_a = base, det_sigma, det_yarnsig) give the noise-free version of the
+in-vivo table — results in the next section.
+
+## Deterministic three-arm table (2026-07-27): treatment effects attributed — and endpoint cosine revealed as a DETECTOR, not a ruler
+
+Runs: `tenth4s_det_sigma` / `tenth4s_det_yarnsig` (det_a is the base arm
+under determinism); comparison `results/20260727-2110-dw-det/`. Sanity:
+det_b substituted for det_a reproduces every number exactly, as it must —
+the two are bit-identical.
+
+| pair | det cos (pure treatment) | nondet cos (treatment + noise) |
+|---|---|---|
+| base ↔ sigma | 0.305 | 0.320 |
+| base ↔ yarnsig | 0.301 | 0.319 |
+| sigma ↔ yarnsig | **0.396** | 0.402 (was ≈ floor, unresolvable) |
+
+- **Attribution resolved**: sigma↔yarnsig = 0.396 with zero noise — the
+  yarnsig rope change's weight-space footprint is REAL (the nondet read
+  "unresolvable at the floor" was correct *as attribution*; determinism
+  settles it). Depth profile unchanged: best late-block agreement of any
+  pair (0.6–0.8 over 19–27, block 27 = 0.81).
+- **Chaos is intrinsic to training, not to hardware.** Deterministic
+  kernels remove run-to-run noise (det twins bit-exact), but a real
+  treatment difference on ~48% of steps is amplified by the same chaotic
+  dynamics — det numbers land within 0.02 of the nondet ones everywhere.
+  Noise and treatment do NOT add in cosine: 0.402 (noise+treatment) ≈
+  0.396 (treatment alone) ≈ 0.413 (noise alone). Any perturbation that
+  separates trajectories saturates the same low-signal subspace.
+- **Methodological upshot**: endpoint ΔW cosine detects separation and
+  localizes it in depth (late blocks stay data-determined across all
+  pairs; early/mid updates are trajectory-dependent), but its global
+  magnitude cannot rank treatment sizes — a rope tweak on half the steps
+  and full demotion "cost" similar cosine. Treatment-magnitude questions
+  need short-horizon instruments (the per-σ gradient probe) or functional
+  endpoints (CMMD/renders), not endpoint weight geometry. The
+  demoted-fraction ordering in the original table survives because it
+  compared *below*-floor pairs on one axis; do not lean on it further.
+
+## PI-aligned RoPE probe (2026-07-27): the Floor decomposes — 768's is RoPE phase-density, 512's mostly isn't
+
+DyPE-motivated (arXiv:2510.20766) **origin-side** discriminator for the
+Floor's mechanism. Instrument change: `run_sigma_probe.py --pi_align` adds a
+`<edge>pi` arm per demote edge — the **same demoted latent**, but RoPE
+generated at PI-stretched fractional positions (patch `i` at
+`i · H_nat/H_dem` per axis via `generate_embeddings_scaled`, the EasyControl
+Position-Aware-Interpolation machinery; exact at fractional positions,
+built outside the compiled block graph). This makes the demoted grid's
+relative phase geometry match the native grid's exactly, isolating the
+RoPE-phase-density component of the cross-grid J mismatch. Read committed
+before the run (conversation-level, not doc-frozen): pi-gap ≪ plain-gap ⇒
+PE-geometry share real; ≈ ⇒ Floor elsewhere; `896pi ≈ 896 ≈ 0` is the
+off-manifold control. Runs: smoke `results/20260727-1117`, full
+`results/20260727-1122` (40 images × 16 draws, endpoint-only, edges
+896/768/512 + pi twins + reenc, `--per_group`; 47 min).
+
+| arm | gap @ σ=1 (SEM) | pi arm | paired Δ (SEM) | pi better on |
+|---|---|---|---|---|
+| reenc | −0.045 (.032) | — | — | — |
+| 896 | −0.021 (.041) | −0.040 (.040) | — | control clean |
+| **768** | **+0.080 (.048)** | **−0.001 (.039)** | +0.081 (.031) | 78% |
+| **512** | **+0.320 (.058)** | **+0.224 (.056)** | +0.096 (.039) | 70% |
+
+- **768's Floor is ERASED** (median +0.059 → +0.037, in-band; G2's
+  canonical +0.127 reproduced at +0.080 in this pool). To measurement
+  precision, the mild-demotion Floor **is RoPE phase-density mismatch**.
+- **512's Floor is mostly NOT RoPE**: ~30% shaved, the +0.22 bulk survives
+  exact phase alignment with zero images in-band — the residue is the
+  non-PE graph term (attention softmax-over-N / seq-normalization /
+  absolute capacity). Note the 2× stretch also samples the trained
+  coordinate range sparsest here (positions 0, 2, 4, …).
+- **G4 revision (landing vs origin)**: plain-768's per-type gaps are flat
+  (up_q .089 / up_k .100 / up_v .090 — the uniformity that drove "RoPE
+  refuted as a concentrated mechanism"), yet the origin-side intervention
+  removes the whole Floor. A PE-originated perturbation propagates through
+  the block and *lands* uniformly — per-module landing cannot localize
+  origin. The pi residue at 768 even shows the mild q>k>v ordering
+  (.040/.031/.021) the original discriminator looked for. Depth profile is
+  preserved under pi (early10/late10: .118/.072 → .059/.035 at 768) —
+  early-block dominance is a property of both the RoPE share and the
+  residue.
+- Outlier: `songchuan_li/dan_6583014` (896pi +0.698, 512pi +0.507, 768pi
+  normal) — 1/40 image where scaled rope misbehaves at specific grids;
+  medians robust. Check its exact (H,W) before any trainer wiring.
+- Caveats: single operating point (`anima_soup_sincos`); endpoint-only —
+  the RoPE share is presumed σ-independent like the Floor itself, but the
+  σ-resolved pi curve (and where S1(768-pi) crosses the band) is owed; the
+  smoke hinted pi may be off-manifold at LOW σ (irrelevant to the σ>gate
+  demotion window, but do not use pi-rope below the gate untested).
+
+Verdict: **Floor_e = RoPE_e + Resid_e** — a removable coordinate-system
+share plus a genuine graph residue. Floor_768 ≈ RoPE-only ⇒ the Phase-1a
+"no σ-gate can rescue 896→768" verdict was conditional on an irreducible
+Floor and is now conditionally reopened: a 1024→768 @ high-σ route with
+PI-aligned rope (0.56× token cost vs 896's 0.77×) is on the table pending
+the σ-resolved pi probe. Floor_512's bulk is real and stays fatal.
+
+## σ-resolved pi probe (2026-07-27): PI-768 route CLOSES — the stretch is off-manifold inside the window
+
+`results/20260727-1234` (40 images × 8 draws/bin, `--bins 4 --sigma_window
+0.5,1.0 --endpoint_bin --demote_edges 768 --pi_align`; 86 min). The G10
+route gate, pre-registered in roadmap.md: in-band by σ ≈ 0.6–0.7 →
+proceed; never in-band → close.
+
+| σ | 0.56 | 0.69 | 0.81 | 0.94 | 1.0 |
+|---|---|---|---|---|---|
+| reenc | −.025 (.021) | −.004 (.011) | −.020 (.008) | +.010 (.041) | +.016 (.049) |
+| 768 | +.200 (.028) | +.179 (.020) | +.122 (.021) | +.096 (.037) | +.102 (.059) |
+| 768pi | +.251 (.032) | +.286 (.017) | +.225 (.028) | +.066 (.029) | +.081 (.059) |
+| paired 768−768pi | −.051 (.026) | −.108 (.029) | −.103 (.035) | +.030 (.039) | +.021 (.044) |
+
+**CLOSED**, two independent reasons:
+
+1. **The stretch is off-manifold with content in the input**: 768pi is
+   *worse* than plain 768 through σ 0.56–0.81 (paired −0.05..−0.11, up to
+   3.7 SEM), flipping to better only at σ ≥ 0.94 where the input is ~pure
+   noise and position geometry is all that differs. RoPE_e is erasable
+   only in the noise-dominated regime — the model's content processing is
+   calibrated to integer positions per grid, and inside the working
+   window the stretch costs more than the Floor it removes. (Training
+   *through* pi-rope forwards would adapt the model to them, but that
+   voids the zero-adaptation substitution premise the safety criterion
+   rests on — and equivalence would then be measured at the wrong
+   operating point.)
+2. **S1(1024→768) is fatal regardless**: plain 768 excess over reenc
+   stays +0.09–0.22 across the whole window (≈4 SEM even at σ=0.94) —
+   ratio 0.75, A_e ~ ratio, no gate position helps.
+
+Honesty correction to the endpoint run's "erased": this run's paired
+pi−reenc endpoint excess is +0.065 (.024), and the morning run's absolute
+zero (−0.001) sat on a −0.045 reenc draw — so read G10 as "PI alignment
+removes the **large majority** of Floor_768, small residual above
+control", not exact zero. The decomposition verdict is unchanged.
+
+Safe set unchanged: {1024→896 @ σ>0.5, 1280→1024 @ σ\*∈(0.625, 0.875)}.
+G10 remains a mechanism finding (Floor origin = RoPE phase density,
+measured where content is absent) — Q6 material, not a training lever.
+
+## YaRN-banded alignment probe (2026-07-27): gate does NOT widen — but frequency-selectivity rescues alignment from the PI penalty
+
+Run: `results/20260727-1421/` (40 images × 8 draws/bin, `--bins 4
+--sigma_window 0.15,0.65 --endpoint_bin --demote_edges 896 --pi_align
+--yarn_align 1,4`; 110 min; smoke `results/20260727-1415`). The roadmap's
+pre-registered gate-widening probe for the live 1024→896 route: `896yarn` =
+NTK-by-parts per-dim frequency rescale (`yarn_rope` in `run_sigma_probe.py`
+— full PI stretch for bands with < α=1 rotation across the demoted extent,
+native integer spacing above β=4, linear ramp between), `896pi` = the
+uniform-stretch baseline. Instrument valid: split-half 0.79–0.87 for the
+demote arms; gap_reenc |mean| ≤ 0.037.
+
+| σ bin | 0.21 | 0.34 | 0.46 | 0.59 | 1.0 |
+|---|---|---|---|---|---|
+| gap_896 | .163 | .187 | .103 | .118 | .035 |
+| gap_896pi | .368 | .220 | .147 | .174 | .014 |
+| gap_896yarn | .227 | .163 | **.074** | **.068** | **−.013** |
+| paired yarn−896 | +.064 (2.8σ) | −.025 | −.029 | **−.050 (2.1σ)** | −.048 |
+| paired yarn−reenc | +.190 | +.138 | +.060 | **+.089 (5.9σ)** | −.021 |
+
+Scored against the pre-registered outcomes:
+
+1. **Gate-widening: FAIL.** The improvement leg passes at σ=0.59 (paired
+   −0.050 ± 0.024, 2.1 combined SEM) but the in-band leg fails everywhere:
+   yarn's excess over reenc is +0.060–0.190 (3.4–7.7 SEM out) at every bin
+   σ ≤ 0.65 (medians agree: +0.077/+0.082 at 0.46/0.59). No bin below the
+   gate becomes safe. **Gate stays σ > 0.5.**
+2. **The close-the-family outcome did NOT occur either** — its premise
+   (yarn ≈ pi ≥ 896) is refuted at 5 SEM: yarn beats PI by −0.090 ± 0.018
+   paired over σ 0.46–0.59 (33/40 images) and PI is the worst arm in every
+   window bin (re-confirming G11's off-manifold verdict at 896). Frequency
+   selectivity is exactly what rescues alignment: keeping high-freq bands
+   at native spacing avoids the penalty that sank uniform PI.
+3. **No regression above σ 0.5** — yarn is the best arm at 0.59 and at the
+   endpoint (−0.013, and most stable: cross-image SD 0.236 vs 0.359 plain).
+   Its gap is perfectly monotone in σ (Spearman −1.0).
+
+Secondary structure worth keeping: yarn has a genuine **low-σ liability**
+(+0.064 ± 0.023 over plain at σ=0.21, only 15/40 wins) — the ramp bands
+(1 < r < 4 rotations) sit in neither coordinate system, and at low σ the
+score leans on exactly the fine positional consistency they perturb; the
+LLM-side attention-temperature compensation (~0.1·ln s + 1) is not
+implemented. The improvement-vs-σ crossover sits near σ ≈ 0.35. Never
+apply yarn ungated.
+
+Verdict: **as a gate-widener, closed at α,β = 1,4** — the roadmap's one
+allowed retune remains (wider full-stretch band 0.5,2 / stricter 2,8 are
+the natural probes, optionally + attention temperature) before the
+alignment family closes for good. Independently, yarn at the *existing*
+gate is a small paired win over plain demotion (−0.042 ± 0.018 over
+σ ≥ 0.46 incl. endpoint) — a refinement candidate that only the Phase-1b
+CMMD A/B could ship, not a probe-level decision. Safe set unchanged:
+{1024→896 @ σ>0.5, 1280→1024 @ σ\*∈(0.625, 0.875)}.
+
+Pool note: this pool reads hotter than Phase-0's above the gate (plain-896
+excess +0.139 at σ=0.59 vs Phase-0's ~0.05 at 0.56) — pool composition,
+not a gate re-litigation; paired arm-vs-arm differences are the verdict
+objects here.
+
+## SigMa σ-gated YaRN boundaries (2026-07-27): PASS both legs — yarnsig is the Phase-1b refinement candidate
+
+Run: `results/20260727-1639/` (110 min; 40 images × 8 draws/bin, `--bins 4
+--sigma_window 0.15,0.65 --endpoint_bin --demote_edges 896 --yarn_align
+1,4 --yarn_sigma_gate 0.35,2`; smoke `results/20260727-1633`;
+pre-registration in `roadmap.md` §"SigMa σ-gated YaRN boundaries").
+`896yarnsig` = the static (1,4) banded rescale with both thresholds scaled
+per-draw by μ(σ) = sigmoid(2·[logit(σ) − logit(0.35)]) — SigMa's dynamic
+boundary gating (Eq. 21, github.com/bxuanz/SigMa), functional form only
+(their scale laws rejected as inference-side, center from our measured
+crossover). μ at the bins: 0.20 / 0.48 / 0.72 / 0.88 / 1.00. Instrument
+valid: demote-arm split-half 0.58–0.88; gap_reenc |mean| ≤ 0.038.
+
+| σ bin | 0.21 | 0.34 | 0.46 | 0.59 | 1.0 |
+|---|---|---|---|---|---|
+| gap_896 | .163 | .187 | .102 | .118 | .035 |
+| gap_896yarn | .243 | .149 | .083 | .077 | .045 |
+| gap_896yarnsig | .197 | .155 | .112 | .086 | **−.014** |
+| paired yarnsig−896 | **+.033 (1.4σ)** | −.032 | +.010 | −.032 | −.049 |
+| paired yarnsig−yarn | −.046 | +.007 | +.029 | **+.009 (0.4σ)** | **−.058 (1.4σ)** |
+| paired yarn−896 (ref) | +.079 (2.6σ) | −.038 | −.019 | −.041 | +.010 |
+
+Scored against the pre-registered legs:
+
+1. **Liability leg: PASS.** Paired yarnsig−896 at σ=0.21 is +0.033 ±
+   0.025 — within 2 combined SEM of 0, and no new liability at 0.34
+   (−0.032, yarnsig *better* than plain). Static yarn replicated its
+   liability in the same pool (+0.079, 2.6σ — prior run +0.064), so the
+   σ-gate cut it by ~58%. Honesty note: the residual is a trend, not
+   zero — median +0.023, 16/40 wins, split-half of the bin-0 diff
+   unstable (+0.070/−0.003). "Attenuated below significance", not
+   "proven erased".
+2. **Preservation leg: PASS.** Paired yarnsig−yarn is +0.009 ± 0.022
+   (0.4σ) at σ=0.59 and −0.058 ± 0.043 (1.4σ, favoring yarnsig) at the
+   endpoint — the σ≥0.46 alignment wins survive the gate. yarnsig keeps
+   the paired win over plain demotion where it matters (−0.032 @ 0.59,
+   −0.049 @ endpoint) and is the best + most stable arm at the endpoint
+   (gap −0.014, SEM 0.037 vs 0.057–0.059 for the others). The endpoint
+   yarnsig-vs-yarn diff is seed noise by construction (μ=1 there makes
+   the arms rope-identical).
+3. **Not a gate-widener, as pre-committed**: yarnsig excess over reenc is
+   +0.099–0.159 (4.1–7.2 SEM) at every window bin — plain-896's S1 owns
+   that budget. **Gate stays σ > 0.5.**
+
+Verdict: **yarnsig replaces "static yarn at the existing gate" as the
+Phase-1b refinement candidate** — applicable ungated on demoted steps (no
+second σ-threshold in the trainer; the gate is inside the rope schedule),
+shippable ONLY via the Phase-1b CMMD A/B. The owed α,β retune is **no
+longer owed** — timing did the job the retune was reserved for; it stays
+available as a conditional reserve iff the Phase-1b A/B surfaces a low-σ
+regression attributable to the residual +0.033 trend. Mechanism footnote:
+at μ=0.20 the (1,4) ramp bands are already at native spacing, yet a
+~40% liability residual trends — so the prior run's ramp-band account is
+at most partial; some share plausibly rides the still-stretched r < α·μ
+global carriers. Mechanism-value only; no route implication. Safe set
+unchanged: {1024→896 @ σ>0.5, 1280→1024 @ σ\*∈(0.625, 0.875)}.
+
 ## Caveats
 
 - Single operating point (`anima_soup_sincos`, trained at native tiers). An

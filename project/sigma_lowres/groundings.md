@@ -136,7 +136,10 @@ up_q/up_k show zero excess over up_v); adaln among the highest with
 ep−xz ≈ 0 (global-statistics shift, not content).
 
 **Grounds**: the J-mismatch is an early-block representation property,
-not a parameter circuit; "safe subset" is a depth band.
+not a parameter circuit; "safe subset" is a depth band. **Origin-side
+revision in G10** — the landing-side q/k-vs-v uniformity that refuted RoPE
+here cannot localize *origin*; G10's intervention shows the 768 Floor is
+RoPE-originated after all (propagation makes the landing uniform).
 
 ## G5 — 1280→1024 probe (route ordering breaks pure capacity)
 
@@ -313,3 +316,70 @@ contrast (hypothesis.md open edge, frozen before the run): A ~ ratio →
 
 **Grounds**: A_e ~ ratio (severity); with G5, the ratio/capacity
 division of labor between A_e and Floor_e.
+
+## G10 — PI-aligned RoPE probe (Floor decomposition: RoPE_e + Resid_e)
+
+`run_sigma_probe.py --pi_align`, `results/20260727-1122` (40 images ×
+16 draws, σ=1 endpoint-only, edges 896/768/512 + pi twins + reenc,
+`--per_group`; smoke `20260727-1117`). DyPE-motivated (arXiv:2510.20766)
+**origin-side intervention**: per demote edge an extra `<edge>pi` arm runs
+the same demoted latent with RoPE at PI-stretched fractional positions
+(patch `i` at `i · H_nat/H_dem` per axis, `generate_embeddings_scaled`),
+making the demoted grid's relative phase geometry exactly match native.
+Read committed before the run (conversation-level, not doc-frozen):
+pi ≪ plain ⇒ RoPE share real; ≈ ⇒ Floor elsewhere (G4 confirmed from the
+origin side); 896pi ≈ 0 as off-manifold control.
+
+| edge | plain @ σ=1 (SEM) | pi (SEM) | paired Δ (SEM) | pi better |
+|---|---|---|---|---|
+| 896 | −0.021 (.041) | −0.040 (.040) | — | control ✓ |
+| 768 | +0.080 (.048) | **−0.001 (.039)** | +0.081 (.031) | 78% |
+| 512 | +0.320 (.058) | **+0.224 (.056)** | +0.096 (.039) | 70% |
+
+- **768's Floor erased** to within the instrument band (median .059→.037);
+  G2's Floor reproduced (+0.080 this pool vs canonical +0.127).
+- **512's bulk survives** exact phase alignment (~30% shaved, 0/40 images
+  in-band) — non-PE graph residue (softmax-over-N / normalization /
+  capacity); caveat: 2× stretch is also the sparsest sampling of the
+  trained coordinate range.
+- **Landing ≠ origin**: plain-768 per-type landing is flat (q .089 /
+  k .100 / v .090) yet the origin intervention removes the Floor — G4's
+  RoPE refutation was a landing-side inference and is overturned for the
+  mild route. The pi residue shows mild q>k>v (.040/.031/.021). Depth
+  profile preserved under pi (early-block dominance in both components).
+- Outlier 1/40 (`songchuan_li/dan_6583014`: 896pi +0.698) — scaled rope
+  misbehaves on one grid; medians robust; inspect before trainer wiring.
+- Caveats: single operating point; endpoint-only (σ-resolved pi curve
+  owed); pi possibly off-manifold at low σ (smoke hint) — irrelevant to
+  the σ>gate window but untested below it.
+
+**Grounds**: Floor_e decomposes — **Floor_e = RoPE_e (coordinate-system
+share, erasable by PI position alignment; the large majority of 768's,
+~30% of 512's) + Resid_e (non-PE graph term; the true irreducible
+Floor)**. Capacity governs Resid_e; the Phase-1a 896→768 verdict was
+conditionally reopened for a PI-aligned 1024→768 high-σ route — closed
+same day by G11.
+
+## G11 — σ-resolved pi probe (route gate: PI-768 CLOSED; stretch off-manifold in-window)
+
+`results/20260727-1234` (40 images × 8 draws/bin, bins 4 on σ∈(0.5,1.0) +
+endpoint, arms reenc/768/768pi; 86 min). Gate pre-registered in
+roadmap.md before the run: in-band by σ ≈ 0.6–0.7 → proceed; never
+in-band → close. Full table in report.md "σ-resolved pi probe".
+
+- **768pi WORSE than plain 768 through σ 0.56–0.81** (paired −0.05..−0.11,
+  ≤3.7 SEM), better only at σ ≥ 0.94: the stretch is off-manifold once
+  content is in the input — RoPE_e is erasable only in the
+  noise-dominated regime. Training through pi-rope forwards would void
+  the zero-adaptation substitution premise, so no trainer path.
+- **S1(1024→768) fatal on its own**: plain 768 excess over reenc
+  +0.09–0.22 across the window (~4 SEM at σ=0.94) — ratio 0.75, per
+  A_e ~ ratio (G9).
+- Tempering of G10's "erased": paired pi−reenc endpoint excess here
+  +0.065 (.024); the morning absolute zero rode a −0.045 reenc draw.
+  RoPE_e = large majority of Floor_768, not exactly all.
+
+**Grounds**: the PI-768 route is closed (both the lever and the route);
+G10's decomposition survives as mechanism (endpoint regime); safe set
+unchanged. RoPE_e is a *noise-regime* coordinate artifact — its removal
+does not transfer into the contentful window.

@@ -27,10 +27,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import shutil
 import sys
 import time
+from contextlib import contextmanager, nullcontext
+from functools import partial
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -109,6 +112,49 @@ def parse_args() -> argparse.Namespace:
         "sigma*eps, target = eps; captions and latent shapes kept). Isolates "
         "pure graph-shape gradient sensitivity — no content anywhere. Implies "
         "--no_reenc_control (re-encode of nothing = the floor arm).",
+    )
+    p.add_argument(
+        "--pi_align",
+        action="store_true",
+        help="add a '<edge>pi' arm per demote edge: the SAME demoted latent, "
+        "but RoPE generated at PI-stretched fractional positions (patch i at "
+        "i*H_nat/H_dem per axis via generate_embeddings_scaled) so the demoted "
+        "grid's relative phase geometry matches the native grid's. DyPE-style "
+        "(arXiv:2510.20766) discriminator for the RoPE share of the Floor: "
+        "gap_<e>pi << gap_<e> at sigma=1 => PE-geometry share is real; "
+        "~= => Floor lives in softmax-N / normalization (G4 confirmed from "
+        "the origin side). gap_896pi ~ gap_896 ~ 0 is the off-manifold "
+        "control (fractional positions harmless where the Floor is 0).",
+    )
+    p.add_argument(
+        "--yarn_align",
+        default=None,
+        metavar="ALPHA,BETA",
+        help="add a '<edge>yarn' arm per demote edge: frequency-SELECTIVE "
+        "position alignment (YaRN/NTK-by-parts, arXiv via DyPE 2510.20766 "
+        "Eq.7): spatial RoPE bands completing < ALPHA rotations across the "
+        "demoted grid extent get the full PI stretch toward native "
+        "coordinates (global extent aligned), bands > BETA rotations keep "
+        "native integer spacing (trained local content lobes preserved), "
+        "linear ramp between. Tests whether the RoPE-mediated share of the "
+        "gap can be removed WITHOUT G11's uniform-stretch off-manifold "
+        "penalty. e.g. --yarn_align 1,4",
+    )
+    p.add_argument(
+        "--yarn_sigma_gate",
+        default=None,
+        metavar="CENTER,GAMMA",
+        help="with --yarn_align, add a '<edge>yarnsig' arm: same banded "
+        "rescale but with SigMa-style dynamic boundary gating (SigMa Eq.21, "
+        "github.com/bxuanz/SigMa): both band thresholds scaled per-draw by "
+        "mu(sigma) = sigmoid(GAMMA*(logit(sigma)-logit(CENTER))), so the "
+        "alignment self-attenuates toward native RoPE at low sigma (ramp "
+        "bands leave the stretch zone -> the measured low-sigma liability "
+        "mechanism is removed) and approaches static yarn at high sigma "
+        "(mu->1 at the endpoint). Functional form only — the paper's scale "
+        "laws (t_c=1/s, gamma=sqrt(s)) are inference-side and off-scale at "
+        "s=8/7; CENTER comes from the measured improvement crossover. "
+        "e.g. --yarn_sigma_gate 0.35,2",
     )
     p.add_argument(
         "--pool",
@@ -388,12 +434,127 @@ def pool_stats(acc: PoolAccumulator, arm_keys: list[str]) -> dict:
     return out
 
 
+@contextmanager
+def pi_rope(anima, h_scale: float, w_scale: float):
+    """PI-stretch the main-stream RoPE for the duration: every spatial patch
+    ``i`` sits at fractional position ``i * scale`` (EasyControl's
+    ``generate_embeddings_scaled`` — exact at fractional positions, distinct
+    cache key). Instance-level ``forward`` patch on the pos_embedder; RoPE is
+    built OUTSIDE the compiled block graph (``prepare_embedded_sequence``), so
+    there is no dynamo interaction — the blocks just receive different cos/sin
+    input tensors at the same token count. Scaled cache entries are dropped on
+    exit (per-image scales would otherwise accrete VRAM across the run)."""
+    pe = anima.pos_embedder
+
+    def fwd(x_B_T_H_W_C, fps=None):
+        return pe.generate_embeddings_scaled(
+            x_B_T_H_W_C.shape, h_scale=h_scale, w_scale=w_scale, fps=fps
+        )
+
+    pe.forward = fwd
+    try:
+        yield
+    finally:
+        del pe.forward  # restore the class-level forward
+        for k in [k for k in pe._cos_sin_cache if k and k[0] == "scaled"]:
+            del pe._cos_sin_cache[k]
+
+
+@contextmanager
+def yarn_rope(
+    anima,
+    h_scale: float,
+    w_scale: float,
+    alpha: float,
+    beta: float,
+    gate: tuple[float, float] | None = None,
+):
+    """Frequency-banded position alignment (YaRN/NTK-by-parts style).
+
+    Per spatial RoPE frequency ``f_d`` (rad/patch), the rotation count across
+    the demoted extent is ``r_d = N * f_d / 2π``. Bands with ``r_d < alpha``
+    (global-extent carriers) get the full PI stretch toward native
+    coordinates; ``r_d > beta`` (local content-precision carriers) keep the
+    native integer spacing; linear ramp between. Implemented as a per-dim
+    frequency rescale (phase ``i·f_d·s_d`` ≡ position scale per band), built
+    probe-locally from the pos_embedder's own buffers — models.py untouched.
+    Same instance-``forward`` patch + no-dynamo-interaction reasoning as
+    ``pi_rope``; local per-shape cache, dropped on exit.
+
+    With ``gate=(center, gamma)`` (the ``<edge>yarnsig`` arm), both band
+    thresholds are scaled by ``μ(σ) = sigmoid(gamma·[logit(σ) −
+    logit(center)])`` — SigMa's dynamic boundary gating (Eq. 21) adapted to
+    demotion: at low σ the thresholds shrink toward 0, every band lands above
+    ``beta·μ`` and keeps native spacing (intervention off); μ→1 recovers the
+    static yarn arm. Yields a handle with ``set_sigma`` that the estimator
+    calls per draw; cos/sin cache keyed on (shape, μ)."""
+    from einops import repeat as _repeat
+
+    pe = anima.pos_embedder
+    cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+    state = {"mu": 1.0}
+
+    def s_vec(freqs: torch.Tensor, n: int, scale: float) -> torch.Tensor:
+        mu = state["mu"]
+        if mu < 1e-9:
+            return torch.ones_like(freqs)
+        r = n * freqs / (2 * math.pi)
+        g = ((r - alpha * mu) / ((beta - alpha) * mu)).clamp(0.0, 1.0)
+        return (1.0 - g) * scale + g
+
+    def fwd(x_B_T_H_W_C, fps=None):
+        B, T, H, W, _ = x_B_T_H_W_C.shape
+        key = (T, H, W, round(state["mu"], 6))
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        h_freqs = 1.0 / ((10000.0 * pe.h_ntk_factor) ** pe.dim_spatial_range)
+        w_freqs = 1.0 / ((10000.0 * pe.w_ntk_factor) ** pe.dim_spatial_range)
+        t_freqs = 1.0 / ((10000.0 * pe.t_ntk_factor) ** pe.dim_temporal_range)
+        half_h = torch.outer(pe.seq[:H], h_freqs * s_vec(h_freqs, H, h_scale))
+        half_w = torch.outer(pe.seq[:W], w_freqs * s_vec(w_freqs, W, w_scale))
+        half_t = torch.outer(pe.seq[:T], t_freqs)
+        em = torch.cat(
+            [
+                _repeat(half_t, "t d -> t h w d", h=H, w=W),
+                _repeat(half_h, "h d -> t h w d", t=T, w=W),
+                _repeat(half_w, "w d -> t h w d", t=T, h=H),
+            ]
+            * 2,
+            dim=-1,
+        )
+        freqs = em.flatten(0, 2).unsqueeze(1).unsqueeze(1).float()
+        out = (torch.cos(freqs), torch.sin(freqs))
+        cache[key] = out
+        return out
+
+    handle = None
+    if gate is not None:
+        center, gamma = gate
+        logit_c = math.log(center / (1.0 - center))
+
+        def set_sigma(sigma: float) -> None:
+            s = min(max(sigma, 1e-6), 1.0 - 1e-6)
+            state["mu"] = 1.0 / (
+                1.0 + math.exp(-gamma * (math.log(s / (1.0 - s)) - logit_c))
+            )
+
+        handle = argparse.Namespace(set_sigma=set_sigma)
+    pe.forward = fwd
+    try:
+        yield handle
+    finally:
+        del pe.forward
+        cache.clear()
+
+
 def grad_estimate_binned(
     bundle,
     latents: torch.Tensor,
     crossattn: torch.Tensor,
     sigmas: torch.Tensor,  # (bins, draws)
     seeds: list[int],  # len == bins * draws
+    rope_patch=None,  # no-arg callable returning a rope-patch context manager
 ) -> tuple[list[torch.Tensor], list[float]]:
     """Per-σ-bin accumulated-gradient estimates.
 
@@ -413,27 +574,31 @@ def grad_estimate_binned(
     vecs: list[torch.Tensor] = []
     norms: list[float] = []
     n_bins, n_draws = sigmas.shape
-    for b in range(n_bins):
-        for p in params:
-            p.grad = None
-        for j in range(n_draws):
-            seed = seeds[b * n_draws + j]
-            gen = torch.Generator(device=device).manual_seed(seed)
-            noise = torch.randn(
-                lat.shape, generator=gen, device=device, dtype=lat.dtype
-            )
-            sigma_b = sigmas[b, j].to(device).view(1)
-            noisy = (1.0 - sigma_b) * lat + sigma_b * noise
-            target = noise - lat
-            noisy_5d = noisy.unsqueeze(2).to(torch.bfloat16)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                pred = bundle.anima(noisy_5d, sigma_b, crossattn, padding_mask=pad)
-            pred = pred.squeeze(2).float()
-            loss = torch.nn.functional.mse_loss(pred, target)
-            loss.backward()
-        vec = torch.cat([p.grad.detach().float().flatten().cpu() for p in params])
-        vecs.append(vec)
-        norms.append(float(vec.norm()))
+    ctx = rope_patch() if rope_patch else nullcontext()
+    with ctx as rope_handle:
+        for b in range(n_bins):
+            for p in params:
+                p.grad = None
+            for j in range(n_draws):
+                seed = seeds[b * n_draws + j]
+                gen = torch.Generator(device=device).manual_seed(seed)
+                noise = torch.randn(
+                    lat.shape, generator=gen, device=device, dtype=lat.dtype
+                )
+                sigma_b = sigmas[b, j].to(device).view(1)
+                if rope_handle is not None:  # σ-gated rope (yarnsig arm)
+                    rope_handle.set_sigma(float(sigmas[b, j]))
+                noisy = (1.0 - sigma_b) * lat + sigma_b * noise
+                target = noise - lat
+                noisy_5d = noisy.unsqueeze(2).to(torch.bfloat16)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    pred = bundle.anima(noisy_5d, sigma_b, crossattn, padding_mask=pad)
+                pred = pred.squeeze(2).float()
+                loss = torch.nn.functional.mse_loss(pred, target)
+                loss.backward()
+            vec = torch.cat([p.grad.detach().float().flatten().cpu() for p in params])
+            vecs.append(vec)
+            norms.append(float(vec.norm()))
     for p in params:
         p.grad = None
     return vecs, norms
@@ -443,6 +608,14 @@ def main() -> None:
     args = parse_args()
     start_heartbeat()
     edges = [int(e) for e in args.demote_edges.split(",") if e]
+    if args.yarn_sigma_gate:
+        if not args.yarn_align:
+            raise SystemExit("--yarn_sigma_gate requires --yarn_align")
+        gc, gg = (float(v) for v in args.yarn_sigma_gate.split(","))
+        if not (0.0 < gc < 1.0 and gg > 0.0):
+            raise SystemExit(
+                f"--yarn_sigma_gate needs 0<CENTER<1 and GAMMA>0, got {gc},{gg}"
+            )
     if args.x_zero:
         args.no_reenc_control = True
     reenc_control = not args.no_reenc_control
@@ -523,7 +696,15 @@ def main() -> None:
     )
     rows_path = run_dir / "per_image.jsonl"
     rows: list[dict] = []
-    arm_keys = (["reenc"] if reenc_control else []) + [str(e) for e in edges]
+    arm_keys = ["reenc"] if reenc_control else []
+    for e in edges:
+        arm_keys.append(str(e))
+        if args.pi_align:
+            arm_keys.append(f"{e}pi")
+        if args.yarn_align:
+            arm_keys.append(f"{e}yarn")
+            if args.yarn_sigma_gate:
+                arm_keys.append(f"{e}yarnsig")
     pool_strata: list[dict] = []
     pool_spill = run_dir / "pool_agg_spill"
     pool_agg = PoolAccumulator(backing_dir=pool_spill)
@@ -601,19 +782,45 @@ def main() -> None:
             if args.per_group:
                 row["gapg_reenc"] = grouped_gaps(g_re)
             arms["reenc"] = g_re
+        demote_arms: list = []  # (key, latent, rope-patch factory | None)
         for e in edges:
             lat = extra_latents[(r.stem, f"demote{e}")]
+            demote_arms.append((str(e), lat, None))
+            # per-axis stretch in patch units: demoted patch i sits at
+            # i * (native_patches / demoted_patches), spanning the native
+            # coordinate range so relative RoPE phases match native's
+            hs = (native.shape[-2] // 2) / (lat.shape[-2] // 2)
+            ws = (native.shape[-1] // 2) / (lat.shape[-1] // 2)
+            if args.pi_align:
+                demote_arms.append(
+                    (f"{e}pi", lat, partial(pi_rope, bundle.anima, hs, ws))
+                )
+            if args.yarn_align:
+                a, b_ = (float(v) for v in args.yarn_align.split(","))
+                demote_arms.append(
+                    (f"{e}yarn", lat, partial(yarn_rope, bundle.anima, hs, ws, a, b_))
+                )
+                if args.yarn_sigma_gate:
+                    c_, g_ = (float(v) for v in args.yarn_sigma_gate.split(","))
+                    demote_arms.append(
+                        (
+                            f"{e}yarnsig",
+                            lat,
+                            partial(yarn_rope, bundle.anima, hs, ws, a, b_, (c_, g_)),
+                        )
+                    )
+        for key, lat, patch in demote_arms:
             g_d, n_d = grad_estimate_binned(
-                bundle, lat, crossattn, sigmas, seeds(arm_idx)
+                bundle, lat, crossattn, sigmas, seeds(arm_idx), rope_patch=patch
             )
             arm_idx += 1
             c = [0.5 * (cosine(a, g) + cosine(b, g)) for a, b, g in zip(g_a, g_b, g_d)]
-            row[f"cos_{e}"] = [round(v, 5) for v in c]
-            row[f"gap_{e}"] = [round(f - v, 5) for f, v in zip(floor, c)]
-            row[f"gnorm_{e}"] = [round(v, 3) for v in n_d]
+            row[f"cos_{key}"] = [round(v, 5) for v in c]
+            row[f"gap_{key}"] = [round(f - v, 5) for f, v in zip(floor, c)]
+            row[f"gnorm_{key}"] = [round(v, 3) for v in n_d]
             if args.per_group:
-                row[f"gapg_{e}"] = grouped_gaps(g_d)
-            arms[str(e)] = g_d
+                row[f"gapg_{key}"] = grouped_gaps(g_d)
+            arms[key] = g_d
         if args.pool:
             cur_pool.add_image(arms, r.redundancy)
             if cur_pool.n == args.pool:
@@ -662,10 +869,8 @@ def main() -> None:
         "gnorm_native": bin_stats("gnorm_native"),
         "wall_time_s": round(time.time() - t0, 1),
     }
-    if reenc_control:
-        headline["gap_reenc"] = bin_stats("gap_reenc")
-    for e in edges:
-        headline[f"gap_{e}"] = bin_stats(f"gap_{e}")
+    for k in arm_keys:  # reenc + demote edges + any <edge>pi arms
+        headline[f"gap_{k}"] = bin_stats(f"gap_{k}")
 
     if args.pool and pool_strata:
         # stratum-level redundancy trend: spearman of stratum redundancy mean

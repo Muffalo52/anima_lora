@@ -43,6 +43,34 @@ The 1024→896 @ σ>0.5 route, wired end-to-end on the train.py path:
 - **Evidence in the run log**: `sigma_lowres ENABLED` at setup, a first-demote
   INFO with the grid swap + σ, and a demoted-fraction INFO every 500 eligible
   steps.
+- **yarnsig rope** (`--sigma_lowres_yarnsig [A,B,C,G]`, added 2026-07-27, bare
+  flag = the probe-validated `1,4,0.35,2`): on demoted steps only, RoPE is
+  built by `VideoRopePosition3DEmb.generate_embeddings_yarn` — the σ-gated
+  YaRN banded alignment that PASSED both pre-registered legs in the SigMa
+  probe (`bench/report.md` §"SigMa σ-gated YaRN boundaries"). Spatial bands
+  with < α·μ(σ) rotations across the demoted extent get the full PI stretch
+  to native coordinates, bands above β·μ(σ) keep native integer spacing,
+  linear ramp between; μ(σ) = sigmoid(γ·[logit σ − logit σ_c]) with μ from
+  the batch-min σ (the sample nearest the gate is where the low-σ liability
+  was measured). No second σ-threshold — the gate lives inside the rope
+  schedule; native steps and validation are untouched (`train.py` sets
+  `anima._sigma_lowres_yarn` for exactly the primary forward's span, cleared
+  in a finally). Rope is built outside the compiled block graph
+  (`prepare_embedded_sequence`), so no dynamo interaction; not cached (μ is
+  continuous per step). Identities pinned in `tests/test_sigma_lowres.py::
+  TestYarnsigRope` (μ→0 ⇒ bit-exact native; all-bands-stretch ⇒ uniform PI).
+- **ΔW comparison**: `bench/compare_ckpt_dw.py` — paired checkpoint
+  displacement cosines in rank space (global + per-block depth profile),
+  reproduces the report's tenth4s pair table; paired runs only.
+- **`--deterministic`** (train.py, added 2026-07-27): bit-exact
+  reproducibility — deterministic flash-attn backward (the one un-seedable
+  noise source; `attention_dispatch.set_deterministic`, set before the
+  first forward so compile traces it) + `use_deterministic_algorithms
+  (warn_only)` + cuDNN determinism + CUBLAS workspace config. Twin runs
+  verified bit-identical over a full compiled 1200-step tenth run; ~33%
+  slower. With it, paired A/B ΔW cosines have no chaos floor (which twin
+  measurement put at 0.413 for nondeterministic tenth runs). Not inherited
+  by bespoke loops (turbo/spd/mod) — mirror explicitly.
 
 Smoke-verified 2026-07-26 (satetsu, 8 steps): native grid (152,108) →
 (130,92) at σ=0.516, checkpoint saved. Invariant tests:
