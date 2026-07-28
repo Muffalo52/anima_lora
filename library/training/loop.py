@@ -485,11 +485,17 @@ def _run_step(trainer, state: LoopState, batch) -> torch.Tensor:
             )
             if _will_log_after and hasattr(net_unwrapped, "capture_up_grad_stats"):
                 net_unwrapped.capture_up_grad_stats()
+
+            # --- Grad Norm 계산 및 저장 ---
+            params_to_clip = net_unwrapped.get_trainable_params()
             if args.max_grad_norm != 0.0:
-                params_to_clip = accelerator.unwrap_model(
-                    network
-                ).get_trainable_params()
-                accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+            else:
+                grad_norm = accelerator.clip_grad_norm_(params_to_clip, float("inf"))
+            
+            if grad_norm is not None:
+                state.last_grad_norm = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
+            # ------------------------------------
 
         if state.profile_started:
             torch.cuda.nvtx.range_push("optimizer")
@@ -678,7 +684,7 @@ def _log_step(
             keys_scaled,
             mean_norm,
             maximum_norm,
-            None,  # mean_grad_norm — not tracked here
+            getattr(state, "last_grad_norm", None),  # mean_grad_norm 전달
             None,  # mean_combined_norm — not tracked here
         )
         producers = [_unwrapped_net, *trainer._adapters]
@@ -694,6 +700,9 @@ def _log_step(
             )
         )
         # --- WandB 전송 직전 실질 메트릭 재주입 ---
+        if getattr(state, "last_grad_norm", None) is not None:
+            logs["opt/grad_norm"] = state.last_grad_norm  # WandB 로깅에 grad_norm 추가
+
         raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
         if hasattr(raw_opt, "param_groups") and len(raw_opt.param_groups) > 0:
             pg = raw_opt.param_groups[0]
