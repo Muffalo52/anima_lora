@@ -179,6 +179,45 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_false",
     )
     parser.add_argument(
+        "--dual_pool",
+        dest="dual_pool",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Split the student into TWO always-on plain-LoRA pools on the same "
+        "frozen DiT: pool A (div_pool_rank, zero-init) receives ONLY the step-0 "
+        "diversity gradient, pool B (student_rank, warm-started) ONLY the "
+        "DMD/GAN/CDM refinement gradients. Both active every forward, so the "
+        "merged ΔW_A+ΔW_B saves as a plain stock LoRA (exact concat, no SVD). "
+        "Finishes the parameter-level div/DMD separation detach_after_first only "
+        "does at the graph level. Requires dpdmd + detach_after_first; mutually "
+        "exclusive with per_step_expert. Default: TOML "
+        "(network.dual_pool, default false).",
+    )
+    parser.add_argument(
+        "--no_dual_pool",
+        dest="dual_pool",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--div_pool_rank",
+        type=int,
+        default=-1,
+        help="Rank of the diversity pool A under dual_pool (zero-init up, kaiming "
+        "down; plain LoRA only — no adaln, no channel scaling). The merged "
+        "checkpoint has rank student_rank + div_pool_rank. Default: TOML "
+        "(network.div_pool_rank, default 16).",
+    )
+    parser.add_argument(
+        "--div_pool_lr",
+        type=float,
+        default=-1.0,
+        help="AdamW LR for pool A (dual_pool). 0 = inherit student_lr. The "
+        "diversity signal is one MSE at div_weight, so A may want a hotter LR "
+        "than B — start matched (0), tune later. Default: TOML "
+        "(network.div_pool_lr, default 0.0).",
+    )
+    parser.add_argument(
         "--dm_x0_norm",
         dest="dm_x0_norm",
         action="store_const",
@@ -514,6 +553,15 @@ class TurboConfig:
     # k serves denoise step k. Off → single-head student.
     per_step_expert: bool
     step_expert_K: int
+    # Dual-pool gradient routing (docs/proposal/turbo_dual_pool_grad_routing.md):
+    # two always-on plain-LoRA pools — pool A (div_pool_rank) sees only the
+    # step-0 diversity gradient, pool B (student_rank) only the DMD/GAN/CDM
+    # refinement gradients. Merged ΔW_A+ΔW_B saves as one plain LoRA. Requires
+    # dpdmd + detach_after_first; mutually exclusive with per_step_expert. Off →
+    # single-pool student, byte-identical to the shipped loop.
+    dual_pool: bool
+    div_pool_rank: int
+    div_pool_lr: float  # 0 = inherit student_lr
     # SVD-Down init for the plain-LoRA student (down_init="weight_svd"): seed
     # lora_down from W0's top-r right singular vectors, scale-matched. Mutually
     # exclusive with per_step_expert (guarded in TurboDMDNetwork).
@@ -801,6 +849,21 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         per_step_expert = bool(args.per_step_expert)
     step_expert_K = student_steps if per_step_expert else 0
 
+    if args.dual_pool is None:
+        dual_pool = bool(_flatten(cfg, "network.dual_pool", False))
+    else:
+        dual_pool = bool(args.dual_pool)
+    div_pool_rank = int(_pick(args.div_pool_rank, cfg, "network.div_pool_rank", 16))
+    div_pool_lr = float(_pick(args.div_pool_lr, cfg, "network.div_pool_lr", 0.0))
+    if dual_pool and div_pool_rank < 1:
+        raise ValueError(
+            f"network.div_pool_rank={div_pool_rank}: must be >= 1 under dual_pool."
+        )
+    if dual_pool and div_pool_lr < 0.0:
+        raise ValueError(
+            f"network.div_pool_lr={div_pool_lr}: must be >= 0 (0 = inherit student_lr)."
+        )
+
     student_init_weights = str(_flatten(cfg, "network.student_init_weights", ""))
     fake_init_weights = str(_flatten(cfg, "network.fake_init_weights", ""))
     train_adaln = bool(_flatten(cfg, "network.train_adaln", False))
@@ -1075,6 +1138,36 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             "the diversity mapping (their Fig 5). A/B only — keep True for "
             "production."
         )
+    if dual_pool:
+        # The routing window IS the split backward: pool A takes the step-0
+        # diversity backward alone, pool B the combined refinement backward.
+        # Without the split there is nothing to route.
+        if not use_anchor:
+            raise ValueError(
+                "network.dual_pool=true requires base_loss='dpdmd' (use_anchor): "
+                "plain DMD has no step-0 diversity gradient to route to pool A."
+            )
+        if not detach_after_first:
+            raise ValueError(
+                "network.dual_pool=true requires dpdmd.detach_after_first=true: "
+                "the routing window is the split backward — with the two losses "
+                "fused into one backward there is no seam to gate the pools on."
+            )
+        if per_step_expert:
+            # Both restructure the student; the per_step_expert heads also break
+            # the plain-LoRA bake this design exists to preserve.
+            raise ValueError(
+                "network.dual_pool=true is mutually exclusive with per_step_expert "
+                "(both restructure the student; dual_pool is the plain-LoRA-mergeable "
+                "formulation of the same div/DMD split)."
+            )
+        logger.info(
+            f"dual-pool gradient routing ON: pool A rank={div_pool_rank} "
+            f"(zero-init, step-0 diversity grad only), pool B rank={student_rank} "
+            f"(warm-started, DMD/GAN/CDM grad only); merged rank="
+            f"{student_rank + div_pool_rank}, saves as one plain LoRA. "
+            f"div_pool_lr={div_pool_lr or student_lr}."
+        )
     if t_distribution not in ("uniform", "sigmoid"):
         raise ValueError(
             f"sampling.t_distribution={t_distribution!r}: expected 'uniform' or 'sigmoid'"
@@ -1179,6 +1272,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         channel_scaling_alpha=channel_scaling_alpha,
         per_step_expert=per_step_expert,
         step_expert_K=step_expert_K,
+        dual_pool=dual_pool,
+        div_pool_rank=div_pool_rank,
+        div_pool_lr=div_pool_lr,
         student_down_init=student_down_init,
         fake_down_init=fake_down_init,
         student_init_weights=student_init_weights,

@@ -179,6 +179,9 @@ def run_loop(ctx: RunContext, cfg):
                 s0, s0_next = sigmas_it[0], sigmas_it[1]
                 t_b = torch.full((B,), s0, device=device, dtype=dtype)
                 turbo.set_student_step(0)  # head 0 (no-op unless per-step-expert)
+                # Dual-pool routing: gate grads to pool A so the step-0 diversity
+                # (+ soft-rank) backward below lands on A alone (no-op single-pool).
+                turbo.route_div()
                 v_first = _forward(
                     "student", x, t_b, crossattn_emb, no_grad=False
                 ).squeeze(2)
@@ -225,6 +228,10 @@ def run_loop(ctx: RunContext, cfg):
                     ).backward()
                     softrank_loss = softrank_loss.detach()  # metrics-only from here
                     x = x.detach().requires_grad_()
+                    # Route grads to pool B for everything downstream: the DMD
+                    # rollout, the L_CDM branch, and the GAN generator all build
+                    # graphs that must reach B alone (no-op single-pool).
+                    turbo.route_quality()
                 if cfg.dmd_grad_step == "random":
                     # Memory-flat anchored DMD: sample ONE refinement step g~U{1..N-1},
                     # backward-simulate the prefix under no_grad, grad only step g's
@@ -398,6 +405,10 @@ def run_loop(ctx: RunContext, cfg):
                 loss_student = loss_student + gan_w * gan_gen_loss
 
             loss_student.backward()
+            # Restore grad-on for both dual pools BEFORE clip/step: student_params()
+            # filters requires_grad, so a still-gated pool's grads (pool A's, from the
+            # step-0 backward) would otherwise escape clipping (no-op single-pool).
+            turbo.route_all_on()
             if cfg.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
                     turbo.student_params(), max_norm=cfg.grad_clip

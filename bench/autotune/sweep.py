@@ -518,6 +518,7 @@ def parse_args():
         default=45.0,
         help="max wait for prior cell's VRAM to drain (s)",
     )
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--label", default=None)
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
@@ -548,7 +549,9 @@ def main():
     print(f"GPU memory reader: {reader[2]}")
 
     label = args.label or f"{args.method}-{args.preset}"
-    run_dir = make_run_dir("autotune", label=label)
+    run_dir = make_run_dir(
+        "autotune", label=label, root=Path(__file__).resolve().parent / "results"
+    )
     print(f"Run dir: {run_dir}")
 
     # One clean baseline up front (idle desktop), reused for every cell's delta —

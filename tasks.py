@@ -162,8 +162,21 @@ COMMANDS = {
     "daemon-status": (
         daemon.cmd_daemon_status,
         "Daemon status as JSON (health + resolved base_url + compact job "
-        "summaries; --full for raw records). Passive — never starts a daemon; "
-        "exit 1 when down.",
+        "summaries; --full for raw records, --job <id>/JOB=<id> for one record "
+        "+ its result envelope). Passive — never starts a daemon; exit 1 when down.",
+    ),
+    "daemon-run": (
+        daemon.cmd_daemon_run,
+        'Run an arbitrary command on the GPU queue: ARGS="<script.py> [flags]". '
+        "Attach-by-default (ctrl-C detaches, exits with the job's code); --queue "
+        "detaches, --inline bypasses the daemon; --stall-timeout S (0=off) for a "
+        "legitimately quiet loop.",
+    ),
+    "daemon-wait": (
+        daemon.cmd_daemon_wait,
+        "Block until JOB=<id> (or the active job) is terminal, print its record "
+        "+ bench result envelope as JSON, and exit with the job's own exit code. "
+        'ARGS="--timeout S" bounds the wait (exit 124).',
     ),
     "daemon-attach": (
         daemon.cmd_daemon_attach,
@@ -247,6 +260,11 @@ COMMANDS = {
         'target_res (dry-run; ARGS="--delete" to act). Run after changing tiers.',
     ),
     "preprocess-vae": (preprocess.cmd_preprocess_vae, "Cache VAE latents"),
+    "preprocess-demote": (
+        preprocess.cmd_preprocess_demote,
+        "Emit σ-demote sibling latents (sigma_lowres: 1024→896 keys inside "
+        "the native npz) for --sigma_lowres training",
+    ),
     "preprocess-te": (preprocess.cmd_preprocess_te, "Cache text encoder embeddings"),
     "preprocess-captions": (
         preprocess.cmd_preprocess_captions,

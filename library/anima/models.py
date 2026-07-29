@@ -798,6 +798,77 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
 
         return result
 
+    def generate_embeddings_yarn(
+        self,
+        B_T_H_W_C: torch.Size,
+        h_scale: float,
+        w_scale: float,
+        alpha: float,
+        beta: float,
+        mu: float,
+        fps: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """RoPE with frequency-banded position alignment (YaRN/NTK-by-parts),
+        σ-gated by SigMa-style boundary scaling.
+
+        Per spatial frequency ``f_d`` the rotation count across the extent is
+        ``r_d = N·f_d/2π``. Bands with ``r_d < alpha·mu`` (global-extent
+        carriers) get the full PI stretch toward the native coordinate span
+        (position ``i·scale``, as :meth:`generate_embeddings_scaled`); bands
+        with ``r_d > beta·mu`` (local content-precision carriers) keep native
+        integer spacing; linear ramp between. ``mu ∈ [0, 1]`` shrinks both
+        thresholds (SigMa Eq. 21 boundary gating): at ``mu → 0`` every band
+        clears ``beta·mu`` and the result reduces bit-exactly to native
+        integer-position embeddings; at ``mu = 1`` this is the static YaRN
+        alignment. Not cached — ``mu`` is continuous per training step, so a
+        cache would only accrete; the build is a handful of small outer
+        products.
+        """
+        B, T, H, W, _ = B_T_H_W_C
+
+        h_spatial_freqs = 1.0 / (
+            (10000.0 * self.h_ntk_factor) ** self.dim_spatial_range
+        )
+        w_spatial_freqs = 1.0 / (
+            (10000.0 * self.w_ntk_factor) ** self.dim_spatial_range
+        )
+        temporal_freqs = 1.0 / (
+            (10000.0 * self.t_ntk_factor) ** self.dim_temporal_range
+        )
+
+        def band_scale(freqs: torch.Tensor, n: int, scale: float) -> torch.Tensor:
+            if mu < 1e-9:
+                return torch.ones_like(freqs)
+            r = n * freqs / (2 * math.pi)
+            g = ((r - alpha * mu) / ((beta - alpha) * mu)).clamp(0.0, 1.0)
+            return (1.0 - g) * float(scale) + g
+
+        half_emb_h = torch.outer(
+            self.seq[:H], h_spatial_freqs * band_scale(h_spatial_freqs, H, h_scale)
+        )
+        half_emb_w = torch.outer(
+            self.seq[:W], w_spatial_freqs * band_scale(w_spatial_freqs, W, w_scale)
+        )
+        if self.enable_fps_modulation and fps is not None:
+            half_emb_t = torch.outer(
+                self.seq[:T] / fps[:1] * self.base_fps, temporal_freqs
+            )
+        else:
+            half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
+
+        em_T_H_W_D = torch.cat(
+            [
+                repeat(half_emb_t, "t d -> t h w d", h=H, w=W),
+                repeat(half_emb_h, "h d -> t h w d", t=T, w=W),
+                repeat(half_emb_w, "w d -> t h w d", t=T, h=H),
+            ]
+            * 2,
+            dim=-1,
+        )
+
+        freqs = em_T_H_W_D.flatten(0, 2).unsqueeze(1).unsqueeze(1).float()
+        return (torch.cos(freqs), torch.sin(freqs))
+
     @property
     def seq_dim(self) -> int:
         return 0
@@ -1771,7 +1842,17 @@ class Anima(nn.Module):
             x_B_C_T_H_W = torch.cat([x_B_C_T_H_W, padding_mask_B_1_T_H_W], dim=1)
         x_B_T_H_W_D = self.x_embedder(x_B_C_T_H_W)
 
-        if h_offset != 0 or w_offset != 0:
+        # sigma_lowres yarnsig: a demoted train step sets this 5-tuple
+        # (h_scale, w_scale, alpha, beta, mu) for the duration of its forward
+        # (train.py clears it in a finally); rope is built OUTSIDE the compiled
+        # block graph, so the blocks just see different cos/sin inputs at the
+        # same token count.
+        yarn = getattr(self, "_sigma_lowres_yarn", None)
+        if yarn is not None:
+            rope_cos_sin = self.pos_embedder.generate_embeddings_yarn(
+                x_B_T_H_W_D.shape, *yarn, fps=fps
+            )
+        elif h_offset != 0 or w_offset != 0:
             rope_cos_sin = self.pos_embedder.generate_embeddings_with_offset(
                 x_B_T_H_W_D.shape, h_offset=h_offset, w_offset=w_offset, fps=fps
             )

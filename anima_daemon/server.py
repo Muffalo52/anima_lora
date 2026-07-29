@@ -144,6 +144,15 @@ TOOLS = [
                     "type": "object",
                     "description": "Training spec {method, preset, methods_subdir, overrides} auto-enqueued when this command finishes successfully.",
                 },
+                "stall_timeout": {
+                    "type": "number",
+                    "description": (
+                        "Per-job stall-watchdog budget in seconds, overriding the "
+                        "120s command-job default; 0 disables it. Raise (or disable) "
+                        "for a legitimately quiet embed/eval loop instead of "
+                        "hand-rolling a stdout heartbeat."
+                    ),
+                },
                 "config_snapshot": {
                     "type": "object",
                     "description": "Config dict to pin (forwarded to the chained train job).",
@@ -267,8 +276,10 @@ TOOLS = [
         "name": "tail_logs",
         "description": (
             "SSE stream of a job's combined stdout+stderr from the start of the file; "
-            "ends with a {ev:'eof', state} event once the job is terminal and drained. "
-            "There is no blocking 'wait' call — tail this or poll get_job."
+            "ends with a {ev:'eof', state} event once the job is terminal and drained, "
+            "then closes the connection. There is no blocking server-side 'wait' "
+            "endpoint — tail this, poll get_job, or use the client-side "
+            "DaemonClient.wait / `make daemon-wait JOB=<id>`."
         ),
         "method": "GET",
         "path": "/jobs/{id}/logs",
@@ -354,11 +365,23 @@ class _Handler(BaseHTTPRequestHandler):
         return data if isinstance(data, dict) else {}
 
     def _open_sse(self) -> None:
+        """Open an SSE response — one response per connection, never keep-alive.
+
+        An SSE body has no ``Content-Length`` and no chunked framing, so the only
+        end-of-response signal a client gets is the socket closing. Under
+        ``HTTP/1.1`` keep-alive ``ThreadingHTTPServer`` holds the socket open
+        after the handler returns, awaiting a next request — so a client that had
+        already been sent the ``eof`` event still blocked forever (``curl -N``,
+        ``DaemonClient.stream``, and thus ``make daemon-attach`` on a *finished*
+        job all hung). ``Connection: close`` + ``close_connection`` make the
+        handler's return the client's EOF. Nothing legitimate reuses this socket.
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
 
     def _sse(self, obj) -> bool:
         """Write one SSE event and flush. Returns False on a dropped client —
@@ -455,11 +478,20 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(argv, list) or not argv:
                 self._send_json({"error": "missing 'argv' for command job"}, 400)
                 return
+            stall_timeout = body.get("stall_timeout")
+            try:
+                stall_timeout = (
+                    float(stall_timeout) if stall_timeout is not None else None
+                )
+            except (TypeError, ValueError):
+                self._send_json({"error": "'stall_timeout' must be a number"}, 400)
+                return
             job = self.manager.submit_command(
                 label=body.get("label") or "command",
                 argv=[str(a) for a in argv],
                 extra_env=body.get("extra_env") or {},
                 chain_train=body.get("chain_train") or None,
+                stall_timeout=stall_timeout,
                 config_snapshot=body.get("config_snapshot") or None,
                 config_file=body.get("config_file") or None,
                 start=start,

@@ -852,6 +852,214 @@ def test_command_job_result_lift_end_to_end(real_cmd_daemon):
     assert job["result_summary"] == {"label": "foo-lora", "metrics": {"n_images": 3}}
 
 
+def test_log_stream_closes_on_terminal_job(real_cmd_daemon):
+    """The SSE log stream must END, not park the socket.
+
+    An SSE body has no Content-Length and no chunked framing, so the client's
+    only EOF signal is the connection closing — under HTTP/1.1 keep-alive the
+    handler returned but ThreadingHTTPServer held the socket, so `curl -N`,
+    DaemonClient.stream() and `make daemon-attach` all blocked forever on an
+    already-finished job. Regression guard: consuming the whole stream of a
+    terminal job must terminate on its own (the timeout below is the failure
+    mode, not the assertion).
+    """
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(label="quick", argv=["-c", "print('hi')"])["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+    payloads: list[str] = []
+    done = threading.Event()
+
+    def drain():
+        try:
+            payloads.extend(cl.stream_logs(jid))
+        finally:
+            done.set()
+
+    threading.Thread(target=drain, daemon=True).start()
+    assert done.wait(timeout=20), "log stream never closed on a finished job"
+    assert any("hi" in p for p in payloads)
+    assert any('"eof"' in p for p in payloads)
+
+
+def test_client_wait_returns_final_record(real_cmd_daemon):
+    """DaemonClient.wait blocks to a terminal state and hands back the record —
+    the "submit → wait → read result" primitive callers used to hand-roll."""
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(label="quick", argv=["-c", "print('done')"])["job_id"]
+    rec = cl.wait(jid, timeout=30)
+    assert rec["state"] == "done"
+    assert rec["returncode"] == 0
+
+    with pytest.raises(LookupError):
+        cl.wait("no-such-job", timeout=5)
+
+
+def test_client_wait_timeout_is_not_an_outcome(real_cmd_daemon):
+    """A wait that times out raises rather than returning a running record —
+    "still running" must never read as a verdict."""
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(label="slow", argv=["-c", "import time;time.sleep(30)"])[
+        "job_id"
+    ]
+    try:
+        with pytest.raises(TimeoutError):
+            cl.wait(jid, timeout=1.0)
+    finally:
+        cl.stop(jid)
+
+
+def test_wait_falls_back_to_disk_when_daemon_unreachable(real_cmd_daemon):
+    """job_record (and thus wait) reads the persisted job.json when HTTP fails,
+    so a wait survives the eager stale-code daemon restart mid-poll."""
+    cl, _ = real_cmd_daemon
+    jid = cl.submit_command(label="quick", argv=["-c", "print('x')"])["job_id"]
+    cl.wait(jid, timeout=30)
+
+    dead = _RealDaemonClient(port=1)  # nothing listens there
+    rec = dead.job_record(jid)
+    assert rec is not None and rec["id"] == jid and rec["state"] == "done"
+    assert dead.wait(jid, timeout=5)["state"] == "done"
+
+
+def test_submit_command_stall_timeout_is_recorded_and_honored(real_cmd_daemon):
+    """A per-job stall budget rides the submission and wins over the per-kind
+    default — the supported way to run a legitimately quiet loop (§4)."""
+    cl, mgr = real_cmd_daemon
+    jid = cl.submit_command(label="quiet", argv=["-c", "print('x')"], stall_timeout=0)[
+        "job_id"
+    ]
+    assert cl.get(jid)["stall_timeout"] == 0
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+    # Watchdog: budget 0 → unwatched even with output frozen far past the default.
+    job = mgr.get(jid)
+    job.started_at = time.time() - 10_000
+    os.utime(job.stdout_path, (time.time() - 10_000,) * 2)
+    assert JobManager._stall_reason(job) is None
+    job.stall_timeout = 5
+    assert JobManager._stall_reason(job) is not None  # explicit budget → watched
+
+    import urllib.error
+
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        cl._request(
+            "POST",
+            "/jobs",
+            {
+                "kind": "command",
+                "label": "x",
+                "argv": ["-c", "0"],
+                "stall_timeout": "?",
+            },
+        )
+    assert ei.value.code == 400
+
+
+def test_stall_watchdog_spares_a_quiet_but_computing_tree(tmp_path, monkeypatch):
+    """Frozen output alone isn't a wedge: an embed/eval loop between prints is
+    quiet *and* burning CPU. The watchdog only fires once the tree goes idle too
+    — with a hard ceiling so a busy-spinning deadlock still can't park the queue."""
+    from anima_daemon import manager as mgr_mod
+
+    monkeypatch.setattr(config, "CMD_STALL_TIMEOUT", 120, raising=False)
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text("caching...\n")
+    old = time.time() - 200  # 200s of silence, past the 120s budget
+    os.utime(stdout, (old, old))
+    job = jobs.Job(
+        id="cpu-probe",
+        method="quiet",
+        preset="",
+        kind="command",
+        started_at=old,
+        stdout_path=str(stdout),
+        pid=4242,
+    )
+    # Drive both clocks by hand: _stall_reason reads time.time() more than once
+    # per call, so the fixture has to be a value, not a sequence.
+    clock = [old + 200]
+    cpu = [100.0]
+    monkeypatch.setattr(mgr_mod.time, "time", lambda: clock[0])
+    monkeypatch.setattr(mgr_mod.proc, "tree_cpu_seconds", lambda pid: cpu[0])
+
+    # 5 CPU-seconds burned over a 10s gap → computing → spared.
+    mgr_mod._CPU_SAMPLES.clear()
+    assert JobManager._stall_reason(job) is None  # first sample → optimistic
+    clock[0] += 10
+    cpu[0] += 5.0
+    assert JobManager._stall_reason(job) is None  # measured busy → spared
+
+    # Same silence, but the tree burned nothing → the watchdog fires as before.
+    mgr_mod._CPU_SAMPLES.clear()
+    clock[0] = old + 200
+    assert JobManager._stall_reason(job) is None  # first look, no rate yet
+    clock[0] += 10  # no CPU advance
+    reason = JobManager._stall_reason(job)
+    assert reason is not None and "no output for" in reason
+
+    # Busy but silent past the hard ceiling (8× budget) → killed regardless, and
+    # the error says why so the fix (raise/disable stall_timeout) is obvious.
+    mgr_mod._CPU_SAMPLES.clear()
+    clock[0] = old + 120 * 9
+    reason = JobManager._stall_reason(job)
+    assert reason is not None and "still burning CPU" in reason
+
+
+def test_module_cli_submit_wait_and_status(real_cmd_daemon, monkeypatch, capsys):
+    """`python -m anima_daemon submit -- <argv>` + `wait` + `status <id>`: the
+    command-job front door that previously required a Python snippet (§3)."""
+    from anima_daemon import cli as daemon_cli
+
+    cl, _ = real_cmd_daemon
+    monkeypatch.setattr(daemon_cli._client, "ensure_daemon", lambda **kw: cl)
+    monkeypatch.setattr(daemon_cli._client, "DaemonClient", lambda port=None: cl)
+
+    rc = daemon_cli.main(["submit", "--", "-c", "print('from cli')"])
+    assert rc == 0
+    submitted = json.loads(capsys.readouterr().out)
+    jid = submitted["job_id"]
+    assert cl.get(jid)["method"] == "command"  # label derived from `-c` argv
+
+    assert daemon_cli.main(["wait", jid]) == 0
+    waited = json.loads(capsys.readouterr().out)
+    assert waited["state"] == "done" and waited["job_id"] == jid
+
+    assert daemon_cli.main(["status", jid]) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == jid
+
+
+def test_module_cli_label_derivation():
+    from anima_daemon.cli import _label_for
+
+    assert _label_for(["project/x/bench/run_pair_census.py", "--limit", "5"]) == (
+        "run_pair_census"
+    )
+    assert _label_for(["-m", "scripts.distill_turbo.distill"]) == "distill"
+    assert _label_for([]) == "command"
+
+
+def test_module_cli_wait_reports_result_envelope(real_cmd_daemon, monkeypatch, capsys):
+    """`wait` inlines the lifted bench envelope, so "where did my run land, and
+    what did it say" is one command instead of a job-dir spelunk (§7)."""
+    from anima_daemon import cli as daemon_cli
+
+    cl, _ = real_cmd_daemon
+    monkeypatch.setattr(daemon_cli._client, "DaemonClient", lambda port=None: cl)
+    script = (
+        "import os, json;"
+        "d = os.environ['ANIMA_DAEMON_JOB_DIR'];"
+        "env = os.path.join(d, 'result.json');"
+        "open(env, 'w').write(json.dumps({'label': 'probe', 'metrics': {'acc': 1}}));"
+        "open(os.path.join(d, 'result_path.json'), 'w').write(json.dumps({'path': env}))"
+    )
+    jid = cl.submit_command(label="probe", argv=["-c", script])["job_id"]
+    assert daemon_cli.main(["wait", jid]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["result_summary"]["label"] == "probe"
+    assert out["result"]["metrics"] == {"acc": 1}
+
+
 def test_command_job_missing_argv_rejected(real_cmd_daemon):
     """A command submission without argv is a 400 (urllib raises HTTPError)."""
     import urllib.error
@@ -1105,9 +1313,27 @@ def test_daemon_status_json(daemon, monkeypatch, capsys):
     capped = json.loads(capsys.readouterr().out)
     assert capped["jobs"] == [] and capped["jobs_total"] >= 1
 
-    daemon_tasks.cmd_daemon_status(["--state", "no-such-state"])
+    daemon_tasks.cmd_daemon_status(["--state", "queued,running,done"])
     filtered = json.loads(capsys.readouterr().out)
-    assert filtered["jobs"] == [] and filtered["jobs_total"] >= 1
+    assert filtered["jobs_total"] >= 1
+    assert all(j["state"] in ("queued", "running", "done") for j in filtered["jobs"])
+
+    # A bogus --state value errors loudly instead of silently filtering the list
+    # to nothing (which reads exactly like "the job vanished").
+    with pytest.raises(SystemExit) as ei:
+        daemon_tasks.cmd_daemon_status(["--state", "no-such-state"])
+    assert ei.value.code == 2
+    assert "unknown job state" in capsys.readouterr().err
+
+    # --job <id> returns that one full record, no list/eyeball step.
+    daemon_tasks.cmd_daemon_status(["--job", jid])
+    one = json.loads(capsys.readouterr().out)
+    assert one["id"] == jid and "argv" in one
+
+    with pytest.raises(SystemExit) as ei:
+        daemon_tasks.cmd_daemon_status(["--job", "nope-0000"])
+    assert ei.value.code == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "no such job"
 
 
 def test_daemon_status_down_exits_1(monkeypatch, capsys):

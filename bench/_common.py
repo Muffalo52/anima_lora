@@ -124,6 +124,37 @@ def _serializable(v: Any) -> Any:
     return repr(v)
 
 
+def start_heartbeat(interval: float = 45.0, *, label: str = "hb") -> None:
+    """Print a keep-alive line every ``interval`` seconds (daemon-friendly).
+
+    The daemon's stall watchdog kills a *command* job whose stdout and
+    progress.jsonl both freeze for 120 s (``anima_daemon/config.py``), which is
+    the normal shape of an embed/eval loop between prints — so every long-quiet
+    bench script needs *something*. Two supported ways, in preference order:
+
+    1. submit with a raised/disabled budget — ``make daemon-run
+       ARGS="… --stall-timeout 0"`` / ``submit_command(stall_timeout=…)``. The
+       daemon also cross-checks process-tree CPU before firing, so a genuinely
+       computing job survives its budget.
+    2. call this at the top of ``main()`` — one line, no submit-side knowledge
+       needed, and the ticks double as a "still alive, N seconds in" log.
+
+    Daemon thread, so it never keeps the process alive; unbuffered so the line
+    actually reaches the job's stdout.log (which is what the watchdog stats).
+    """
+    import threading
+    import time
+
+    t0 = time.time()
+
+    def beat() -> None:
+        while True:
+            time.sleep(interval)
+            print(f"[{label}] {time.time() - t0:.0f}s", flush=True)
+
+    threading.Thread(target=beat, daemon=True, name="bench-heartbeat").start()
+
+
 def make_run_dir(
     method: str,
     label: str | None = None,

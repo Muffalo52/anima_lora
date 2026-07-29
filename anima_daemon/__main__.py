@@ -1,4 +1,4 @@
-"""Daemon process entry point: ``python -m anima_daemon``.
+"""Daemon process entry point: ``python -m anima_daemon [port]``.
 
 This is the long-lived, console-detached process that ``make daemon`` spawns.
 It takes the single-daemon lock (pidfile ``(pid, create_time)``; a live sibling
@@ -6,6 +6,11 @@ that already answers ``/health`` on the port also makes us stand down), binds
 the preferred port — falling back to an ephemeral one if a *stranger* holds it
 — reconciles ``jobs/`` from any previous run, then serves until
 ``POST /shutdown``.
+
+A first argument that names a client verb (``submit`` / ``wait`` / ``status``,
+see ``cli.py``) instead dispatches to that verb and exits — the CLI front door
+for talking *to* a daemon. Anything else is still parsed as the port, so
+``python -m anima_daemon 8765`` keeps meaning "serve".
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import logging
 import os
 import sys
 
-from . import config, proc
+from . import cli, config, proc
 from .manager import JobManager
 from .server import serve_with_fallback
 
@@ -33,6 +38,11 @@ def _setup_logging() -> None:
 
 
 def main() -> int:
+    # Client verbs run *before* logging setup: they must print JSON on stdout and
+    # nothing else, and they never touch the daemon's state dirs.
+    if len(sys.argv) > 1 and sys.argv[1] in cli.VERBS:
+        return cli.main(sys.argv[1:])
+
     _setup_logging()
     log = logging.getLogger("anima.daemon")
 

@@ -28,6 +28,19 @@ except ImportError:
     sageattn_varlen = None
     sageattn = None
 
+# Deterministic flash-attn backward (--deterministic): the dK/dV atomic-add
+# reduction order is the one un-seedable noise source in training — with this
+# on, two runs of the identical command are bit-exact (paired A/B endpoint
+# deltas become pure treatment). Read at trace time under compile, so it must
+# be set BEFORE the first forward (train.py setup does).
+_deterministic = False
+
+
+def set_deterministic(value: bool) -> None:
+    global _deterministic
+    _deterministic = bool(value)
+
+
 try:
     from torch.nn.attention.flex_attention import (
         flex_attention as _flex_attention,
@@ -282,7 +295,9 @@ def dispatch_attention(
 
     elif attn_params.attn_mode == "flash":
         if attn_params.cu_seqlens is None:  # all tokens are valid
-            x = flash_attn_func(q, k, v, drop_rate, softmax_scale=scale)  # B, L, H, D
+            x = flash_attn_func(
+                q, k, v, drop_rate, softmax_scale=scale, deterministic=_deterministic
+            )  # B, L, H, D
             del q, k, v
         else:
             # Reshape to [(bxs), a, d]
@@ -302,6 +317,7 @@ def dispatch_attention(
                 attn_params.max_seqlen,
                 drop_rate,
                 softmax_scale=scale,
+                deterministic=_deterministic,
             )
             del q, k, v
 

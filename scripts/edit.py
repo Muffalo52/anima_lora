@@ -24,7 +24,11 @@ v1.1 status:
   * V-injection: WIRED. ``--t_inj N`` injects src self-attn V into the tar
     pass for the first N steps (paper Eq. 13). ``--t_inj_blocks`` selects
     the block subset (default = all but the final block, SD3.5-style).
-  * Mask blending: still inactive — ``--mask`` reserved (paper Eq. 12 v3).
+  * Mask blending: ``--mask`` implements the anchor-side half of paper
+    Eq. 12 — Δz dropped inside the edit region (the full background-lock
+    latent blend remains future work). ``--easycontrol_mask`` composes the
+    learned counterpart: gray-hole the EC cond over the same region so the
+    inpaint prior clamps outside it (project/directedit_ec/bench Phase 1a).
   * Inversion runs at ``--invert_guidance 1.0`` (no CFG); the edit pass uses
     the user's ``--guidance_scale`` (default 4.0, Anima base-v1.0 standard).
 """
@@ -161,7 +165,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--mask",
         default=None,
-        help="Reserved — background-lock mask path (v2). Currently ignored.",
+        help="Edit-region mask path (white/nonzero = edit region): drops the "
+        "Δz anchor inside the region (paper Eq. 12, anchor-side half) so the "
+        "edit isn't pulled back to the source there. Downsampled to latent "
+        "resolution. Combine with --easycontrol_mask (same file) so the EC "
+        "prior also releases the region while clamping everything else.",
     )
     p.add_argument(
         "--fm_score",
@@ -275,6 +283,56 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Inductor preset passed through to torch.compile(mode=...). "
         "e.g. 'reduce-overhead' for per-block CUDAGraphs.",
+    )
+    p.add_argument(
+        "--no_compile_blocks",
+        dest="compile_blocks",
+        action="store_false",
+        help="Disable per-block torch.compile (bench wall-time parity across "
+        "arms, or debugging).",
+    )
+    p.add_argument(
+        "--easycontrol_weight",
+        default=None,
+        help="EasyControl adapter checkpoint to load as a learned source-"
+        "preservation prior on the edit trajectory (e.g. the inpaint adapter "
+        "fed a hole-free cond). The cond stream is primed once from "
+        "--easycontrol_image (default: the source image itself) and stays "
+        "active through BOTH the inversion and edit passes, so ψ_tar == ψ_src "
+        "still reconstructs the source under the same effective model.",
+    )
+    p.add_argument(
+        "--easycontrol_scale",
+        type=float,
+        default=None,
+        help="Override the checkpoint's cond_scale — the EC preservation-"
+        "strength dial (analogue of --t_inj). Default: checkpoint metadata.",
+    )
+    p.add_argument(
+        "--easycontrol_image",
+        default=None,
+        help="Reference image for the EC cond stream (default: --image).",
+    )
+    p.add_argument(
+        "--easycontrol_b_offset",
+        type=float,
+        default=None,
+        help="Additive offset on every block's learned b_cond gate — the "
+        "continuous cond-softmax-mass dial (each -1 cuts cond attention mass "
+        "~e×; cond_scale is near-binary on the inpaint prior, see "
+        "project/directedit_ec/bench). Applied after load, read live per forward "
+        "(NOT baked into the KV cache).",
+    )
+    p.add_argument(
+        "--easycontrol_mask",
+        default=None,
+        help="Mask image path (white/nonzero = edit region). The masked "
+        "region of the EC cond IMAGE is filled with flat mid-gray (128) "
+        "before VAE encode — the inpaint prior's trained hole convention "
+        "(easycontrol_adapters/inpainting/mask_image.py), so the prior "
+        "clamps outside the hole and generates freely inside it, steered by "
+        "ψ_tar. The fill happens in pixel space, never on the latent. "
+        "Requires --easycontrol_weight.",
     )
 
     args = p.parse_args()
@@ -532,8 +590,8 @@ def _log_fm_score_table(rows: list[dict]) -> None:
 def main() -> None:
     args = parse_args()
 
-    if args.mask:
-        logger.warning("--mask ignored: background-lock blending is v3.")
+    if args.easycontrol_mask and not args.easycontrol_weight:
+        raise SystemExit("--easycontrol_mask requires --easycontrol_weight")
     if args.t_inj > 0 and args.compile_blocks:
         # V-injection monkey-patches Attention.forward at runtime, invalidating
         # dynamo's per-block graph; recompile cost > compile's speedup, so off
@@ -542,6 +600,14 @@ def main() -> None:
             "--t_inj %d > 0: disabling --compile_blocks for V-injection "
             "(monkey-patch breaks dynamo graph cache).",
             args.t_inj,
+        )
+        args.compile_blocks = False
+    if args.easycontrol_weight and args.compile_blocks:
+        # EasyControl patches Block.forward and dispatches on cond state; the
+        # inference engine runs it eager, so the edit CLI does too.
+        logger.info(
+            "--easycontrol_weight set: disabling --compile_blocks "
+            "(patched Block.forward runs eager, matching inference.py)."
         )
         args.compile_blocks = False
 
@@ -570,6 +636,42 @@ def main() -> None:
     # Load DiT first — prepare_text_inputs's _preprocess_text_embeds needs it.
     logger.info("Loading DiT model...")
     anima = load_dit_model(args, device, dit_weight_dtype=torch.bfloat16)
+
+    # EasyControl preservation prior: load + apply BEFORE any compile (the
+    # compile-after-apply invariant), prime the cond KV cache after the source
+    # latent exists below. Mirrors library/inference/generation.py's
+    # _setup_easycontrol.
+    ec_network = None
+    if args.easycontrol_weight:
+        from networks.methods.easycontrol import (
+            create_network_from_weights as ec_create_from_weights,
+        )
+
+        ec_kwargs = {}
+        if args.easycontrol_scale is not None:
+            ec_kwargs["cond_scale"] = float(args.easycontrol_scale)
+        ec_network, _ = ec_create_from_weights(
+            multiplier=1.0,
+            file=args.easycontrol_weight,
+            ae=None,
+            text_encoders=None,
+            unet=anima,
+            **ec_kwargs,
+        )
+        ec_network.load_weights(args.easycontrol_weight)
+        if args.easycontrol_b_offset is not None:
+            with torch.no_grad():
+                for b in ec_network.b_cond:
+                    b += args.easycontrol_b_offset
+        ec_network.to(device, dtype=torch.bfloat16)
+        ec_network.apply_to(text_encoders=None, unet=anima)
+        logger.info(
+            "EasyControl preservation prior: %s (cond_scale=%s, b_offset=%s)",
+            args.easycontrol_weight,
+            "ckpt" if args.easycontrol_scale is None else args.easycontrol_scale,
+            args.easycontrol_b_offset,
+        )
+
     if args.compile_blocks:
         anima.compile_blocks(mode=args.compile_inductor_mode)
 
@@ -750,6 +852,74 @@ def main() -> None:
         z_clean = vae.encode_pixels_to_latents(img_t)  # [1, C, 1, H/8, W/8]
     logger.info("Encoded source latent: %s", tuple(z_clean.shape))
 
+    # Eq. 12 anchor mask: latent-resolution {0,1} map of the edit region,
+    # broadcast over channels. delta_z is dropped where the mask is 1.
+    anchor_mask = None
+    if args.mask:
+        import numpy as np
+
+        h_lat, w_lat = int(z_clean.shape[-2]), int(z_clean.shape[-1])
+        m_pil = (
+            Image.open(args.mask).convert("L").resize((w_lat, h_lat), Image.BILINEAR)
+        )
+        m = (np.asarray(m_pil) > 127).astype("float32")
+        anchor_mask = torch.from_numpy(m).view(1, 1, 1, h_lat, w_lat).to(device)
+        logger.info(
+            "Anchor mask from %s: %.1f%% of latent cells released.",
+            args.mask,
+            100.0 * float(m.mean()),
+        )
+
+    # Prime the EC cond stream while the VAE is still mounted. Default cond is
+    # the source latent itself (hole-free "copy everything" reference); the
+    # cache then serves every forward — inversion, edit, CFG branches — so the
+    # effective model is identical across both passes and ψ_tar == ψ_src keeps
+    # reconstructing exactly.
+    if ec_network is not None:
+        if args.easycontrol_image:
+            cond_pil = (
+                Image.open(args.easycontrol_image)
+                .convert("RGB")
+                .resize((w_pix, h_pix), Image.LANCZOS)
+            )
+        else:
+            cond_pil = src_pil
+        if args.easycontrol_mask:
+            # Punch the trained exception channel back into the prior: fill
+            # the edit region with flat mid-gray in PIXEL space (VAE-encodes
+            # to the flat latent the inpaint gate reads as "regenerate here").
+            import numpy as np
+
+            mask_pil = (
+                Image.open(args.easycontrol_mask)
+                .convert("L")
+                .resize((w_pix, h_pix), Image.NEAREST)
+            )
+            hole = np.asarray(mask_pil) > 127
+            arr = np.asarray(cond_pil).copy()
+            arr[hole] = 128  # mask_image.GRAY — the inpaint training fill
+            cond_pil = Image.fromarray(arr)
+            logger.info(
+                "EasyControl: cond hole gray-filled from %s (%.1f%% of frame).",
+                args.easycontrol_mask,
+                100.0 * hole.mean(),
+            )
+        if args.easycontrol_image or args.easycontrol_mask:
+            cond_t = (
+                tfm(cond_pil).unsqueeze(0).unsqueeze(2).to(device, dtype=torch.bfloat16)
+            )
+            with torch.no_grad():
+                z_cond = vae.encode_pixels_to_latents(cond_t)
+        else:
+            z_cond = z_clean
+        ec_network.set_cond(z_cond.to(device, dtype=torch.bfloat16))
+        ec_network.precompute_cond_kv()
+        logger.info(
+            "EasyControl: cond KV cache primed from %s (cond latent %s).",
+            args.easycontrol_image or args.image,
+            tuple(z_cond.shape),
+        )
+
     # Move VAE off-device for the DiT loop, bring it back for decode.
     vae.to("cpu")
     clean_memory_on_device(device)
@@ -853,6 +1023,7 @@ def main() -> None:
             t_inj=args.t_inj,
             t_inj_blocks=t_inj_blocks,
             z_inv=z_inv if args.t_inj > 0 else None,
+            mask=anchor_mask,
             smc_cfg_state=smc_state,
         )
         z_edits.append((variant, z_edit))
@@ -870,7 +1041,12 @@ def main() -> None:
     if fm_rows:
         _log_fm_score_table(fm_rows)
 
-    # Decode + save (one VAE re-mount for all variants).
+    # Decode + save (one VAE re-mount for all variants). Drop the EC network
+    # first — it holds the DiT ref (_dit) and per-block cond tensors, which
+    # would otherwise defeat the `del anima` VRAM free below.
+    if ec_network is not None:
+        ec_network.clear_cond()
+        del ec_network
     del anima
     clean_memory_on_device(device)
     vae.to(device)

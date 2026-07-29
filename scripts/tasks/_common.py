@@ -668,9 +668,12 @@ def _attach_and_wait(cl, job_id: str) -> int:
     """
     from anima_daemon.client import DaemonClient
 
+    # flush: stdout to a pipe is block-buffered, so an unflushed banner makes a
+    # piped attach look like zero bytes (i.e. indistinguishable from a hang).
     print(
         f"\nattached to job {job_id} ({cl.base}) — ctrl-C detaches "
-        "(the job keeps running)\n"
+        "(the job keeps running)\n",
+        flush=True,
     )
     emitted = 0  # log lines already printed, across reconnects
     try:
@@ -743,7 +746,13 @@ def queue_command(label: str, argv: list[str]) -> None:
     )
 
 
-def run_command(label: str, argv: list[str], *, mode: str = "attach") -> None:
+def run_command(
+    label: str,
+    argv: list[str],
+    *,
+    mode: str = "attach",
+    stall_timeout: float | None = None,
+) -> None:
     """Run a GPU command job through the daemon, attach-by-default (Phase 1c).
 
     The generic ``run_gpu(command_job(...))`` chokepoint for non-train GPU work
@@ -757,6 +766,10 @@ def run_command(label: str, argv: list[str], *, mode: str = "attach") -> None:
     its resolved venv python, and the inline path prepends ``PY``. The daemon
     exports ``ANIMA_DAEMON_JOB_DIR`` so a script that emits a bench envelope /
     generation manifest gets result-lifted (Phase 1a); inline it's a plain run.
+
+    ``stall_timeout`` overrides the daemon's 120s command-job stall budget for
+    this job (0 disables it) — for a loop that legitimately prints nothing for
+    minutes, instead of teaching the script about the watchdog.
     """
     if mode == "inline":
         run([PY, *argv])
@@ -765,7 +778,9 @@ def run_command(label: str, argv: list[str], *, mode: str = "attach") -> None:
     from anima_daemon import client as _daemon_client
 
     cl = _daemon_client.ensure_daemon()
-    job_id = cl.submit_command(label=label, argv=list(argv)).get("job_id")
+    job_id = cl.submit_command(
+        label=label, argv=list(argv), stall_timeout=stall_timeout
+    ).get("job_id")
     if mode == "detach":
         _print_queued(cl, job_id, f"command={label}")
         return

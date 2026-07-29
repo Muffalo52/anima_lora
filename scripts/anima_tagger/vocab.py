@@ -36,7 +36,12 @@ from library.captioning.anima_tagger import (
     TAG_TYPE_NAMES,
 )
 
-from library.captioning.taxonomy import is_artist_tag, strip_artist_prefix
+from library.captioning.taxonomy import (
+    canonical_rating,
+    is_artist_tag,
+    is_rating_tag,
+    strip_artist_prefix,
+)
 
 from .constants import (
     classify_people,
@@ -161,8 +166,9 @@ def categorize(
 
     Resolution order:
 
-    1. Rating literals (``general``/``sensitive``/``explicit``) → ``rating``.
-       Note ``general`` is *both* a rating value and a category name, so
+    1. Rating literals (``safe``/``sensitive``/``nsfw``/``explicit``, plus the
+       legacy booru spellings ``general``/``questionable``) → ``rating``.
+       Note ``general`` is *both* a legacy rating value and a category name, so
        rating-tag membership is checked before any category lookup.
     2. ``@<non-space>...`` tags → ``artist``. Anima's caption format
        prefixes artists with ``@`` directly followed by the name (e.g.
@@ -180,7 +186,7 @@ def categorize(
     """
     # Rating literals collide with the "general" category name — slot them
     # separately regardless of cache typing (the cache carries no rating values).
-    if tag in RATINGS:
+    if is_rating_tag(tag):
         return "rating"
     if is_artist_tag(tag):
         return "artist"
@@ -232,11 +238,14 @@ def build_vocab(
 
     for stem, (_, _, tags) in caption_index.items():
         # Pull rating off the front (Anima puts it first; scan the first few
-        # defensively); everything else feeds the multi-label vocab.
+        # defensively); everything else feeds the multi-label vocab. Legacy
+        # booru spellings are folded onto the canonical band so a mixed corpus
+        # reports one distribution rather than two.
         rating_seen: Optional[str] = None
         for t in tags[:2]:
-            if t in RATINGS:
-                rating_seen = t
+            canon = canonical_rating(t)
+            if canon is not None:
+                rating_seen = canon
                 break
         if rating_seen is not None:
             rating_freq[rating_seen] += 1
@@ -247,7 +256,7 @@ def build_vocab(
         people_freq[PEOPLE_COUNT_LABELS[classify_people(tags)]] += 1
 
         for i, tag in enumerate(tags):
-            if tag in RATINGS:
+            if is_rating_tag(tag):
                 continue
             freq[tag] += 1
             sum_pos[tag] += i
@@ -351,14 +360,21 @@ def build_manifest(
             continue
         rating_idx: Optional[int] = None
         for t in tags[:2]:
-            if t in rating_to_idx:
-                rating_idx = rating_to_idx[t]
+            # Raw literal first so a vocab.json built before the safe/nsfw
+            # rename still indexes its own spellings; canonical form second so
+            # a legacy caption lands in the renamed band.
+            hit = rating_to_idx.get(t)
+            if hit is None:
+                canon = canonical_rating(t)
+                hit = rating_to_idx.get(canon) if canon is not None else None
+            if hit is not None:
+                rating_idx = hit
                 break
         if rating_idx is None:
             n_no_rating += 1
             continue
         idxs = sorted(
-            tag_to_idx[t] for t in tags if t in tag_to_idx and t not in rating_to_idx
+            tag_to_idx[t] for t in tags if t in tag_to_idx and not is_rating_tag(t)
         )
         if not idxs:
             n_no_tags += 1
@@ -418,7 +434,7 @@ def scan_cache_coverage(
     missing: Counter = Counter()
     for _, (_, _, tags) in caption_index.items():
         for tag in tags:
-            if tag in RATINGS:
+            if is_rating_tag(tag):
                 continue
             if ignore_subs and any(sub in tag for sub in ignore_subs):
                 continue

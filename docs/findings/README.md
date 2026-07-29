@@ -17,6 +17,7 @@ The leftmost column is the outcome — what the evidence settled:
 |---------|-----|---------------|
 | MEASUREMENT | [sigma_signal_where_anima_resolves.md](sigma_signal_where_anima_resolves.md) | The σ ≈ 0.75 → 0.45 → 0 resolution staircase: a recognizable picture by 0.75, essentially-final by 0.45, detail-only below. |
 | MEASUREMENT | [crossattn_self_attn_dominance.md](crossattn_self_attn_dominance.md) | Text writes the low-σ plan early (cross-attn front-loaded), but self-attn + MLP are the dominant residual pathway at *every* σ. |
+| MEASUREMENT + CLOSED | [traj_stats_front_loaded_commitment.md](traj_stats_front_loaded_commitment.md) | Anime-domain token commitment is front-loaded (~½ by σ=0.5) in a fixed ~3-dim channel subspace, and generation ≡ inversion below σ≈0.92 — but the aggregate structure failed to convert into a per-token/per-image intervention basis twice (tier routing, compute reuse); recorder + intactness gauge stay shipped. |
 | MEASUREMENT | [cbs_monitor_vs_fei_routing.md](cbs_monitor_vs_fei_routing.md) | CBS's complexity-monitor boundary and ChimeraHydra's FEI routing peak at **opposite** ends of the σ trajectory (anti-aligned). |
 
 ## External methods evaluated — not adopted
@@ -58,6 +59,7 @@ The leftmost column is the outcome — what the evidence settled:
 
 | Verdict | Doc | The trap |
 |---------|-----|----------|
+| TRAP + LANDED | [paired_dw_chaos_floor_deterministic.md](paired_dw_chaos_floor_deterministic.md) | Paired (CRN) training arms decorrelate to ΔW cos **0.413 with zero treatment** — flash-attn backward's atomic-add order is the one un-seedable RNG, chaos-amplified over 1200 steps. `--deterministic` (bit-identical checkpoints, twin-validated, ~33% slower) removes the floor — but buys **attribution, not magnitude**: real treatments saturate the same chaotic subspace (~0.4), so endpoint ΔW cosine is a detector with depth localization, never a ruler for treatment size. |
 | TRAP | [spectral_fraction_metric_inverts.md](spectral_fraction_metric_inverts.md) | A fraction-of-Δ spectral metric **inverts**, and per-block ablation can't see a cumulative artifact — before trusting a spectral probe's verdict. |
 | TRAP | [custom_autograd_removal_partitioner_oom.md](custom_autograd_removal_partitioner_oom.md) | Removing a numerically-inert custom autograd Function shifted the compile partitioner and OOMed: **numerically-inert ≠ memory-inert**. |
 | TRAP | [hang_fix.md](hang_fix.md) | Long runs die to a **recurring, loop-agnostic `Xid 8` GPU hang** — infra, not code, and not preventable. `journalctl -k` silently scopes to the current boot, which under-reported it 2→1. Defence is `--resume`, not debugging the loop. |

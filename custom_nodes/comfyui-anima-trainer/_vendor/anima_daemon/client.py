@@ -22,6 +22,10 @@ from . import config, proc
 
 logger = logging.getLogger("anima.daemon")
 
+# Mirrors jobs.TERMINAL_STATES, restated here so this module stays importable on
+# its own (the ComfyUI node vendors it) and so `wait` needs no cross-import.
+TERMINAL_STATES = frozenset({"done", "error", "stopped"})
+
 
 def venv_python(*, windowless: bool = False) -> str:
     """Resolve the anima_lora venv interpreter.
@@ -221,7 +225,11 @@ class DaemonClient:
         config_file: Optional[str] = None,
         start: Optional[bool] = None,
         captured_env: Optional[dict] = None,
+        stall_timeout: Optional[float] = None,
     ) -> dict:
+        """Enqueue a plain ``python <argv>`` job. ``stall_timeout`` overrides the
+        daemon's 120s command-job stall budget (0 disables it) — set it for a
+        legitimately quiet embed/eval loop instead of printing a heartbeat."""
         if captured_env is None:
             captured_env = config.capture_env()
         return self._request(
@@ -237,6 +245,7 @@ class DaemonClient:
                 "config_file": config_file,
                 "start": start,
                 "captured_env": captured_env,
+                "stall_timeout": stall_timeout,
             },
         )
 
@@ -253,6 +262,66 @@ class DaemonClient:
 
     def get(self, job_id: str) -> dict:
         return self._request("GET", f"/jobs/{job_id}")
+
+    def job_record(self, job_id: str) -> Optional[dict]:
+        """One job record, tolerant of a down/restarting daemon.
+
+        Tries ``GET /jobs/{id}`` and falls back to the on-disk
+        ``jobs/<id>/job.json`` the daemon persists on every state change — so a
+        reader survives the eager stale-code restart (Phase 0a) mid-poll. ``None``
+        only when neither source knows the id.
+        """
+        try:
+            rec = self._request("GET", f"/jobs/{job_id}")
+        except (urllib.error.URLError, OSError, ValueError):
+            rec = None
+        if isinstance(rec, dict) and rec.get("id"):
+            return rec
+        try:
+            disk = json.loads(
+                (config.job_dir(job_id) / "job.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        return disk if isinstance(disk, dict) else None
+
+    def wait(
+        self,
+        job_id: str,
+        *,
+        poll: float = 5.0,
+        timeout: Optional[float] = None,
+    ) -> dict:
+        """Block until ``job_id`` is terminal; return its final record.
+
+        The non-streaming counterpart to ``stream_logs`` — "submit → wait → read
+        the result" without the log volume, and unbothered by a daemon restart
+        mid-wait (see :meth:`job_record`). The poll interval ramps 0.25s → ``poll``
+        so a one-second command job returns promptly while a 12-hour train run
+        costs one cheap request per ``poll`` seconds.
+
+        Raises ``LookupError`` if no such job (never existed / job dir purged) and
+        ``TimeoutError`` if ``timeout`` elapses first — a still-running job at
+        timeout is not an outcome, so it must not read as one.
+        """
+        deadline = None if timeout is None else time.time() + timeout
+        interval = 0.25
+        while True:
+            rec = self.job_record(job_id)
+            if rec is None:
+                raise LookupError(f"no such job: {job_id}")
+            if (rec.get("state") or "") in TERMINAL_STATES:
+                return rec
+            now = time.time()
+            if deadline is not None and now >= deadline:
+                raise TimeoutError(
+                    f"job {job_id} still {rec.get('state')} after {timeout:.0f}s"
+                )
+            nap = interval
+            if deadline is not None:
+                nap = min(nap, max(0.05, deadline - now))
+            time.sleep(nap)
+            interval = min(interval * 1.6, max(0.25, poll))
 
     def stop(self, job_id: Optional[str] = None) -> dict:
         # No job_id → daemon's "stop the running job" semantics. We resolve the
@@ -305,6 +374,10 @@ class DaemonClient:
 
     def stream_logs(self, job_id: str) -> Iterator[str]:
         return self.stream(f"/jobs/{job_id}/logs")
+
+
+# `Client` is the name callers reach for first (and got an ImportError on).
+Client = DaemonClient
 
 
 def ensure_daemon(

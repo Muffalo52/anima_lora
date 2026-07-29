@@ -332,6 +332,11 @@ def foveated_denoise(
     pgraft_network = ctx.pgraft_network
     lora_cutoff_step = ctx.lora_cutoff_step
     soft_tokens_net = ctx.soft_tokens_net
+    # --traj_stats: passive per-step recorder (Phase 2 known-bad calibration
+    # arm — _archive/proposals/traj_latent_stats.md). Post-combine, pre-Euler-step,
+    # on the full-grid x5 (periphery tokens carry their group-shared values
+    # after the σ_c crossing — exactly the trace the gauge must flag).
+    traj_stats = getattr(ctx, "traj_stats", None)
     # --xattn_boost: cond-forward-only cross-attn gain at σ ≥ band. The band
     # (default σ ≥ 0.85) sits entirely above any sane σ_c crossing, so the
     # boost acts on full-grid steps and composes trivially with the merge.
@@ -472,6 +477,11 @@ def foveated_denoise(
             v = (
                 (v_u + guidance_scale * (v_c - v_u)) if v_u is not None else v_c
             ).float()
+
+            if traj_stats is not None:
+                # sigmas[i] as the 0-d tensor (recorder contract; this loop
+                # already syncs on float(sigmas[i]) but the rule is uniform).
+                traj_stats.record(i, sigmas[i], x5, v, v_u)
 
             if enabled and merger is None:
                 # Accumulate mask signals from the full-res forwards.

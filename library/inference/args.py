@@ -111,6 +111,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override EasyControl scale (default: ss_cond_scale from the checkpoint, typically 1.0).",
     )
     parser.add_argument(
+        "--easycontrol_b_offset",
+        type=float,
+        default=None,
+        help="Additive offset on every block's b_cond gate — the continuous "
+        "cond-attention dial (each +1 gives ~e× more cond softmax mass). Applied "
+        "live after load_weights, NOT baked into the KV cache. Needed when a "
+        "checkpoint's b_cond_init leaves the cond stream disengaged at its "
+        "trained point (the subject descriptor engages around +7). Mirrors "
+        "scripts/edit.py's flag of the same name.",
+    )
+    parser.add_argument(
         "--easycontrol_image_match_size",
         action="store_true",
         help="Auto-pick --image_size by free-fitting the reference image's aspect ratio "
@@ -527,6 +538,30 @@ def build_parser() -> argparse.ArgumentParser:
         "step — self-scales across model / CFG / σ / sample. Paper's fixed "
         "k=0.1 was off by ~14× on Anima (bench/smc_cfg/analysis_and_proposal.md), "
         "so the α path is the only mode now. α=0.2 is the production default.",
+    )
+
+    # Trajectory-resolved latent statistics (_archive/proposals/traj_latent_stats.md
+    # Phase 0). Passive per-step recorder — pure observation, recorder on/off
+    # latents are bit-identical (pinned by tests/test_traj_stats.py). One .npz
+    # sidecar per generation. Composes with --spectrum (recorded post-combine
+    # in the spectrum loop too) and the tiled path (post-blend).
+    parser.add_argument(
+        "--traj_stats",
+        action="store_true",
+        help="Record per-step/per-token/per-channel x̂₀ trajectory statistics "
+        "to an .npz sidecar (passive; does not change the generation).",
+    )
+    parser.add_argument(
+        "--traj_stats_dir",
+        type=str,
+        default="output/traj_stats",
+        help="Output directory for --traj_stats sidecars.",
+    )
+    parser.add_argument(
+        "--traj_stats_k",
+        type=int,
+        default=4,
+        help="Bits per channel for the --traj_stats quantization codes (1-8).",
     )
 
     # FSG: Foresight Guidance (NeurIPS 2025, arXiv 23177). Pre-step latent

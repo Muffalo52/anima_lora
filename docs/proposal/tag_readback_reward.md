@@ -1,8 +1,46 @@
 # Tag read-back reward — one verified judge for selection, and the RWR artist LoRA rebuilt on it
 
-Status: **PROPOSED — not started.** Design-only; no code, no bench yet.
-Supersedes PR #67 (`reward_weighted_artist_lora.md`, unmerged): the RWR estimator
-and phase discipline are inherited from it, the reward stack is rebuilt.
+Status: **Phase 0a PASS (tagger judge, content-tag axis).** The scoring primitive
+(`library/captioning/readback.py::TagReadback`), the validity harness
+(`bench/readback/run_bench.py`), and the turbo render driver
+(`bench/readback/render_turbo.py`) are built and run. Verdict: the tagger read-back
+is a valid per-image caption-*adherence* instrument, on both real and generated
+images; it is (by design) orthogonal to the turbo text/pose teacher-gap, which is a
+scope boundary, not a failure. Results:
+
+- **Real-data controls (val N=756, cached PE, zero renders):** shuffled-caption drop
+  **0.991** (gate ii ≥ 0.90); true-vs-random-caption **AUROC 0.98** (≥ 0.80).
+  logsigmoid ≈ calibrated-recall; general-only tags (identity stripped) still 0.97+,
+  refuting the PE-within-family-blindness risk on the adherence axis.
+- **Generated-image cross-prompt discrimination (the in-axis render test, 5 arms ×
+  16 prompts × 2 seeds):** true-prompt vs other-prompt **AUROC 0.98–1.00**,
+  win(true>random) **1.000** on teacher AND every 4-step turbo student, recall@1 over
+  16 prompts 0.75–0.97. The instrument transfers cleanly from training images to
+  generated images — the deployment surface the real-data control alone can't cover.
+- **Turbo teacher>student pair set (gate i as literally specified): chance-level
+  AUROC 0.52–0.56 — EXPECTED.** Teacher carries a small mean adherence edge (−1.086
+  vs student −1.18…−1.29 logsigmoid) but it is swamped by same-prompt seed jitter.
+  The turbo teacher-gap (glyph text lost, pose collapse — see `turbo.md`,
+  `project_turbo_teacher_gap_2026_06_29`, glyph probe in `bench/turbo`) lives in the
+  text/pose axis, which content-tag read-back cannot see (tagger spatial-floor closed).
+  Read-back correctly does **not** punish turbo's caption-following degradation — the
+  property the proposal demanded. This is where the MLLM escalation arm binds if a
+  consumer needs text/pose-sensitive scoring; it stays a stub until then.
+- **Turbo checkpoint spread (gate iii): weak** — between-checkpoint std 0.055 vs
+  same-prompt seed jitter 0.20 (ratio 0.28); `_500` is a clear early outlier, `_1k`→
+  `_3500` converged. Content adherence is largely saturated by the warm-started
+  student, consistent with distillation refining non-content axes.
+
+**Net:** ship the primitive for content-adherence selection consumers
+(`dave_mod_bestofn` `q_tag`, soup ingredient gating, seed selection, RWR
+self-captioning — all content-adherence use cases). Phase 0b (style verifier) and the
+RWR phases may proceed on this instrument. Supersedes PR #67
+(`reward_weighted_artist_lora.md`, unmerged): the RWR estimator and phase discipline
+are inherited from it, the reward stack is rebuilt.
+
+Runs: `bench/readback/results/20260722-1105-v3-refit/` (real-data),
+`bench/readback/results/20260722-1153-turbo/` (+ generated-image + turbo pair/spread);
+renders at `bench/readback/renders/20260722-1117-turbo/`.
 
 - Planned bench: `bench/readback/run_bench.py` (new; Phase-0 judge validation on
   pairs with *known* ground-truth ranking — no training, no new models).

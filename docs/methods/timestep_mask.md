@@ -19,7 +19,7 @@ Or toggle inside `configs/methods/lora.toml` by uncommenting the T-LoRA block an
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `use_timestep_mask` | false | Enable timestep rank masking |
-| `min_rank` | 1 | Minimum active rank (floor at clean end) |
+| `min_rank` | 1 | Minimum active rank (floor at the pure-noise end, σ=1) |
 | `alpha_rank_scale` | 1.0 | Power-law exponent (1.0 = linear, >1 = steeper, <1 = flatter) |
 | `network_dim` | — | Maximum rank (R_max), set by the method config |
 

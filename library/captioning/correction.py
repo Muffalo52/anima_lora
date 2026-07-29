@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from library.captioning.taxonomy import CAPTION_RATINGS, is_artist_tag, is_count_tag
+from library.captioning.taxonomy import (
+    canonical_rating,
+    is_artist_tag,
+    is_count_tag,
+    is_rating_tag,
+)
 
 
 _CATEGORY_RE = re.compile(r"^\s*\[([^\]]+)\]")
@@ -283,7 +288,10 @@ def correct_caption(
         *buckets["quality"],
         *buckets["meta"],
         *buckets["year"],
-        *buckets["safety"],
+        # Rewrite legacy booru ratings to Anima's band (general→safe,
+        # questionable→nsfw); dict.fromkeys drops the duplicate a caption
+        # carrying both spellings would otherwise collapse into.
+        *dict.fromkeys(canonical_rating(t) or t for t in buckets["safety"]),
         *buckets["count"],
         *buckets["character"],
         *buckets["copyright"],
@@ -316,7 +324,7 @@ def _classify_tag(
     # Front region, in emit order: quality → meta → year → safety.
     if tag in _QUALITY_TAGS:
         return "quality"
-    if tag in CAPTION_RATINGS:
+    if is_rating_tag(tag):
         return "safety"
     if _is_year_tag(tag):
         return "year"

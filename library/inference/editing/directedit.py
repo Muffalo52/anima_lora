@@ -246,6 +246,7 @@ def invert(
     sigmas: torch.Tensor,
     guidance_scale: float = 1.0,
     step_callback: Optional[Callable[[int, int], None]] = None,
+    traj_recorder=None,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """Invert ``z_clean`` (= VAE-encoded source image) along the Anima ODE.
 
@@ -272,6 +273,21 @@ def invert(
     to push away from). Default ``guidance_scale=1.0`` skips it. Pass >1.0
     only if you want the inverted noise to land where re-generation with the
     same CFG would put it.
+
+    ``traj_recorder`` (optional): a
+    :class:`library.inference.traj_stats.TrajStatsRecorder` observing the
+    inversion trajectory — the Phase 1 real-image arm of
+    ``_archive/proposals/traj_latent_stats.md``. Passive: recorded on ``.float()``
+    copies, ``z_inv``/``delta_z`` are bit-identical with it on or off (pinned
+    by ``tests/test_traj_stats.py``). Per step it records
+    ``(z_inv[i], sigmas[i], v)`` — since ``z_inv[i] = z_inv[i+1] +
+    (σ_i − σ_{i+1})·v``, the recorder's ``x̂₀ = z − σ·v`` equals
+    ``z_inv[i+1] − σ_{i+1}·v`` too, i.e. the Euler-consistent clean estimate
+    regardless of which endpoint you view it from. Steps are recorded in
+    *natural inversion order* (σ ascending, clean → noise); the sidecar's
+    ``sigmas`` array carries the ordering, analysis reverses as needed. The
+    caller flushes. Sigma is passed as the 0-d tensor (never ``float()`` —
+    stream-sync trap, see the recorder's docstring).
     """
     device = z_clean.device
     T = sigmas.shape[0] - 1
@@ -300,6 +316,8 @@ def invert(
         coeff = (sigmas[i] - sigmas[i + 1]).to(device, dtype=torch.float32)
         z_inv[i] = (z_inv[i + 1].float() + coeff * v.float()).to(torch.bfloat16)
         delta_z[i] = (z_inv[i + 1].float() - z_inv[i].float()).to(torch.bfloat16)
+        if traj_recorder is not None:
+            traj_recorder.record(step_idx - 1, sigma_in, z_inv[i], v)
         if step_callback is not None:
             step_callback(step_idx, T)
 
@@ -319,7 +337,7 @@ def edit_forward(
     t_inj: int = 0,
     t_inj_blocks: Optional[Iterable[int]] = None,
     z_inv: Optional[List[torch.Tensor]] = None,
-    mask: Optional[torch.Tensor] = None,  # noqa: ARG001 — Eq. 12 mask blend (v3)
+    mask: Optional[torch.Tensor] = None,  # Eq. 12 anchor mask (1 = edit region)
     step_callback: Optional[Callable[[int, int], None]] = None,
     smc_cfg_state: Optional[SMCCFGState] = None,
 ) -> torch.Tensor:
@@ -362,7 +380,14 @@ def edit_forward(
         Euler-evolved src branch, so src is GT-rebased to ``z_inv[i]`` at
         every injection step. Matches author's
         ``prev_sample_src = gt_source_latent``.
-      mask: paper Eq. 12 background-lock blend — still v3, ignored here.
+      mask: paper Eq. 12, anchor-side half: a latent-space mask (broadcastable
+        to ``delta_z[i]``, 1 = edit region) that DROPS the Δz anchor inside
+        the edit region — the anchor is a per-step pull back to the source,
+        so a global anchor suppresses the edit even when other preservation
+        mechanisms (e.g. an EasyControl masked-cond prior) have released the
+        region (project/directedit_ec/bench Phase 1a). Outside the region the anchor
+        applies unchanged. The full background-lock latent BLEND (locking
+        the outside to the inverted trajectory) remains future work.
 
     Notes on src CFG: the src row is always run at CFG=1 (no neg_src in the
     batch). Paper Algorithm 1 doesn't apply CFG to the src branch, and
@@ -398,10 +423,13 @@ def edit_forward(
             f"z_inv has length {len(z_inv)} but sigmas implies T+1={T + 1} states "
             "- inversion and editing must use the same sigma schedule."
         )
+    anchor_keep: Optional[torch.Tensor] = None
     if mask is not None:
-        logger.warning(
-            "mask= ignored: per-step background-lock blending (paper Eq. 12) "
-            "is v3 work; only V-injection is wired."
+        anchor_keep = (1.0 - mask.float()).to(device)
+        logger.info(
+            "DirectEdit Eq. 12 anchor mask: Δz dropped on %.1f%% of latent "
+            "cells (edit region), kept elsewhere.",
+            100.0 * mask.float().mean().item(),
         )
 
     block_indices = _resolve_t_inj_blocks(anima, t_inj_blocks) if t_inj > 0 else set()
@@ -431,6 +459,8 @@ def edit_forward(
         iterator = tqdm(range(T), desc="DirectEdit editing", total=T)
         for i in iterator:
             d = delta_z[i].to(device).float()
+            if anchor_keep is not None:
+                d = d * anchor_keep
             z_hat_tar = (z_tar.float() + d).to(torch.bfloat16)
             sigma_in = sigmas[i].to(device)
             coeff = (sigmas[i] - sigmas[i + 1]).to(device, dtype=torch.float32)

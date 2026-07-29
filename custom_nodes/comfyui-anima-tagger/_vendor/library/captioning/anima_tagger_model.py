@@ -59,6 +59,9 @@ class AnimaTaggerConfig:
     d_in: int  # PE-Core token dim (d_enc), not the pool-output dim.
     n_tags: int
     d_in_aux: int  # PE-Spatial token dim — always required.
+    # Back-compat default, NOT the canonical band size: pre-rename checkpoints
+    # were 3-class (general/sensitive/explicit). Anima's band is 4-class
+    # (``anima_tagger.RATINGS``) and every trainer passes it from the manifest.
     n_ratings: int = 3
     # 0 = no people head; trainer sets this from the manifest when in use.
     n_people_counts: int = 0

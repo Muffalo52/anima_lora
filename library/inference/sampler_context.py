@@ -48,6 +48,10 @@ class SamplerSideChannels:
     xattn_boost_band: float = 0.85
     xattn_boost_renorm: str = "img"
     xattn_boost_renorm_frac: float = 0.5
+    # Passive trajectory recorder (--traj_stats): runners call
+    # ``traj_stats.record(i, sigma, latents, noise_pred, uncond)`` post-combine
+    # / pre-sampler-step when set. Pure observation; generate_body owns flush.
+    traj_stats: Any = None
 
     @classmethod
     def from_args(
@@ -64,6 +68,7 @@ class SamplerSideChannels:
         soft_tokens_net: Any = None,
         soft_tokens_embed_seqlens: Optional[torch.Tensor] = None,
         soft_tokens_neg_seqlens: Optional[torch.Tensor] = None,
+        traj_stats: Any = None,
     ) -> "SamplerSideChannels":
         """Build from parsed CLI ``args`` plus the runtime objects ``generate_body``
         already holds.
@@ -86,4 +91,5 @@ class SamplerSideChannels:
             soft_tokens_net=soft_tokens_net,
             soft_tokens_embed_seqlens=soft_tokens_embed_seqlens,
             soft_tokens_neg_seqlens=soft_tokens_neg_seqlens,
+            traj_stats=traj_stats,
         )

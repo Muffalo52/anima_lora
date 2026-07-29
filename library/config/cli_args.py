@@ -487,6 +487,64 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="Restrict training sigma range: maximum sigma (0.0~1.0). Default 1.0.",
     )
     parser.add_argument(
+        "--sigma_lowres",
+        action="store_true",
+        help="σ-conditional low-res training (sigma_lowres Phase 1b): when a "
+        "step's σ draw exceeds --sigma_lowres_threshold, train on the 896-tier "
+        "sibling latent (the demoted_* npz key emitted by `make "
+        "preprocess-demote`) instead of the native 1024-tier latent. Only the "
+        "measured-safe 1024→896 route; images native to other tiers train "
+        "as-is. Opt-in; plain train.py methods only (bespoke adapter loops "
+        "need their own operating-point probe).",
+    )
+    parser.add_argument(
+        "--sigma_lowres_threshold",
+        type=float,
+        default=0.5,
+        help="σ gate for --sigma_lowres: demote only when every σ in the batch "
+        "exceeds this. 0.5 is the measured-safe boundary for 1024→896 — lower "
+        "values are OUTSIDE the probe's safe region.",
+    )
+    parser.add_argument(
+        "--sigma_lowres_yarnsig",
+        type=str,
+        nargs="?",
+        const="1,4,0.35,2",
+        default=None,
+        metavar="ALPHA,BETA,CENTER,GAMMA",
+        help="with --sigma_lowres: on demoted steps, build RoPE with the "
+        "σ-gated YaRN banded alignment (yarnsig — the probe-validated "
+        "Phase-1b refinement candidate). Spatial frequency bands with fewer "
+        "than ALPHA·μ(σ) rotations across the demoted extent get the full PI "
+        "stretch to native coordinates, bands above BETA·μ(σ) keep native "
+        "spacing, linear ramp between; μ(σ) = sigmoid(GAMMA·[logit(σ) − "
+        "logit(CENTER)]) is SigMa's boundary gate. No second σ-threshold — "
+        "the gate lives inside the rope schedule; native steps are untouched. "
+        "Bare flag = the probe's operating point (1,4,0.35,2).",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Bit-exact reproducibility: deterministic flash-attn backward "
+        "(the dK/dV atomic-add order is the one un-seedable noise source) + "
+        "torch.use_deterministic_algorithms(warn_only) + cudnn determinism. "
+        "Two runs of the identical command then produce identical "
+        "checkpoints, so paired A/B endpoint deltas (--paired_step_rng) are "
+        "pure treatment instead of riding chaos-amplified hardware wobble. "
+        "Slightly slower backward; same GPU/driver/library versions assumed.",
+    )
+    parser.add_argument(
+        "--paired_step_rng",
+        action="store_true",
+        help="Common-random-numbers mode for A/B arms: draw each train step's "
+        "σ and noise from dedicated per-step-seeded generators (derived from "
+        "--seed + step counter) instead of the global torch stream. Arms "
+        "sharing a seed then see identical (data, σ, noise) sequences, so "
+        "checkpoint differences isolate the intervention (e.g. --sigma_lowres "
+        "thresholds) instead of noise-lottery divergence. Statistically "
+        "equivalent to the default draw; use for paired comparisons.",
+    )
+    parser.add_argument(
         "--loss_type",
         type=str,
         default="l2",

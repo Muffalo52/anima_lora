@@ -764,6 +764,134 @@ def _inpaint_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     )
 
 
+def _subject_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject staging: mine cross-image same-character pairs (directedit_ec Phase 2).
+
+    ``easycontrol_adapters/tools/subject_pairs.py`` reads the descriptor's
+    ``[staging]`` table itself and rewrites the blueprint tail back into the same
+    file (near_twins contract). CPU-only: both pair members are corpus images, so
+    staging is symlinks + a ``pairs.json`` manifest + the ``cond/`` latent tree —
+    no encode pass (latents/TE reused from the shared LoRA cache)."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_pairs",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
+
+
+def _subject_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject preprocess: rebuild ``cond/`` from ``pairs.json`` (idempotent).
+
+    Nothing to encode — re-run this after a shared-corpus re-preprocess so cond
+    symlinks track any bucket moves."""
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_pairs",
+            "--config",
+            str(_easy_cfg_path(adapter)),
+            "--cond-only",
+            *extra,
+        ]
+    )
+
+
+def _subject_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject-edit staging: mine delta-caption edit pairs (directedit_ec Phase 2.5).
+
+    ``easycontrol_adapters/tools/subject_edit_pairs.py`` — subject_pairs contract
+    (reads its ``[staging]`` table, rewrites the blueprint tail in place), but the
+    staged ``.txt`` files are REAL files holding the tag delta vs the cond partner,
+    not caption symlinks. Still CPU-only; the TE encode over the delta captions is
+    the preprocess step."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_edit_pairs",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
+
+
+def _subject_edit_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Subject-edit preprocess: rebuild ``cond/`` + TE-encode the delta captions.
+
+    The delta captions are new text, so the shared LoRA TE cache does not apply —
+    ``cache_text_embeddings.py`` runs over ``{base}/staging`` into ``{base}/text``
+    (the blueprint's ``text_cache_dir``). Knobs from the ``[preprocess]`` table
+    (shuffle variants on, tag dropout OFF — dropping part of an instruction leaves
+    the target unexplained; ``min_pixels=0`` — low-tier resized images sit under
+    the script's 0.5MP default). VAE latents + PE ride the shared cache untouched.
+    Re-run after re-mining (pass ``--overwrite`` — delta texts change but stems
+    don't, and the existence check can't see that)."""
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.subject_edit_pairs",
+            "--config",
+            str(_easy_cfg_path(adapter)),
+            "--cond-only",
+        ]
+    )
+    from library.env import default_checkpoints
+
+    ck = default_checkpoints()
+    knobs = _toml_table_to_argv(cfg.get("preprocess") or {})
+    run(
+        [
+            PY,
+            "scripts/preprocess/cache_text_embeddings.py",
+            "--dir",
+            f"{base}/staging",
+            "--recursive",
+            "--cache_dir",
+            f"{base}/text",
+            "--qwen3",
+            ck.text_encoder,
+            "--dit",
+            ck.dit,
+            *knobs,
+            *list(extra or []),
+        ]
+    )
+
+
+def _twin_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Stage the aligned-pair instruction-edit tree from the Phase-0 census
+    manifest (direction-doubled delta-caption pairs + empty-instruction
+    identity no-ops). CPU-only symlinks; the tool self-reads its ``[staging]``
+    table and rewrites the blueprint tail (near_twins pattern)."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.twin_edit_pairs",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
+
+
 # Per-adapter materialization bodies (training is generic via _easy_train_extra);
 # only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter. Both
 # receive ``(adapter, cfg, base, extra)``. ``sanitize`` reuses the near-twin miner
@@ -773,6 +901,14 @@ _EASY_ADAPTERS = {
     "sanitize": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
     "colorize": {"stage": _colorize_stage, "preprocess": _colorize_preprocess},
     "inpaint": {"stage": _inpaint_stage, "preprocess": _inpaint_preprocess},
+    "subject": {"stage": _subject_stage, "preprocess": _subject_preprocess},
+    "subject_edit": {
+        "stage": _subject_edit_stage,
+        "preprocess": _subject_edit_preprocess,
+    },
+    # Aligned-pair instruction editor: bespoke staging over the census manifest,
+    # then the near_twins preprocess pass verbatim (same _tags/_no_tags shape).
+    "twin_edit": {"stage": _twin_edit_stage, "preprocess": _near_twins_preprocess},
 }
 
 

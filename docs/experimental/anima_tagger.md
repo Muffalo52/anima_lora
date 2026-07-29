@@ -32,7 +32,7 @@ PIL image → PIL LANCZOS-resize to PE-Core bucket size
          → LayerNorm + Linear(1024, 1024) + GELU + Dropout
          ────────────────────────────────────────────────── shared trunk_h
          ├→ Linear(1024, n_tags)       → tag_logits     ──── multi-label head
-         └→ Linear(1024, 3)            → rating_logits  ──── 3-class rating head
+         └→ Linear(1024, n_ratings)    → rating_logits  ──── rating head
 
 Per-tag F1-calibrated threshold sweep at the end of training picks the
 inference threshold for each output dimension. Tags belonging to a
@@ -46,6 +46,23 @@ delta over the trailing PE-Core blocks; alpha/rank/layers configurable.
 
 The shipped checkpoint runs the frozen path (`pe_lora: false`), trained
 for 100 epochs at `lr=2e-4`, `batch_size=64`, `lambda_rating=0.1`.
+
+### Rating band
+
+Anima's rating band is 4-class — `safe, sensitive, nsfw, explicit`.
+`library.captioning.anima_tagger.RATINGS` fixes the class *order* (it's the
+rating head's class index); `library.captioning.taxonomy.CAPTION_RATINGS` is
+the unordered set the caption-side consumers test against. Danbooru's own
+literals are accepted as aliases and folded onto the band at vocab-build time
+(`general`→`safe`, `questionable`→`nsfw`), so a raw booru caption still
+classifies as a rating instead of falling through to the `general`
+*category*.
+
+The rename does not invalidate checkpoints: `AnimaTagger` reads
+`vocab["ratings"]` from the checkpoint and `n_ratings` flows from the
+manifest, so the shipped 3-class checkpoint keeps loading and predicting its
+own labels. Rebuilding vocab against the 4-class band widens the head — that
+is a retrain.
 
 ### Why a shared trunk for both heads
 
@@ -352,8 +369,8 @@ scaffolding, or `Save Text File` for LoRA dataset pre-fill.
 ## Known limitations
 
 1. **Rating-class imbalance.** Train-corpus rating mix is ~67% explicit
-   / ~32% sensitive / ~0.6% general. Class-weighted CE compensates
-   partially. If `general`-rating accuracy matters downstream, oversample
+   / ~32% sensitive / ~0.6% safe. Class-weighted CE compensates
+   partially. If `safe`-rating accuracy matters downstream, oversample
    at training time.
 2. **Per-tag positives are thin for the long tail.** At `min_freq=5`
    each long-tail tag has 5–20 positives; calibrated thresholds for those

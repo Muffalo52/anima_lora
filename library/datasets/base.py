@@ -242,6 +242,16 @@ class BaseDataset(torch.utils.data.Dataset):
         self.load_repa_pe: bool = False
         self.repa_pe_encoder: str = "pe_spatial"
 
+        # sigma_lowres Phase 1b (σ-conditional low-res training). Set via
+        # ``enable_sigma_demote(native, demote)`` after construction; None
+        # disables. When set, each batch carries ``demoted_latents`` — the
+        # demote-tier sibling latent stored as a ``demoted_{H}x{W}`` key inside
+        # the native npz (``make preprocess-demote``) — and the trainer swaps
+        # it in when the step's σ draw clears the gate. Train-group only; the
+        # validation group stays native so val loss remains arm-comparable.
+        self._sigma_demote: Optional[Tuple[int, int]] = None
+        self._sigma_demote_warned: bool = False
+
         # Soft-tokens contrastive negatives. When a sampler is attached via
         # ``setup_contrastive_negatives`` each example carries
         # ``neg_crossattn_emb`` of shape (B, k, S, D): k cached text embeddings
@@ -282,6 +292,20 @@ class BaseDataset(torch.utils.data.Dataset):
                 out_key="byg_",
                 policy="dict",
                 enabled_attr="byg_text_dir",
+            )
+        )
+        self.register_sidecar(
+            SidecarSpec(
+                name="sigma_demote",
+                loader=self._try_load_demoted_latent,
+                out_key="demoted_latents",
+                policy="all_or_nothing",
+                # Same-bucket samples share (W, H) → same demoted grid, so
+                # uniform shapes are structural; the guard only fires if a
+                # stale emit left mismatched keys, degrading that batch to
+                # native instead of crashing the epoch.
+                uniform_shape=True,
+                enabled_attr="_sigma_demote",
             )
         )
         self.register_sidecar(
@@ -1661,6 +1685,59 @@ class BaseDataset(torch.utils.data.Dataset):
             if ok and spec.uniform_shape:
                 ok = len({tuple(v.shape) for v in values}) == 1
             example[spec.out_key] = torch.stack(values, dim=0) if ok else None
+
+    def enable_sigma_demote(self, native_edge: int, demote_edge: int) -> None:
+        """sigma_lowres Phase 1b: activate the σ-demote sidecar channel.
+
+        Every image whose bucket sits in ``native_edge``'s token band gets its
+        demote-tier sibling latent loaded onto the batch (``demoted_latents``);
+        images native to other tiers ride through with ``None`` (their batches
+        always train native). Call on the *train* datasets only.
+        """
+        self._sigma_demote = (int(native_edge), int(demote_edge))
+
+    def _try_load_demoted_latent(self, info: ImageInfo) -> Optional[torch.Tensor]:
+        """σ-demote sibling latent: the ``demoted_{H}x{W}`` key inside the
+        native npz (emitted by ``make preprocess-demote``). None when the image
+        is off the demote route (e.g. a native-896 original on the 1024→896
+        route), latents aren't npz-cached, or the npz predates the emit — the
+        batch then trains native, so a partial emit degrades instead of
+        crashing."""
+        route = self._sigma_demote
+        if not route or info.latents_npz is None or info.bucket_reso is None:
+            return None
+        from library.datasets.buckets import demote_bucket_for
+        from library.io.cache_names import demoted_latents_key
+
+        bucket = demote_bucket_for(
+            int(info.bucket_reso[0]), int(info.bucket_reso[1]), route[0], route[1]
+        )
+        if bucket is None:
+            return None
+        key = demoted_latents_key(*bucket)
+        try:
+            with np.load(info.latents_npz) as npz:
+                if key not in npz:
+                    if not self._sigma_demote_warned:
+                        self._sigma_demote_warned = True
+                        logger.warning(
+                            "sigma_lowres: no '%s' key in %s — run `make "
+                            "preprocess-demote` to emit the sibling latents; "
+                            "affected batches train native (warned once).",
+                            key,
+                            info.latents_npz,
+                        )
+                    return None
+                return torch.from_numpy(npz[key].copy()).float()
+        except Exception as e:  # truncated/corrupt npz → native, not a crash
+            if not self._sigma_demote_warned:
+                self._sigma_demote_warned = True
+                logger.warning(
+                    "sigma_lowres: failed reading %s (%s) — batch trains native.",
+                    info.latents_npz,
+                    e,
+                )
+            return None
 
     def _try_load_inversion_runs(self, info: ImageInfo) -> Optional[torch.Tensor]:
         """Load <stem>_inverted_run{0..N-1}.safetensors from self.inversion_dir.
