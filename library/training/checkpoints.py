@@ -163,10 +163,29 @@ def save_checkpoint_state(args: argparse.Namespace, accelerator):
     logger.info(f"saving checkpoint state to {state_dir} (overwriting)")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if os.path.exists(state_dir):
-        shutil.rmtree(state_dir)
+    # 1. 코랩 로컬 VM(/tmp)에 빠른 저장
+    local_tmp_dir = os.path.join("/tmp", os.path.basename(state_dir))
+    if os.path.exists(local_tmp_dir):
+        shutil.rmtree(local_tmp_dir, ignore_errors=True)
 
-    accelerator.save_state(state_dir)
+    accelerator.save_state(local_tmp_dir)
+
+    # 2. 메인 프로세스에서 압축 후 구글 드라이브로 이전
+    if accelerator.is_main_process:
+        zip_path = state_dir + ".zip"
+        
+        # 기존 구글 드라이브의 압축 파일/폴더 정리
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        if os.path.exists(state_dir):
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+        # zip 압축 생성 후 드라이브 전송
+        shutil.make_archive(state_dir, 'zip', local_tmp_dir)
+        shutil.rmtree(local_tmp_dir, ignore_errors=True)
+        
+        # 파일 시스템 캐시 강제 비우기
+        os.sync()
 
 
 def save_state_on_train_end(args: argparse.Namespace, accelerator):
