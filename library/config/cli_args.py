@@ -506,6 +506,30 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "values are OUTSIDE the probe's safe region.",
     )
     parser.add_argument(
+        "--sigma_lowres_threshold_max",
+        type=float,
+        default=None,
+        metavar="SIGMA",
+        help="optional upper σ bound for --sigma_lowres: demote only when "
+        "every σ in the batch is BELOW this too, turning the half-line gate "
+        "into a window (threshold, threshold_max). The measured demote-safe "
+        "region is a per-route window — e.g. 768's least-liability region is "
+        "~(0.65, 0.95), with the σ=1 endpoint elevated again. Default: no "
+        "upper bound (the shipped 1024:896 half-line gate).",
+    )
+    parser.add_argument(
+        "--sigma_lowres_route",
+        type=str,
+        default="1024:896",
+        metavar="NATIVE:DEMOTE",
+        help="demote route for --sigma_lowres as native:demote edge. The "
+        "default 1024:896 is the only measured-safe route; other values "
+        "(e.g. 1024:768 — the E4 negative-control arm) are for probe/control "
+        "runs only. The sibling latents must have been emitted with the SAME "
+        'route (`make preprocess-demote ARGS="--sigma_demote N:D"`) — a '
+        "missing key degrades that batch to native with a warn-once.",
+    )
+    parser.add_argument(
         "--sigma_lowres_yarnsig",
         type=str,
         nargs="?",
@@ -521,6 +545,52 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "logit(CENTER)]) is SigMa's boundary gate. No second σ-threshold — "
         "the gate lives inside the rope schedule; native steps are untouched. "
         "Bare flag = the probe's operating point (1,4,0.35,2).",
+    )
+    parser.add_argument(
+        "--sigma_lowres_route2",
+        type=str,
+        default=None,
+        metavar="NATIVE:DEMOTE",
+        help="secondary demote rule (E16 stacked router), PRIORITY over the "
+        "primary: when set, steps passing --sigma_lowres_threshold2/_max "
+        "(and --sigma_lowres_span2) demote on THIS route instead — e.g. "
+        "1024:768 inside its measured window (0.65, 0.95) stacked on the "
+        "shipped σ>0.5 1024:896 rule. yarnsig applies to primary-rule "
+        "demotes only. Sibling latents for BOTH routes must be emitted.",
+    )
+    parser.add_argument(
+        "--sigma_lowres_threshold2",
+        type=float,
+        default=0.5,
+        help="lower σ bound for the secondary rule (--sigma_lowres_route2).",
+    )
+    parser.add_argument(
+        "--sigma_lowres_threshold2_max",
+        type=float,
+        default=None,
+        metavar="SIGMA",
+        help="upper σ bound for the secondary rule — window semantics as "
+        "--sigma_lowres_threshold_max.",
+    )
+    parser.add_argument(
+        "--sigma_lowres_span2",
+        type=str,
+        default=None,
+        metavar="MODE[:FRAC]",
+        help="step-span gate for the secondary rule — semantics as "
+        "--sigma_lowres_span.",
+    )
+    parser.add_argument(
+        "--sigma_lowres_span",
+        type=str,
+        default=None,
+        metavar="MODE[:FRAC]",
+        help="step-span gate on top of the σ gate (E16 placement probe): "
+        "demote only inside a span of training progress. MODE early = first "
+        "FRAC of train steps, late = last FRAC, spread = seed-keyed per-step "
+        "coin with p=FRAC (deterministic in --seed + step index, touches no "
+        "RNG stream — CRN pairing holds). FRAC defaults to 0.5. Steps outside "
+        "the span train native; the σ draw itself is untouched.",
     )
     parser.add_argument(
         "--deterministic",

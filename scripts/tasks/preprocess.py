@@ -143,6 +143,53 @@ def _boolish(value, default: bool = False) -> bool:
     return default
 
 
+def _sigma_demote_routes(extra) -> list[str]:
+    """The σ-demote routes (``["N:D", …]``) to chain, or ``[]`` when off.
+
+    Enable with ``sigma_demote = true`` in ``configs/preprocess.toml`` (the
+    measured-safe ``1024:896`` route), a ``"N:D"`` string to pick another route
+    (probe it first), or a **comma list** of routes to emit several siblings in
+    one pass — the stacked router (``--sigma_lowres_route2``) needs BOTH its
+    routes' keys present, e.g. ``sigma_demote = "1024:896,1024:768"``. Each
+    route lands its own ``demoted_{H}x{W}`` key inside the same native npz, so
+    the passes are independent and idempotent. Env ``SIGMA_DEMOTE`` wins over
+    the merged config (GUI auto-chain parity — the CONFIG_FILE snapshot strips
+    preprocess-only keys). An explicit ``--sigma_demote`` in ``ARGS`` means this
+    invocation IS a demote run already — never chain a second one.
+    """
+    if "--sigma_demote" in extra:
+        return []
+    raw = os.environ.get("SIGMA_DEMOTE")
+    if raw is None:
+        from ._common import _path_overrides
+
+        raw = _path_overrides().get("sigma_demote")
+    if raw is None or raw is False:
+        return []
+    if raw is True:
+        return ["1024:896"]
+    text = str(raw).strip()
+    if not text or text.lower() in {"0", "false", "no", "off"}:
+        return []
+    if text.lower() in {"1", "true", "yes", "on"}:
+        return ["1024:896"]
+    routes = []
+    for part in text.split(","):
+        route = part.strip()
+        if not route:
+            continue
+        if ":" not in route:
+            print(
+                f"  [preprocess] ignoring sigma_demote entry {route!r} — expected "
+                'true/false or "NATIVE:DEMOTE" (e.g. "1024:896", or a comma '
+                'list "1024:896,1024:768" for the stacked router)'
+            )
+            continue
+        if route not in routes:  # a repeated route would just re-scan the corpus
+            routes.append(route)
+    return routes
+
+
 def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
     """Caption correction flags/config for preprocess-time TE caching.
 
@@ -554,6 +601,13 @@ def cmd_preprocess_vae(extra):
             *extra,
         ]
     )
+    # sigma_demote in preprocess.toml chains the demote emit(s) here, so
+    # `make preprocess` / `preprocess-vae` keep the sibling keys current and a
+    # --sigma_lowres run never trains against a stale/missing demoted cache.
+    # One pass per configured route — the stacked router needs both present.
+    for route in _sigma_demote_routes(extra):
+        print(f"  [preprocess] sigma_demote={route} → emitting demoted sibling latents")
+        cmd_preprocess_demote(["--sigma_demote", route, *extra])
 
 
 def cmd_preprocess_demote(extra):
@@ -563,6 +617,9 @@ def cmd_preprocess_demote(extra):
     key inside each 1024-tier image's existing native npz. Idempotent.
     Requires ``preprocess-vae`` to have run first. Pass ``ARGS="--sigma_demote
     N:D"`` to override the route (probe a new one before shipping it).
+    ``sigma_demote`` in ``configs/preprocess.toml`` chains this automatically
+    after every ``preprocess-vae`` / ``preprocess`` pass — once per configured
+    route, so a comma list emits every sibling the stacked router needs.
     """
     pp_args = _preprocess_path_pattern_args(extra)
     route_args = [] if "--sigma_demote" in extra else ["--sigma_demote", "1024:896"]
