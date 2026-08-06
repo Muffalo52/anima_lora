@@ -60,6 +60,24 @@ def test_check_path_flags_missing_and_accepts_real():
     assert _check_path("output/tests/foo.png", top) is None
 
 
+def test_check_path_resolves_relative_to_the_referencing_doc():
+    """Self-contained doc trees cite siblings relatively.
+
+    Every ``project/<line>/`` digest writes ``bench/report.md`` meaning *that
+    line's* bench dir (see ``project/README.md``). Root-only resolution read
+    those as broken because ``bench/`` is also a real top-level dir.
+    """
+    top = tracked_top_level()
+    line_home = REPO_ROOT / "project" / "sigma_lowres"
+    # Broken from the root, correct from the doc's own directory.
+    assert _check_path("bench/report.md", top) == "bench/report.md"
+    assert _check_path("bench/report.md", top, base=line_home) is None
+    # The fallback doesn't make the detector permissive: a path that exists
+    # under neither root is still flagged.
+    missing = "bench/this_bench_does_not_exist.py"
+    assert _check_path(missing, top, base=line_home) == missing
+
+
 def test_known_make_targets_include_canonical_entries():
     """The make-target source-of-truth parse works — a couple of stable targets
     must show up, or the make-target ERROR check can't fire."""
