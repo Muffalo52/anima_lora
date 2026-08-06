@@ -15,6 +15,8 @@ Pins the load-bearing contracts of the trainer wiring:
 from pathlib import Path
 from types import SimpleNamespace
 
+import random
+
 import numpy as np
 import pytest
 import torch
@@ -74,6 +76,36 @@ class TestDemoteBucket:
         lo, hi = freefit_band_for_edge(896)
         assert counts  # the 1024-tier member contributes
         assert all(lo <= c <= hi for c in counts)
+
+
+class TestSigmaRoute:
+    def test_default_and_custom(self):
+        from train import AnimaTrainer
+
+        assert AnimaTrainer._sigma_route(SimpleNamespace()) == (1024, 896)
+        assert AnimaTrainer._sigma_route(SimpleNamespace(sigma_lowres_route=None)) == (
+            1024,
+            896,
+        )
+        assert AnimaTrainer._sigma_route(
+            SimpleNamespace(sigma_lowres_route="1024:768")
+        ) == (1024, 768)
+
+    def test_bad_routes_rejected(self):
+        from train import AnimaTrainer
+
+        for bad in ("1024", "896:1024", "1024:0", "a:b", "1024:896:768"):
+            with pytest.raises(ValueError):
+                AnimaTrainer._sigma_route(SimpleNamespace(sigma_lowres_route=bad))
+
+    def test_unsafe_768_bucket_derivable(self):
+        # The E4 negative-control route must derive a 768-band sibling grid
+        # for 1024-tier shapes (same pure function the emit uses).
+        lo, hi = freefit_band_for_edge(768)
+        bucket = demote_bucket_for(896, 1200, 1024, 768)
+        assert bucket is not None
+        bw, bh = bucket
+        assert lo <= (bw // 16) * (bh // 16) <= hi
 
 
 class TestDemotedKey:
@@ -361,3 +393,209 @@ class TestYarnsigRope:
             AnimaTrainer._yarnsig_params(SimpleNamespace(sigma_lowres_yarnsig=None))
             is None
         )
+
+
+class TestSigmaSpan:
+    """--sigma_lowres_span (E16 placement probe): step-span gate on top of
+    the σ gate. Pins the parse/guard behavior, the exact early/late
+    partition of the train-forward range (identical demoted mass ⇒ any ΔW
+    ordering is pure placement signal), and the spread coin's determinism
+    in (--seed, step) alone — it must touch no RNG stream.
+    """
+
+    @staticmethod
+    def _args(span, total=480, seed=1001, accum=1):
+        return SimpleNamespace(
+            sigma_lowres_span=span,
+            max_train_steps=total,
+            gradient_accumulation_steps=accum,
+            seed=seed,
+        )
+
+    def test_parse_defaults_and_custom(self):
+        from train import AnimaTrainer
+
+        assert AnimaTrainer._sigma_span_params(SimpleNamespace()) is None
+        assert (
+            AnimaTrainer._sigma_span_params(SimpleNamespace(sigma_lowres_span=None))
+            is None
+        )
+        assert AnimaTrainer._sigma_span_params(self._args("early")) == ("early", 0.5)
+        assert AnimaTrainer._sigma_span_params(self._args("late:0.25")) == (
+            "late",
+            0.25,
+        )
+        assert AnimaTrainer._sigma_span_params(self._args("spread:0.5")) == (
+            "spread",
+            0.5,
+        )
+
+    def test_bad_specs_rejected(self):
+        from train import AnimaTrainer
+
+        for bad in ("first", "early:0", "late:1", "spread:x", "early:0.5:0.5"):
+            with pytest.raises(ValueError):
+                AnimaTrainer._sigma_span_params(self._args(bad))
+
+    def test_needs_finalized_total(self):
+        from train import AnimaTrainer
+
+        with pytest.raises(ValueError):
+            AnimaTrainer._sigma_span_allows(self._args("early", total=0), 1)
+
+    def test_none_allows_all(self):
+        from train import AnimaTrainer
+
+        args = self._args(None)
+        assert all(AnimaTrainer._sigma_span_allows(args, i) for i in range(1, 481))
+
+    def test_early_late_partition_exact(self):
+        """early:0.5 and late:0.5 partition [1, T] exactly — same mass,
+        disjoint, exhaustive — for even and odd T."""
+        from train import AnimaTrainer
+
+        for total in (480, 481):
+            early = self._args("early", total=total)
+            late = self._args("late", total=total)
+            e = {
+                i
+                for i in range(1, total + 1)
+                if AnimaTrainer._sigma_span_allows(early, i)
+            }
+            lt = {
+                i
+                for i in range(1, total + 1)
+                if AnimaTrainer._sigma_span_allows(late, i)
+            }
+            b = round(0.5 * total)
+            assert e == set(range(1, b + 1))
+            assert lt == set(range(b + 1, total + 1))
+            assert e | lt == set(range(1, total + 1))
+            assert not (e & lt)
+            assert abs(len(e) - len(lt)) <= 1  # identical mass (±1 at odd T)
+
+    def test_grad_accum_scales_total(self):
+        from train import AnimaTrainer
+
+        args = self._args("early", total=480, accum=2)  # 960 forwards
+        assert AnimaTrainer._sigma_span_allows(args, 480)
+        assert not AnimaTrainer._sigma_span_allows(args, 481)
+
+    def test_spread_coin_seed_keyed_and_stream_free(self):
+        """Same seed → identical coin sequence regardless of global RNG
+        state/consumption (CRN pairing); different seed → different set;
+        empirical rate ≈ p."""
+        from train import AnimaTrainer
+
+        args_a = self._args("spread")
+        torch.manual_seed(0)
+        random.seed(0)
+        seq_a = [AnimaTrainer._sigma_span_allows(args_a, i) for i in range(1, 481)]
+
+        args_b = self._args("spread")
+        torch.manual_seed(7)
+        random.seed(999)
+        random.random()  # global consumption must not matter
+        seq_b = [AnimaTrainer._sigma_span_allows(args_b, i) for i in range(1, 481)]
+        assert seq_a == seq_b
+
+        args_c = self._args("spread", seed=1002)
+        seq_c = [AnimaTrainer._sigma_span_allows(args_c, i) for i in range(1, 481)]
+        assert seq_c != seq_a
+
+        rate = sum(seq_a) / len(seq_a)
+        assert 0.4 < rate < 0.6
+
+
+class TestSigmaWindow:
+    """--sigma_lowres_threshold_max: the half-line σ gate becomes a window.
+    Pins the gate arithmetic the E16 win768 arm (0.65 < σ < 0.95) rests on."""
+
+    @staticmethod
+    def _gate(sigmas, lo, hi):
+        from train import AnimaTrainer
+
+        args = SimpleNamespace(sigma_lowres_threshold=lo, sigma_lowres_threshold_max=hi)
+        return AnimaTrainer._sigma_gate_allows(args, sigmas)
+
+    def test_window_gate(self):
+        lo, hi = 0.65, 0.95
+        assert self._gate(torch.tensor([0.7]), lo, hi)
+        assert self._gate(torch.tensor([0.94]), lo, hi)
+        assert not self._gate(torch.tensor([0.5]), lo, hi)  # below window
+        assert not self._gate(torch.tensor([0.96]), lo, hi)  # above window
+        assert not self._gate(torch.tensor([1.0]), lo, hi)  # endpoint excluded
+        # all-samples rule: one out-of-window sample blocks the batch
+        assert not self._gate(torch.tensor([0.7, 0.96]), lo, hi)
+        # no upper bound = the shipped half-line gate
+        assert self._gate(torch.tensor([0.96]), lo, None)
+
+
+class TestSigmaStackedRouter:
+    """--sigma_lowres_route2 (E16 combo arm): 768 if sigma in its window,
+    elif sigma>0.5 -> 896, else native. Pins rule-2 priority, per-rule
+    gate/span independence, and that rule-1-only behavior is unchanged."""
+
+    @staticmethod
+    def _combo_args(**kw):
+        base = dict(
+            sigma_lowres_threshold=0.5,
+            sigma_lowres_route2="1024:768",
+            sigma_lowres_threshold2=0.65,
+            sigma_lowres_threshold2_max=0.95,
+            max_train_steps=480,
+            gradient_accumulation_steps=1,
+            seed=1001,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_route2_parse(self):
+        from train import AnimaTrainer
+
+        assert AnimaTrainer._sigma_route2(SimpleNamespace()) is None
+        assert (
+            AnimaTrainer._sigma_route2(SimpleNamespace(sigma_lowres_route2=None))
+            is None
+        )
+        assert AnimaTrainer._sigma_route2(
+            SimpleNamespace(sigma_lowres_route2="1024:768")
+        ) == (1024, 768)
+        for bad in ("1024", "768:1024", "a:b"):
+            with pytest.raises(ValueError):
+                AnimaTrainer._sigma_route2(SimpleNamespace(sigma_lowres_route2=bad))
+
+    def test_combo_choice_matches_spec(self):
+        """768 if sigma in (0.65, 0.95); elif sigma > 0.5 -> 896; else native."""
+        from train import AnimaTrainer
+
+        args = self._combo_args()
+        cases = {
+            0.70: 2,  # in window -> deep route
+            0.94: 2,
+            0.55: 1,  # above primary threshold, outside window -> 896
+            0.96: 1,  # above window top -> falls back to primary
+            0.99: 1,
+            0.30: None,  # below both -> native
+            0.50: None,  # primary gate is strict >
+        }
+        for sigma, want in cases.items():
+            got = AnimaTrainer._sigma_demote_choice(args, torch.tensor([sigma]), 1)
+            assert got == want, (sigma, got, want)
+
+    def test_rule1_only_unchanged(self):
+        from train import AnimaTrainer
+
+        args = self._combo_args(sigma_lowres_route2=None)
+        assert AnimaTrainer._sigma_demote_choice(args, torch.tensor([0.7]), 1) == 1
+        assert AnimaTrainer._sigma_demote_choice(args, torch.tensor([0.3]), 1) is None
+
+    def test_per_rule_spans_independent(self):
+        """rule 2 late-gated while rule 1 has no span: an in-window sigma in
+        the first half falls back to the primary rule."""
+        from train import AnimaTrainer
+
+        args = self._combo_args(sigma_lowres_span2="late")
+        sig = torch.tensor([0.7])
+        assert AnimaTrainer._sigma_demote_choice(args, sig, 100) == 1
+        assert AnimaTrainer._sigma_demote_choice(args, sig, 300) == 2

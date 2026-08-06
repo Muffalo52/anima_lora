@@ -179,3 +179,48 @@ def test_caption_correction_config_parses_trigger_cli_args():
     assert config["trigger_word"] == "@foo"
     assert config["trigger_at_front"] is True
     assert cleaned == ["--other"]
+
+
+def test_sigma_demote_routes_true_is_the_certified_route(monkeypatch):
+    from scripts.tasks.preprocess import _sigma_demote_routes
+
+    _stub_overrides(monkeypatch, {"sigma_demote": True})
+    monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
+    assert _sigma_demote_routes([]) == ["1024:896"]
+
+
+def test_sigma_demote_routes_off_by_default(monkeypatch):
+    from scripts.tasks.preprocess import _sigma_demote_routes
+
+    monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
+    for value in ({}, {"sigma_demote": False}, {"sigma_demote": "off"}):
+        _stub_overrides(monkeypatch, value)
+        assert _sigma_demote_routes([]) == []
+
+
+def test_sigma_demote_routes_comma_list_feeds_the_stacked_router(monkeypatch):
+    """The stacked router (--sigma_lowres_route2) needs BOTH routes' sibling
+    keys; one comma-listed config value must emit one pass per route, in
+    order, deduplicated."""
+    from scripts.tasks.preprocess import _sigma_demote_routes
+
+    _stub_overrides(monkeypatch, {})
+    monkeypatch.setenv("SIGMA_DEMOTE", "1024:896, 1024:768 ,1024:896")
+    assert _sigma_demote_routes([]) == ["1024:896", "1024:768"]
+
+
+def test_sigma_demote_routes_skips_malformed_entries(monkeypatch):
+    from scripts.tasks.preprocess import _sigma_demote_routes
+
+    _stub_overrides(monkeypatch, {})
+    monkeypatch.setenv("SIGMA_DEMOTE", "1024:896,nonsense,")
+    assert _sigma_demote_routes([]) == ["1024:896"]
+
+
+def test_sigma_demote_routes_never_chains_from_a_demote_run(monkeypatch):
+    """An explicit --sigma_demote means this invocation IS the demote pass."""
+    from scripts.tasks.preprocess import _sigma_demote_routes
+
+    _stub_overrides(monkeypatch, {"sigma_demote": "1024:896,1024:768"})
+    monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
+    assert _sigma_demote_routes(["--sigma_demote", "1024:768"]) == []
