@@ -20,9 +20,9 @@ use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
-output_name = "anima_lora_sincos"
+output_name = "anima_lora"
 down_init = "weight_svd"
-path_pattern = "sincos/*"
+path_pattern = "*"
 
 use_timestep_mask = true
 min_rank = 1

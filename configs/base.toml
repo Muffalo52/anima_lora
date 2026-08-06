@@ -99,7 +99,7 @@ adaln_rank = 16
 # `make preprocess` (or `make preprocess-demote`) first, else the deep route
 # silently falls through to the primary one (warn-once per rule).
 # Every key below is inert while sigma_lowres = false.
-sigma_lowres = true
+sigma_lowres = false
 # Primary rule: 1024→896 on the σ>0.5 half-line. These two are already the
 # argparse defaults — spelled out so the whole active recipe reads in one place.
 sigma_lowres_route = "1024:896"
