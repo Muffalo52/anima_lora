@@ -394,6 +394,43 @@ class TestYarnsigRope:
             is None
         )
 
+    def test_default_on_with_sigma_lowres(self):
+        """yarnsig is part of the shipped combo recipe, so an unset flag under
+        --sigma_lowres resolves to the operating point — a plain --sigma_lowres
+        run must not silently be a degraded (no-yarnsig) arm."""
+        from train import AnimaTrainer
+
+        args = SimpleNamespace(sigma_lowres=True, sigma_lowres_yarnsig=None)
+        assert AnimaTrainer._yarnsig_params(args) == (1.0, 4.0, 0.35, 2.0)
+        # …and the effective value is written back, so the snapshot records it.
+        assert args.sigma_lowres_yarnsig == AnimaTrainer.YARNSIG_OPERATING_POINT
+
+    def test_default_off_without_sigma_lowres(self):
+        """Nothing to demote → nothing to realign; the implicit default must not
+        leak into runs that never enabled sigma_lowres (train.py errors on
+        yarnsig-without-sigma_lowres)."""
+        from train import AnimaTrainer
+
+        args = SimpleNamespace(sigma_lowres=False, sigma_lowres_yarnsig=None)
+        assert AnimaTrainer._yarnsig_params(args) is None
+        assert args.sigma_lowres_yarnsig is None
+
+    def test_explicit_off_words_disable_it(self):
+        """The escape hatch from default-on, and the reason a config may carry
+        `sigma_lowres_yarnsig = "off"` without tripping the requires-sigma_lowres
+        guard."""
+        from train import AnimaTrainer
+
+        for off in ("off", "OFF", "none", "false", "0", ""):
+            args = SimpleNamespace(sigma_lowres=True, sigma_lowres_yarnsig=off)
+            assert AnimaTrainer._yarnsig_params(args) is None, off
+
+    def test_explicit_value_still_wins(self):
+        from train import AnimaTrainer
+
+        args = SimpleNamespace(sigma_lowres=True, sigma_lowres_yarnsig="2,6,0.4,3")
+        assert AnimaTrainer._yarnsig_params(args) == (2.0, 6.0, 0.4, 3.0)
+
 
 class TestSigmaSpan:
     """--sigma_lowres_span (E16 placement probe): step-span gate on top of

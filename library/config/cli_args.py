@@ -498,15 +498,17 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         const="1,4,0.35,2",
         default=None,
         metavar="ALPHA,BETA,CENTER,GAMMA",
-        help="with --sigma_lowres: on demoted steps, build RoPE with the "
-        "σ-gated YaRN banded alignment (yarnsig — the probe-validated "
-        "Phase-1b refinement candidate). Spatial frequency bands with fewer "
-        "than ALPHA·μ(σ) rotations across the demoted extent get the full PI "
+        help="on demoted steps, build RoPE with the σ-gated YaRN banded "
+        "alignment (yarnsig). Spatial frequency bands with fewer than "
+        "ALPHA·μ(σ) rotations across the demoted extent get the full PI "
         "stretch to native coordinates, bands above BETA·μ(σ) keep native "
         "spacing, linear ramp between; μ(σ) = sigmoid(GAMMA·[logit(σ) − "
         "logit(CENTER)]) is SigMa's boundary gate. No second σ-threshold — "
         "the gate lives inside the rope schedule; native steps are untouched. "
-        "Bare flag = the probe's operating point (1,4,0.35,2).",
+        "ON BY DEFAULT whenever --sigma_lowres is set, at the probe's "
+        "operating point (1,4,0.35,2) — it is part of the shipped combo "
+        "recipe. Pass ALPHA,BETA,CENTER,GAMMA to move the operating point, or "
+        "`off` to disable it. Applies to PRIMARY-rule demotes only.",
     )
     parser.add_argument(
         "--sigma_lowres_route2",

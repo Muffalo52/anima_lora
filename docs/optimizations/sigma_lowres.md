@@ -29,7 +29,22 @@ make preprocess          # or: make preprocess-vae
 ```
 
 Then train with the shipped recipe (**combo** — the stacked router, each σ
-routed to the deepest grid certified for it):
+routed to the deepest grid certified for it). `configs/base.toml` already
+carries the whole recipe behind one boolean, so the usual way in is:
+
+```toml
+# configs/base.toml
+sigma_lowres = true
+```
+
+or, equivalently, from the CLI (yarnsig rides along by default — it is part of
+the recipe; pass `--sigma_lowres_yarnsig off` to drop it):
+
+```bash
+python train.py --method lora --preset default --sigma_lowres
+```
+
+Spelled out in full, that is:
 
 ```bash
 python train.py --method lora --preset default \
@@ -113,7 +128,7 @@ themselves buy render quality, and they cost throughput.
 | `--sigma_lowres_threshold2` | none | secondary rule's lower σ bound — **required** with `route2` |
 | `--sigma_lowres_threshold2_max` | none | secondary rule's upper σ bound — **required** with `route2` |
 | `--sigma_lowres_span2` | none | secondary rule's step-span gate |
-| `--sigma_lowres_yarnsig[=A,B,C,G]` | off (bare flag = `1,4,0.35,2`) | σ-gated YaRN-banded RoPE on **primary-rule** demoted steps |
+| `--sigma_lowres_yarnsig[=A,B,C,G]` | **on with `--sigma_lowres`**, at `1,4,0.35,2`; `off` to disable | σ-gated YaRN-banded RoPE on **primary-rule** demoted steps |
 
 Router precedence, per step: **rule 2 if its gate *and* span pass → rule 1 if
 its gate *and* span pass → native.** Because rule 2 wins wherever it fires, it
@@ -212,8 +227,11 @@ buckets differ. Consequences:
 
 - `make preprocess` / `make preprocess-vae` chain the emit once per route listed
   in `sigma_demote`, so the sibling cache tracks images as they are added.
-- `make preprocess-demote ARGS="--sigma_demote 1024:768"` runs one route
-  explicitly. Idempotent; requires `preprocess-vae` to have run first.
+- `make preprocess-demote` emits **every** route in `sigma_demote` (same source
+  as the chain above), so the stacked router's two siblings both land from this
+  target too. `ARGS="--sigma_demote 1024:768"` overrides with an explicit route
+  (a comma list there is expanded into one pass each). Idempotent; requires
+  `preprocess-vae` to have run first.
 - The key lives outside the latents namespace, so the normal cached-latent
   loader never sees it — checkpoints and non-`--sigma_lowres` runs are
   untouched.

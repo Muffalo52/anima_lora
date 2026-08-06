@@ -41,7 +41,7 @@ caption_tag_randomize_rate = 0.0
 #   sigma_demote = "1024:896,1024:768"
 # false = emit only via the explicit `make preprocess-demote`. Env: SIGMA_DEMOTE.
 # See docs/optimizations/sigma_lowres.md.
-sigma_demote = false
+sigma_demote = "1024:896,1024:768"
 
 # Preprocess input filter. drop_lowres_images = false keeps every image; otherwise
 # images under min_pixels are skipped at resize/VAE/TE. Override per-run:

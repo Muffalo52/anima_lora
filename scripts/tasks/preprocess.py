@@ -190,6 +190,32 @@ def _sigma_demote_routes(extra) -> list[str]:
     return routes
 
 
+def _pop_explicit_demote_routes(extra) -> tuple[list[str], list[str]]:
+    """Pull an explicit ``--sigma_demote`` out of ``extra``, splitting a comma list.
+
+    ``cache_latents.py`` parses a single ``NATIVE:DEMOTE`` (``int()`` on the
+    halves), so a comma list has to be expanded into one pass per route before
+    it reaches the script. Returns ``(routes, cleaned_extra)``.
+    """
+    routes: list[str] = []
+    cleaned: list[str] = []
+    i = 0
+    while i < len(extra):
+        tok = extra[i]
+        if tok in {"--sigma_demote", "--sigma-demote"}:
+            if i + 1 >= len(extra):
+                raise SystemExit(f"{tok} requires a value (e.g. 1024:896)")
+            for part in str(extra[i + 1]).split(","):
+                route = part.strip()
+                if route and route not in routes:
+                    routes.append(route)
+            i += 2
+            continue
+        cleaned.append(tok)
+        i += 1
+    return routes, cleaned
+
+
 def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
     """Caption correction flags/config for preprocess-time TE caching.
 
@@ -607,22 +633,12 @@ def cmd_preprocess_vae(extra):
     # One pass per configured route — the stacked router needs both present.
     for route in _sigma_demote_routes(extra):
         print(f"  [preprocess] sigma_demote={route} → emitting demoted sibling latents")
-        cmd_preprocess_demote(["--sigma_demote", route, *extra])
+        _run_demote_pass(route, extra)
 
 
-def cmd_preprocess_demote(extra):
-    """Emit σ-demote sibling latents (sigma_lowres Phase 1b, 1024→896).
-
-    Same VAE-load path as ``preprocess-vae``; appends a ``demoted_{H}x{W}``
-    key inside each 1024-tier image's existing native npz. Idempotent.
-    Requires ``preprocess-vae`` to have run first. Pass ``ARGS="--sigma_demote
-    N:D"`` to override the route (probe a new one before shipping it).
-    ``sigma_demote`` in ``configs/preprocess.toml`` chains this automatically
-    after every ``preprocess-vae`` / ``preprocess`` pass — once per configured
-    route, so a comma list emits every sibling the stacked router needs.
-    """
+def _run_demote_pass(route: str, extra) -> None:
+    """One ``cache_latents.py`` pass emitting a single route's demoted siblings."""
     pp_args = _preprocess_path_pattern_args(extra)
-    route_args = [] if "--sigma_demote" in extra else ["--sigma_demote", "1024:896"]
     run(
         [
             PY,
@@ -639,11 +655,38 @@ def cmd_preprocess_demote(extra):
             "0",
             "--recursive",
             "--no_half_vae",
-            *route_args,
+            "--sigma_demote",
+            route,
             *pp_args,
             *extra,
         ]
     )
+
+
+def cmd_preprocess_demote(extra):
+    """Emit σ-demote sibling latents (sigma_lowres Phase 1b, e.g. 1024→896).
+
+    Same VAE-load path as ``preprocess-vae``; appends a ``demoted_{H}x{W}``
+    key inside each native-tier image's existing npz. Idempotent. Requires
+    ``preprocess-vae`` to have run first.
+
+    Routes come from ``sigma_demote`` in ``configs/preprocess.toml`` (or the
+    ``SIGMA_DEMOTE`` env var) — the SAME source the automatic chain off
+    ``preprocess-vae`` uses, so a comma list like ``"1024:896,1024:768"``
+    emits BOTH siblings the stacked router (``--sigma_lowres_route2``) needs
+    from this target too. ``ARGS="--sigma_demote N:D[,N:D…]"`` overrides
+    (probe a new route before shipping it); with neither set we fall back to
+    the certified ``1024:896``. ``cache_latents.py`` takes one route per
+    invocation, so each route is its own pass.
+    """
+    routes, extra = _pop_explicit_demote_routes(extra)
+    if not routes:
+        # `extra` no longer carries --sigma_demote, so this reads the config/env.
+        routes = _sigma_demote_routes(extra) or ["1024:896"]
+    for route in routes:
+        if len(routes) > 1:
+            print(f"  [preprocess] sigma_demote={route} → emitting demoted siblings")
+        _run_demote_pass(route, extra)
 
 
 _QWEN3_TOKENIZER = "models/text_encoders/qwen_3_06b_base.safetensors"

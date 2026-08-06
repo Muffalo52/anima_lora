@@ -670,12 +670,28 @@ class AnimaTrainer:
             )
         return native, demote
 
+    # The probe's operating point, and the value `--sigma_lowres` implies.
+    YARNSIG_OPERATING_POINT = "1,4,0.35,2"
+    _YARNSIG_OFF = frozenset({"", "0", "off", "no", "none", "false"})
+
     @staticmethod
     def _yarnsig_params(args):
         """Parsed ``--sigma_lowres_yarnsig`` as ``(alpha, beta, center, gamma)``,
-        or None when off. Validates once; cached on the args namespace."""
+        or None when off. Validates once; cached on the args namespace.
+
+        **Default-on with ``--sigma_lowres``**: yarnsig is part of the shipped
+        combo recipe (docs/optimizations/sigma_lowres.md), so leaving the flag
+        unset resolves to the operating point rather than to off — a plain
+        ``--sigma_lowres`` run gets the recipe, not a silently degraded arm.
+        Opt out with ``--sigma_lowres_yarnsig off``. The effective value is
+        written back onto ``args`` so the snapshot records what actually ran
+        instead of an ambiguous empty field.
+        """
         raw = getattr(args, "sigma_lowres_yarnsig", None)
-        if not raw:
+        if raw is None and getattr(args, "sigma_lowres", False):
+            raw = AnimaTrainer.YARNSIG_OPERATING_POINT
+            args.sigma_lowres_yarnsig = raw
+        if raw is None or str(raw).strip().lower() in AnimaTrainer._YARNSIG_OFF:
             return None
         cached = getattr(args, "_yarnsig_parsed", None)
         if cached is not None:
@@ -2168,7 +2184,9 @@ class AnimaTrainer:
                     "steps, α,β=%s,%s, μ=sigmoid(%s·[logit(σ)−logit(%s)]).",
                     *(yarn[0], yarn[1], yarn[3], yarn[2]),
                 )
-        elif getattr(args, "sigma_lowres_yarnsig", None):
+        elif self._yarnsig_params(args) is not None:
+            # `off` (and friends) parse to None, so opting out in a config that
+            # never enables sigma_lowres stays inert instead of hard-failing.
             raise ValueError(
                 "--sigma_lowres_yarnsig requires --sigma_lowres (it only "
                 "changes rope on demoted steps, which need the demote sidecar)."

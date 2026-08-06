@@ -224,3 +224,53 @@ def test_sigma_demote_routes_never_chains_from_a_demote_run(monkeypatch):
     _stub_overrides(monkeypatch, {"sigma_demote": "1024:896,1024:768"})
     monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
     assert _sigma_demote_routes(["--sigma_demote", "1024:768"]) == []
+
+
+def _demote_passes(monkeypatch, extra) -> list[str]:
+    """Run cmd_preprocess_demote with the subprocess stubbed; return the routes
+    each `cache_latents.py` invocation actually received."""
+    from scripts.tasks import preprocess as pp
+
+    seen: list[str] = []
+
+    def fake_run(cmd):
+        assert "--sigma_demote" in cmd
+        seen.append(cmd[cmd.index("--sigma_demote") + 1])
+
+    monkeypatch.setattr(pp, "run", fake_run)
+    monkeypatch.setattr(pp, "_path", lambda key, default="": default)
+    pp.cmd_preprocess_demote(list(extra))
+    return seen
+
+
+def test_preprocess_demote_target_emits_every_configured_route(monkeypatch):
+    """`make preprocess-demote` must honor the SAME comma list as the automatic
+    chain — otherwise the stacked router's deep route silently degrades because
+    only 1024:896 ever landed on disk."""
+    _stub_overrides(monkeypatch, {"sigma_demote": "1024:896,1024:768"})
+    monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
+    monkeypatch.delenv("PREPROCESS_PATH_PATTERN", raising=False)
+
+    assert _demote_passes(monkeypatch, []) == ["1024:896", "1024:768"]
+
+
+def test_preprocess_demote_target_falls_back_to_the_certified_route(monkeypatch):
+    """Nothing configured → the target still does its historical single pass."""
+    _stub_overrides(monkeypatch, {})
+    monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
+    monkeypatch.delenv("PREPROCESS_PATH_PATTERN", raising=False)
+
+    assert _demote_passes(monkeypatch, []) == ["1024:896"]
+
+
+def test_preprocess_demote_args_override_and_split(monkeypatch):
+    """ARGS wins over the config, and a comma list there is expanded too —
+    cache_latents.py parses one route per invocation."""
+    _stub_overrides(monkeypatch, {"sigma_demote": "1024:896"})
+    monkeypatch.delenv("SIGMA_DEMOTE", raising=False)
+    monkeypatch.delenv("PREPROCESS_PATH_PATTERN", raising=False)
+
+    assert _demote_passes(monkeypatch, ["--sigma_demote", "1280:1024, 1024:768"]) == [
+        "1280:1024",
+        "1024:768",
+    ]
