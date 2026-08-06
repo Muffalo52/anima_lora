@@ -188,8 +188,17 @@ def known_make_targets() -> set[str]:
     return targets
 
 
-def _check_path(tok: str, top: set[str]) -> str | None:
-    """Return the token if it's a broken repo-rooted path, else None."""
+def _check_path(tok: str, top: set[str], base: Path | None = None) -> str | None:
+    """Return the token if it's a broken path reference, else None.
+
+    Resolved against the repo root first, then — when ``base`` is given — the
+    referencing doc's own directory. Self-contained doc trees cite their
+    siblings relatively: every ``project/<line>/`` digest says
+    ``bench/report.md`` / ``bench/run_*.py`` meaning *that line's* bench dir
+    (see ``project/README.md``), which is a correct reference that a
+    root-only resolver reads as broken because ``bench/`` is also a real
+    top-level dir. Root-first ordering keeps repo-rooted refs authoritative.
+    """
     tok = tok.strip().rstrip(".")
     if not tok or tok.startswith(("http", "..", "/", "~", "mailto")):
         return None
@@ -198,11 +207,13 @@ def _check_path(tok: str, top: set[str]) -> str | None:
     first = tok.split("/", 1)[0]
     if first not in top:  # not rooted in the repo (URL / data dir / bare name)
         return None
-    if (REPO_ROOT / tok).exists():
-        return None
-    # Docs often cite a module without its extension (`bench/_common`) — accept.
-    if (REPO_ROOT / f"{tok}.py").exists():
-        return None
+    roots = [REPO_ROOT] + ([base] if base is not None else [])
+    for root in roots:
+        if (root / tok).exists():
+            return None
+        # Docs often cite a module without its extension (`bench/_common`).
+        if (root / f"{tok}.py").exists():
+            return None
     return tok
 
 
@@ -251,7 +262,7 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
                         if not sep:
                             continue  # bare glob (`foo*`) — nothing to anchor
                         tok = head + "/"
-                    bad = _check_path(tok, top)
+                    bad = _check_path(tok, top, base=doc.parent)
                     if bad and bad not in seen:
                         seen.add(bad)
                         issues.append(

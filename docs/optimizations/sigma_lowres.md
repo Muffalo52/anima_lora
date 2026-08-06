@@ -28,8 +28,23 @@ sigma_demote = "1024:896,1024:768"
 make preprocess          # or: make preprocess-vae
 ```
 
-Then train with the shipped recipe (**combolate** — stacked 768 route, both
-rules on their certified late spans):
+Then train with the shipped recipe (**combo** — the stacked router, each σ
+routed to the deepest grid certified for it). `configs/base.toml` already
+carries the whole recipe behind one boolean, so the usual way in is:
+
+```toml
+# configs/base.toml
+sigma_lowres = true
+```
+
+or, equivalently, from the CLI (yarnsig rides along by default — it is part of
+the recipe; pass `--sigma_lowres_yarnsig off` to drop it):
+
+```bash
+python train.py --method lora --preset default --sigma_lowres
+```
+
+Spelled out in full, that is:
 
 ```bash
 python train.py --method lora --preset default \
@@ -37,20 +52,19 @@ python train.py --method lora --preset default \
   --sigma_lowres_route2 1024:768 \
   --sigma_lowres_threshold2 0.65 \
   --sigma_lowres_threshold2_max 0.95 \
-  --sigma_lowres_span2 late \
-  --sigma_lowres_span late:0.75 \
   --sigma_lowres_yarnsig
 ```
 
-Per step, that reads: **768 if σ ∈ (0.65, 0.95) and the step is in the last half
-of training; elif σ > 0.5 and the step is past the first quarter → 896 (+yarnsig);
-else native.** Measured at E16 scale (480 steps, 2 corpora × 3 seeds): **−13.9%
-wall**, 180 of 480 steps demoted (59 deep + 121 shallow).
+Per step, that reads: **768 if σ ∈ (0.65, 0.95); elif σ > 0.5 → 896 (+yarnsig);
+else native.** Measured at E16 scale (480 steps, 2 corpora × 3 seeds):
+**−18.3% wall, inside the seed lottery on both corpora** — the best measured
+combination of the two.
 
-**Read the [caveat on this default](#caveat-on-the-shipped-default) before
-adopting it** — `combolate` is the max-ΔW-closeness composition, and on the
-lenient corpus it renders slightly *outside* the seed lottery where the
-unscheduled `combo` stays inside.
+Adding `--sigma_lowres_span late:0.75 --sigma_lowres_span2 late` gives
+`combolate`, which trades ~4pp of that throughput for a much closer endpoint
+weight-space footprint (ΔW 0.75 vs 0.37). It is **not** the default: see
+[when to schedule](#when-to-schedule) — on per-step-certified routes the
+schedule bought no render-level improvement and cost speed.
 
 Validation always stays native, so val loss remains comparable across arms.
 
@@ -111,19 +125,27 @@ themselves buy render quality, and they cost throughput.
 | `--sigma_lowres_threshold_max` | none | optional upper σ bound → window semantics |
 | `--sigma_lowres_span` | none | `early\|late\|spread[:FRAC]` step-span gate on the primary rule |
 | `--sigma_lowres_route2` | none | secondary route, **priority over the primary** |
-| `--sigma_lowres_threshold2` | `0.5` | secondary rule's lower σ bound |
-| `--sigma_lowres_threshold2_max` | none | secondary rule's upper σ bound |
+| `--sigma_lowres_threshold2` | none | secondary rule's lower σ bound — **required** with `route2` |
+| `--sigma_lowres_threshold2_max` | none | secondary rule's upper σ bound — **required** with `route2` |
 | `--sigma_lowres_span2` | none | secondary rule's step-span gate |
-| `--sigma_lowres_yarnsig[=A,B,C,G]` | off (bare flag = `1,4,0.35,2`) | σ-gated YaRN-banded RoPE on **primary-rule** demoted steps |
+| `--sigma_lowres_yarnsig[=A,B,C,G]` | **on with `--sigma_lowres`**, at `1,4,0.35,2`; `off` to disable | σ-gated YaRN-banded RoPE on **primary-rule** demoted steps |
 
 Router precedence, per step: **rule 2 if its gate *and* span pass → rule 1 if
-its gate *and* span pass → native.** A rule whose sibling latent is missing from
-the npz falls through to the next one (partial-emit degrades to native with a
-warn-once rather than crashing) — which is exactly how a half-emitted cache
-silently costs you the deep route. The trainer logs the first demoted step
-(`latent grid … → … at σ=…`) and a running `demoted N/T eligible steps` every
-500 steps; check both against the mass you expect, and the `token_step_hist`
-below for the exact split.
+its gate *and* span pass → native.** Because rule 2 wins wherever it fires, it
+must be given an explicit window — `--sigma_lowres_route2` without both of its
+σ bounds is a **setup-time error**, not a default; an unbounded rule 2 would
+shadow the primary rule everywhere and silently disable yarnsig (primary-only).
+Routes, windows and span specs are all validated before the model loads.
+
+A rule whose sibling latent is missing from the npz falls through to the next
+one (partial-emit degrades rather than crashing) and warns once per rule, from
+both sides: the dataset warns per route on the missing `demoted_{H}x{W}` key,
+and the trainer warns when a rule passed its gate with no sibling on the batch.
+Treat either as "the deep route is dead" — otherwise a half-emitted cache costs
+you it with no symptom but wall-clock. The trainer also logs the first demoted
+step (`latent grid … → … at σ=…`) and a running `demoted N/T eligible steps`
+every 500 steps; check both against the mass you expect, and the
+`token_step_hist` below for the exact split.
 
 `--sigma_lowres_span` modes:
 
@@ -151,9 +173,9 @@ weight-space read (deterministic twin control: 1.000).
 
 | arm | wall Δ (hews/channel) | render cos (hews/channel) | ΔW cos | vs yardstick 0.9547/0.9541 |
 |---|---|---|---|---|
-| `combo` (stacked, unscheduled) | **−18.2% / −18.4%** | 0.9576 / 0.9580 | 0.365 / 0.434 | inside both |
-| `sigma896` (shipped σ-gate) | −14.9% / −14.6% | 0.9538 / 0.9641 | 0.365 / 0.432 | boundary hews, inside channel |
-| **`combolate`** (shipped recipe) | −14.6% / −13.1% | 0.9461 / 0.9664 | 0.753 / 0.771 | **below hews**, inside channel |
+| **`combo`** (shipped recipe) | **−18.2% / −18.4%** | 0.9576 / 0.9580 | 0.365 / 0.434 | inside both |
+| `sigma896` (previous σ-gate) | −14.9% / −14.6% | 0.9538 / 0.9641 | 0.365 / 0.432 | boundary hews, inside channel |
+| `combolate` (combo + late spans) | −14.6% / −13.1% | 0.9461 / 0.9664 | 0.753 / 0.771 | **below hews**, inside channel |
 | `sigma896late` | −10.1% / −10.6% | 0.9535 / 0.9636 | 0.753 / 0.770 | ≈ `sigma896` |
 | `win768late` (768 window + late, no stack) | −6.1% / −6.3% | **0.9678 / 0.9728** | 0.959 / 0.962 | comfortably inside both |
 | `896only` (gate off) | −31.7% / −30.2% | 0.9494 / 0.9500 | 0.183 / 0.236 | **below both** |
@@ -171,26 +193,30 @@ Reads worth carrying:
   off the ΔW column.
 - CMMD was recorded throughout and carries **no** quality verdict at this N.
 
-### Caveat on the shipped default
+### When to schedule
 
-`combolate` is the default recipe here because it is the composition that keeps
-the endpoint weight-space footprint closest to a native run (ΔW 0.75, vs 0.37
-for unscheduled `combo`) while still taking most of the throughput win. The
-tension you should know about before adopting it:
+The span flags exist for the amplification result above, but E16's standing
+verdict is that **scheduling is unnecessary on per-step-certified routes** —
+and the arm table is what settles it:
 
+- `sigma896late ≈ sigma896` at render level, for 4.5pp of throughput.
 - On **hews** (the lenient corpus) `combolate` rendered at 0.9461 against a
   0.9547 yardstick — *below* the lottery, on all three seeds — where the
-  unscheduled `combo` was inside on both corpora at a better −18.3%.
-- On **channel** it was comfortably inside (0.9664).
-- The late schedule therefore bought ΔW closeness and cost throughput without
-  improving the render footprint. E16's standing verdict is that scheduling is
-  unnecessary on per-step-certified routes.
+  unscheduled `combo` was inside on both corpora at a better −18.3%. On
+  **channel** `combolate` was comfortably inside (0.9664).
+- So the late schedule bought ΔW closeness and cost throughput **without**
+  improving the render footprint. Since ΔW closeness ≠ render closeness (see
+  the reads above), that is not a trade worth taking by default.
 
-If you want the throughput frontier with the measured-best render footprint,
-drop both span flags — that is `combo`, −18.3%, inside the lottery on both
-corpora. If you want maximum conservatism, use `win768late` (drop
-`--sigma_lowres_span`, keep `--sigma_lowres_span2 late`, drop the primary rule's
-work) at −6%.
+Reach for spans when the bias is *off-map* — an uncertified route, an
+uncertified σ region, a probe. That is the regime the amplification law
+governs. Concretely:
+
+- `combolate` (`--sigma_lowres_span late:0.75 --sigma_lowres_span2 late`) —
+  −13.9%, ΔW 0.75. Pick it if you specifically want the endpoint weights close
+  to a native run and can spend the throughput.
+- `win768late` (drop the primary rule, keep `--sigma_lowres_span2 late`) —
+  −6%, the max-margin arm (0.9678 / 0.9728). Maximum conservatism.
 
 ## Cache mechanics
 
@@ -201,8 +227,11 @@ buckets differ. Consequences:
 
 - `make preprocess` / `make preprocess-vae` chain the emit once per route listed
   in `sigma_demote`, so the sibling cache tracks images as they are added.
-- `make preprocess-demote ARGS="--sigma_demote 1024:768"` runs one route
-  explicitly. Idempotent; requires `preprocess-vae` to have run first.
+- `make preprocess-demote` emits **every** route in `sigma_demote` (same source
+  as the chain above), so the stacked router's two siblings both land from this
+  target too. `ARGS="--sigma_demote 1024:768"` overrides with an explicit route
+  (a comma list there is expanded into one pass each). Idempotent; requires
+  `preprocess-vae` to have run first.
 - The key lives outside the latents namespace, so the normal cached-latent
   loader never sees it — checkpoints and non-`--sigma_lowres` runs are
   untouched.
