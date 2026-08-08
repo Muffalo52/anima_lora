@@ -721,11 +721,48 @@ def _log_step(
                 logs["lr/effective_lr"] = eff_lr
                 logs["lr/d_effective_lr"] = d_val * eff_lr
 
-        #AdamW_adv
-        if hasattr(raw_opt, "kourkoutas_helper") and raw_opt.kourkoutas_helper is not None:
-            kb_stats = getattr(raw_opt.kourkoutas_helper, "last_beta2_stats", {})
+        # Kourkoutas / AdamW-adv beta2 diagnostics
+        if (
+            hasattr(raw_opt, "kourkoutas_helper")
+            and raw_opt.kourkoutas_helper is not None
+        ):
+            kb_stats = getattr(
+                raw_opt.kourkoutas_helper,
+                "last_beta2_stats",
+                {},
+            )
+
+            # Overall
             if "mean" in kb_stats:
-                logs["opt/kourkoutas_beta2_mean"] = kb_stats["mean"]        
+                logs["opt/kourkoutas_beta2_mean"] = kb_stats["mean"]
+
+            # LoRA A
+            if "lora_A_mean" in kb_stats:
+                logs["opt/kourkoutas_beta2_lora_A"] = kb_stats["lora_A_mean"]
+                logs["opt/kourkoutas_beta2_lora_A_min"] = kb_stats["lora_A_min"]
+                logs["opt/kourkoutas_beta2_lora_A_max"] = kb_stats["lora_A_max"]
+
+            # LoRA B
+            if "lora_B_mean" in kb_stats:
+                logs["opt/kourkoutas_beta2_lora_B"] = kb_stats["lora_B_mean"]
+                logs["opt/kourkoutas_beta2_lora_B_min"] = kb_stats["lora_B_min"]
+                logs["opt/kourkoutas_beta2_lora_B_max"] = kb_stats["lora_B_max"]
+
+
+            # LoRa A/B ratio and difference
+            if "lora_A_B_ratio" in kb_stats:
+                logs["opt/kourkoutas_beta2_A_B_ratio"] = (
+                    kb_stats["lora_A_B_ratio"]
+                )      
+            
+            if "lora_A_minus_B" in kb_stats:
+                logs["opt/kourkoutas_beta2_A_minus_B"] = (
+                    kb_stats["lora_A_minus_B"]
+    )
+
+            # Optional: non-LoRA parameters
+            if "other_mean" in kb_stats:
+                logs["opt/kourkoutas_beta2_other"] = kb_stats["other_mean"]
         # ----------------------------------------
         trainer.step_logging(state.accelerator, logs, state.global_step, epoch + 1)
 
