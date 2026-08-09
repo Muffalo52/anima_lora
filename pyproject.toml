@@ -15,7 +15,7 @@ dependencies = [
     "pytorch-optimizer>=3.9.0",
     "prodigyopt>=1.1.2",
     "prodigy-plus-schedule-free",
-    "adv-optm @ git+https://github.com/Muffalo52/advanced_optimizers.git",
+    "adv-optm @ git+https://github.com/67372a/Advanced_Optimizers.git#branch=enhancements",
     "schedulefree @ git+https://github.com/facebookresearch/schedule_free.git",
     "LoraEasyCustomOptimizer @ git+https://github.com/Muffalo52/LoRA_Easy_Training_scripts_Backend.git#subdirectory=custom_scheduler",
     # Data & Config
