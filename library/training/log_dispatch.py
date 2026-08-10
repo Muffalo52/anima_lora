@@ -32,17 +32,17 @@ def generate_step_logs(
     *,
     vr_state: Optional[dict] = None,
 ) -> dict:
-    """Assemble the per-step ``logs`` dict (loss, norms, per-group LRs).
+    """Assemble the per-step `logs` dict (loss, norms, per-group LRs).
 
     The *input* end of the metrics pipeline — the dict built here is handed to
     :func:`dispatch_logs`. ``vr_state`` is the trainer's ``RuntimeState.vr``
-    dict (λ tracking for the variance-reduced FM loss); pass ``None`` when VR
+    dict (λ tracking for the variance-reduced FM loss); pass `None` when VR
     is off.
 
     Note on history: the old in-trainer version carried a ``for…else`` whose
     ``else`` block (a legacy ``lr/group{i}`` naming fallback from before
     ``lr_descriptions`` existed) ran unconditionally — a for-loop ``else``
-    fires whenever the loop completes without ``break`` — duplicating every LR
+    fires whenever the loop completes without `break`` — duplicating every LR
     series under a second key set. The loop below is the whole behavior.
     """
     logs = {"loss/current": current_loss, "loss/average": avr_loss}
@@ -66,6 +66,13 @@ def generate_step_logs(
             logs["vr/lambda_batch"] = lambda_batch
 
     lrs = lr_scheduler.get_last_lr()
+
+    optimizer_type = args.optimizer_type.lower()
+
+    is_dadapt = optimizer_type.startswith("dadapt")
+    is_prodigy = optimizer_type == "prodigy"
+    is_prodigy_adv = optimizer_type == "prodigy_adv"
+
     for i, lr in enumerate(lrs):
         if lr_descriptions is not None:
             lr_desc = lr_descriptions[i]
@@ -81,22 +88,42 @@ def generate_step_logs(
 
         logs[f"lr/{lr_desc}"] = lr
 
+        # D-adaptive optimizers
         if (
-            args.optimizer_type.lower().startswith("DAdapt".lower())
-            or args.optimizer_type.lower() == "Prodigy".lower()
+            is_dadapt
+            or is_prodigy
+            or is_prodigy_adv
         ):
-            # tracking d*lr value
-            logs[f"lr/d*lr/{lr_desc}"] = (
-                lr_scheduler.optimizers[-1].param_groups[i]["d"]
-                * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-            )
-        if (
-            args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower())
-            and optimizer is not None
-        ):  # tracking d*lr value of unet.
-            logs["lr/d*lr"] = (
-                optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-            )
+            param_group = lr_scheduler.optimizers[-1].param_groups[i]
+
+            # Raw D estimate.
+            if "d" in param_group:
+                d = param_group["d"]
+                logs[f"lr/d/{lr_desc}"] = d
+
+                # Effective learning rate = d * scheduler LR.
+                logs[f"lr/d*lr/{lr_desc}"] = d * lr
+
+            # Historical maximum D used by Prodigy/Prodigy_adv.
+            if "d_max" in param_group:
+                logs[f"lr/d_max/{lr_desc}"] = param_group["d_max"]
+
+    # ScheduleFree + Prodigy compatibility.
+    if (
+        optimizer_type.endswith("prodigyplusschedulefree")
+        and optimizer is not None
+    ):
+        param_group = optimizer.param_groups[0]
+
+        if "d" in param_group:
+            d = param_group["d"]
+            lr = param_group["lr"]
+
+            logs["lr/d"] = d
+            logs["lr/d*lr"] = d * lr
+
+        if "d_max" in param_group:
+            logs["lr/d_max"] = param_group["d_max"]
 
     return logs
 
