@@ -133,8 +133,23 @@ def main() -> None:
             "from the original source directory."
         ),
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bf16",
+        choices=["fp32", "fp16", "bf16"],
+        help="Model loading dtype (default: bf16)",
+    )
+
     args = parser.parse_args()
 
+    dtype_map = {
+        "fp32": torch.float32,
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+    }
+    dtype = dtype_map[args.dtype]
+    
     from library.anima import weights as anima_utils
     from library.anima.strategy import AnimaTextEncodingStrategy, AnimaTokenizeStrategy
 
@@ -186,7 +201,7 @@ def main() -> None:
         print(f"{pending}/{total} captions need encoding.")
     print(f"Loading Qwen3 text encoder from {args.qwen3} ...")
     text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
-        args.qwen3, dtype=torch.bfloat16, device=str(device)
+        args.qwen3, dtype=dtype, device=str(device)
     )
     t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
 
@@ -194,7 +209,7 @@ def main() -> None:
     if args.dit:
         print(f"Loading LLM adapter from {args.dit} ...")
         llm_adapter = anima_utils.load_llm_adapter(
-            args.dit, dtype=torch.bfloat16, device=str(device)
+            args.dit, dtype=dtype, device=str(device)
         )
 
     tokenize_strategy = AnimaTokenizeStrategy(

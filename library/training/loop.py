@@ -640,7 +640,7 @@ def _log_step(
     avr_loss: float = state.loss_recorder.moving_average
     logs = {
         "avr_loss": avr_loss,
-        "it/s": state.rate_tracker.display_rate,
+        "actual_rate": state.rate_tracker.display_rate,
     }
     raw_opt = state.optimizer.optimizer if hasattr(state.optimizer, "optimizer") else state.optimizer
     if hasattr(raw_opt, "param_groups") and len(raw_opt.param_groups) > 0:
