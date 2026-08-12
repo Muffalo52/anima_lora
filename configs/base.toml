@@ -65,6 +65,8 @@ vae_disable_cache = true
 masked_loss = true
 torch_compile = true
 attn_mode = "flash"
+mixed_precision = "bf16"
+save_precision = "bf16"
 compile_dynamic_seq = true
 # Partitioner recompute cap — restores the pre-2026-06-10 no-grad-ckpt VRAM
 # footprint after the custom-autograd removal (which had implicitly pinned the
