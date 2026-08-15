@@ -680,6 +680,63 @@ at most partial; some share plausibly rides the still-stretched r < α·μ
 global carriers. Mechanism-value only; no route implication. Safe set
 unchanged: {1024→896 @ σ>0.5, 1280→1024 @ σ\*∈(0.625, 0.875)}.
 
+## yarnsig on the 1024→768 window (2026-08-15): the below-window improvement is the family's largest — and still miles from in-band; all three legs FAIL ship criteria, 768 stays plain
+
+Run: `results/20260815-1041-yarn768/` (40 img × 8 draws/bin, `--bins 4
+--sigma_window 0.35,0.95 --endpoint_bin --demote_edges 768 --yarn_align
+1,4 --yarn_sigma_gate 0.35,2`, soup_sincos adapter; 4-image path
+validation `results/20260815-1037`; pre-registration in `roadmap.md`
+§"YaRN/yarnsig on the 1024→768 window" — params transported verbatim, no
+search). Instrument valid: gap_reenc |mean| ≤ 0.030 at every bin;
+demote-arm split-half 0.65–0.97. This pool reads hot like 20260727's
+(plain 768 sits +0.112–0.155 over reenc at ~5 SEM *inside* the certified
+window) — paired arm-vs-arm differences are the verdict objects, not
+absolute in-band position.
+
+| σ bin | 0.425 | 0.575 | 0.725 | 0.875 | 1.0 |
+|---|---|---|---|---|---|
+| gap_768 | .275 | .183 | .110 | .159 | .070 |
+| gap_768yarn | .193 | .144 | .117 | .100 | .063 |
+| gap_768yarnsig | .182 | .185 | .153 | .164 | **.040** |
+| paired yarn−768 | **−.082 (2.9σ)** | −.040 | +.006 | −.059 | −.007 |
+| paired yarnsig−768 | **−.093 (3.3σ)** | +.001 | +.043 | +.006 | **−.030 (2.0σ)** |
+| paired yarn−reenc | +.175 (7.5σ) | +.132 | +.119 | +.096 | +.094 |
+| paired yarnsig−reenc | +.164 (6.7σ) | +.174 | +.156 | +.161 | +.070 (8.0σ) |
+
+Scored against the three pre-registered legs:
+
+1. **In-window (0.725/0.875): no harm, no win.** Both arms within 2
+   combined SEM of plain (yarn +0.006/−0.059, yarnsig +0.043/+0.006) —
+   the discard branch does not fire, but neither does the ≥2 SEM
+   refinement win. Secondary structure worth keeping: yarnsig is **2.8
+   SEM worse than static yarn at σ=0.875** (+0.065, 13/40 wins) despite
+   μ(0.875) ≈ 0.994 — the μ-scaled thresholds discretely reassign bands
+   sitting near the α/β boundaries, so near-unity gating is *not* a
+   no-op. Any future yarnsig-at-high-σ use should check band membership
+   stability, not assume μ→1 ⇒ static.
+2. **Endpoint (σ=1): FAIL.** yarnsig−768 is −0.030 ± 0.015 — exactly
+   2.0 SEM, the borderline of the improvement criterion — but the
+   in-band leg fails at 8.0 SEM (yarnsig−reenc +0.070, 1/40 wins). The
+   favorable 896 precedent did not transport: 896yarn drove its endpoint
+   *negative*; 768yarnsig only trims +0.070→+0.040. `threshold2_max`
+   stays 0.95.
+3. **Downward (0.425/0.575): FAIL, as pre-registered-expected — but the
+   effect size is real.** yarn −0.082 (2.9σ) and yarnsig −0.093 (3.3σ)
+   at σ=0.425 are the largest paired alignment wins the family has
+   measured (896's best was −0.050). And they remove barely a third of
+   the below-window excess: both arms stay +0.164–0.175 over reenc
+   (~7 SEM, ≤4/40 wins). Gap *reduction* ≠ certification. Downward
+   widening closes with the family.
+
+Verdict: **no rule-2 wiring change, no window change — 768 stays plain
+demotion and the alignment family is now closed at 768 as well.** The
+one durable mechanism read: the RoPE-mediated share of the 768 gap is
+real and yarn-addressable (biggest exactly where the gap is biggest),
+but the S1 content share dominates everywhere the route isn't already
+certified — consistent with G10's Floor decomposition and the G11
+window read. Safe set unchanged: {1024→896 @ σ>0.5 (+yarnsig), 1024→768
+@ σ∈(0.65, 0.95) plain, 1280→1024 @ σ\*∈(0.625, 0.875)}.
+
 ## Caveats
 
 - Single operating point (`anima_soup_sincos`, trained at native tiers). An
