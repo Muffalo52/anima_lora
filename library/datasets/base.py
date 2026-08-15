@@ -664,15 +664,40 @@ class BaseDataset(torch.utils.data.Dataset):
         # but only when no subset uses sample_ratio (where every image matters more).
         has_sample_ratio = any(s.sample_ratio < 1.0 for s in self.subsets)
         self.buckets_indices: List[BucketBatchIndex] = []
+        starved: List[Tuple[Tuple[int, int], int]] = []
         for bucket_index, bucket in enumerate(self.bucket_manager.buckets):
             if has_sample_ratio:
                 batch_count = int(math.ceil(len(bucket) / self.batch_size))
             else:
                 batch_count = len(bucket) // self.batch_size
+                if batch_count == 0 and len(bucket) > 0:
+                    starved.append(
+                        (self.bucket_manager.resos[bucket_index], len(bucket))
+                    )
             for batch_index in range(batch_count):
                 self.buckets_indices.append(
                     BucketBatchIndex(bucket_index, self.batch_size, batch_index)
                 )
+
+        if starved:
+            # Free-fit buckets on native (W, H) fragment finely, so a small
+            # dataset can leave several buckets under batch_size. Those round to
+            # zero batches here and are never fetched in ANY epoch (unlike the
+            # len % batch_size tail, which shuffle_buckets() rotates per epoch).
+            n_lost = sum(count for _, count in starved)
+            logger.warning(
+                f"{n_lost} image(s) across {len(starved)} bucket(s) hold fewer "
+                f"than batch_size={self.batch_size} images and will NOT be "
+                f"trained on at all:"
+            )
+            for reso, count in sorted(starved, key=lambda kv: -kv[1])[:10]:
+                logger.warning(f"  bucket {reso[0]}x{reso[1]}: {count} image(s)")
+            if len(starved) > 10:
+                logger.warning(f"  ... and {len(starved) - 10} more bucket(s)")
+            logger.warning(
+                "  lower train_batch_size (batch_size=1 wastes nothing), raise "
+                "num_repeats, or set sample_ratio < 1.0 to keep ragged batches."
+            )
 
         self.shuffle_buckets()
         self._length = len(self.buckets_indices)
