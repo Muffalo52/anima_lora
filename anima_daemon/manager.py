@@ -37,6 +37,7 @@ from .jobs import (
     Job,
     load_all,
     new_job_id,
+    prune_jobs,
 )
 
 logger = logging.getLogger("anima.daemon")
@@ -1008,6 +1009,25 @@ class JobManager:
         return cmd, env
 
     def _reconcile(self) -> None:
+        # Prune BEFORE load_all: a pruned job never enters the in-memory table,
+        # so no later persist() can recreate the dir we just removed. Boot is the
+        # only safe moment for exactly that reason, and it's free (one pass over
+        # dirs we're about to walk anyway). Best-effort — a retention sweep must
+        # never be what stops the daemon from coming up.
+        try:
+            pruned = prune_jobs()
+            if pruned["pruned"]:
+                logger.info(
+                    "pruned %d terminal job dirs older than %gd (%.1f MB freed, "
+                    "%d kept)",
+                    len(pruned["pruned"]),
+                    pruned["max_age_days"],
+                    pruned["freed_bytes"] / 1e6,
+                    pruned["kept"],
+                )
+        except Exception as exc:  # noqa: BLE001 — never block boot on retention
+            logger.warning("job-dir prune failed (continuing): %s", exc)
+
         self._jobs = load_all()
         for job in self._jobs.values():
             if job.state in ACTIVE_STATES:

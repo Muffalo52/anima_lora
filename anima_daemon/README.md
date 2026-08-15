@@ -367,6 +367,33 @@ output/daemon/
 reads these files directly (`gui/daemon.py`) rather than polling HTTP in the Qt
 thread.
 
+### Retention — `jobs/` is bounded
+
+Job dirs are pruned, not kept forever (a few hundred dirs / tens of MB of
+`stdout.log` accumulate within a couple of months otherwise). `jobs.prune_jobs()`
+runs at **daemon boot**, from `manager._reconcile` and deliberately *before*
+`load_all()` — a pruned job never enters the in-memory table, so no later
+`persist()` can recreate the dir. A dir is a candidate only when its `job.json`
+parses, its state is terminal, it's older than `ANIMA_DAEMON_JOB_RETENTION_DAYS`
+(by `ended_at`, falling back to `submitted_at` then dir mtime), and it's not
+among the `ANIMA_DAEMON_JOB_RETENTION_KEEP` newest terminal jobs. Queued /
+running / paused dirs and unreadable records are always left alone, and the whole
+sweep is best-effort — it can never keep the daemon from booting.
+
+For a manual sweep (a daemon that's been up for weeks, or a preview of what boot
+would take), `make daemon-prune` — **dry-run by default**:
+
+```bash
+make daemon-prune                              # preview with the configured knobs
+make daemon-prune ARGS="--apply"               # actually delete
+make daemon-prune ARGS="--days 7 --keep 50 --apply --verbose"
+```
+
+It's pure filesystem (`python -m anima_daemon prune`) and works with the daemon
+up or down. With one **up**, pruned jobs linger in its in-memory table until its
+next restart — harmless, they're finished history — which is why boot remains the
+primary path.
+
 ## Environment
 
 | var | default | effect |
@@ -376,6 +403,8 @@ thread.
 | `ANIMA_LORA_ROOT` | — | explicit repo root for pidfile discovery |
 | `ANIMA_DAEMON_GPU_BUSY_FRAC` | `0.85` | pre-launch GPU guard: card treated as busy above this used/total fraction |
 | `ANIMA_DAEMON_GPU_RETRIES` / `_DELAY` | `1` / `2.0` | guard wait before launching anyway |
+| `ANIMA_DAEMON_JOB_RETENTION_DAYS` | `30` | boot prune: age above which a *terminal* job dir is deleted; `0` disables |
+| `ANIMA_DAEMON_JOB_RETENTION_KEEP` | `200` | newest terminal job dirs always kept, whatever their age |
 
 ## Disposable daemon — trust + attach
 

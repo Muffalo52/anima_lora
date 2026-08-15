@@ -90,6 +90,67 @@ def test_job_roundtrip(tmp_path, monkeypatch):
     assert loaded["j1"].overrides == {"network_dim": 16}
 
 
+def _seed_job(state: str, age_days: float, job_id: str) -> jobs.Job:
+    """A persisted job in ``state``, finished ``age_days`` ago, with a stdout.log."""
+    ts = time.time() - age_days * 86400.0
+    job = jobs.Job(id=job_id, method="lora", preset="default", state=state)
+    job.submitted_at = ts
+    job.ended_at = ts if state in jobs.TERMINAL_STATES else None
+    job.persist()
+    (job.dir / "stdout.log").write_text("x" * 1024, encoding="utf-8")
+    return job
+
+
+def test_prune_jobs_age_state_and_floor(tmp_path, monkeypatch):
+    """Old + terminal prunes; young, active, and floor-protected survive."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    _seed_job(jobs.STATE_DONE, 60, "old-done")
+    _seed_job(jobs.STATE_ERROR, 45, "old-error")
+    _seed_job(jobs.STATE_STOPPED, 40, "old-stopped")
+    _seed_job(jobs.STATE_DONE, 1, "young-done")
+    # Never a candidate however old: it holds the queue slot / is mid-flight.
+    _seed_job(jobs.STATE_RUNNING, 90, "old-running")
+    _seed_job(jobs.STATE_QUEUED, 90, "old-queued")
+
+    summary = jobs.prune_jobs(max_age_days=30, keep_recent=0, dry_run=True)
+    assert set(summary["pruned"]) == {"old-done", "old-error", "old-stopped"}
+    assert summary["freed_bytes"] > 0
+    assert set(jobs.load_all()) == {  # dry run touched nothing
+        "old-done",
+        "old-error",
+        "old-stopped",
+        "young-done",
+        "old-running",
+        "old-queued",
+    }
+
+    # keep_recent protects the N newest *terminal* jobs regardless of age, so the
+    # two newest terminal records (young-done, old-stopped) are off the table.
+    summary = jobs.prune_jobs(max_age_days=30, keep_recent=2, dry_run=False)
+    assert set(summary["pruned"]) == {"old-done", "old-error"}
+    assert summary["kept"] == 2
+    assert set(jobs.load_all()) == {
+        "old-stopped",
+        "young-done",
+        "old-running",
+        "old-queued",
+    }
+
+
+def test_prune_jobs_disabled_and_unreadable(tmp_path, monkeypatch):
+    """0 days disables; an unparseable record is left alone, never guessed at."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    _seed_job(jobs.STATE_DONE, 99, "ancient")
+    assert jobs.prune_jobs(max_age_days=0, keep_recent=0)["pruned"] == []
+    assert set(jobs.load_all()) == {"ancient"}
+
+    (config.JOBS_DIR / "corrupt").mkdir()
+    (config.JOBS_DIR / "corrupt" / "job.json").write_text("{not json", encoding="utf-8")
+    summary = jobs.prune_jobs(max_age_days=30, keep_recent=0)
+    assert summary["pruned"] == ["ancient"]
+    assert (config.JOBS_DIR / "corrupt").is_dir()
+
+
 def test_liveness_pid_create_time():
     me = os.getpid()
     ct = proc.create_time(me)
