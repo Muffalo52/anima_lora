@@ -56,3 +56,5 @@ project/*/paper/*.log
 project/*/paper/*.blg
 # paper_bench = pure run artifacts (~15 GB, no scripts/docs; nothing ever tracked)
 project/sigma_lowres/paper_bench/
+bench/cjk_adapter/assets/
+

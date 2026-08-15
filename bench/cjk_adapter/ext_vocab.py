@@ -1,0 +1,261 @@
+"""CJK vocab extension for the LLM Adapter's T5-side query stream (Phase 1).
+
+The adapter's target vocab is the old t5-v1_1-xxl spiece (32128 rows, no CJK).
+Instead of training a new SentencePiece, we borrow the CJK subset of Qwen3's
+own tokenizer — every borrowed piece is an existing Qwen token, so its
+extended-row init is an exact anchor-mapped embedding (``W @ qwen_embed[id]``,
+where ``W`` is a ridge least-squares fit Qwen-embed → T5-embed on tokens whose
+surface form exists in both vocabs), and the Qwen source stream and T5 query
+stream segment CJK spans identically (token-aligned cross-attention).
+
+Byte-fragment fallback: Qwen is byte-BPE, so some chars tokenize as UTF-8
+fragments. Those get per-character supplementary rows, initialised from the
+mapped mean of their fragment embeddings.
+
+Pure-CPU module — no model load; consumers pass embedding tensors in.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import torch
+
+T5_PAD_ID = 0
+T5_EOS_ID = 1
+T5_UNK_ID = 2
+T5_TABLE_SIZE = 32128  # embedding rows in the checkpoint; ext ids start here
+
+# Character ranges routed to the Qwen fallback (and eligible for rows).
+_CJK_RANGES = (
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0x3400, 0x4DBF),  # CJK Ext A
+    (0x3040, 0x309F),  # hiragana
+    (0x30A0, 0x30FF),  # katakana
+    (0x31F0, 0x31FF),  # katakana phonetic ext
+    (0xAC00, 0xD7AF),  # hangul syllables
+    (0x1100, 0x11FF),  # hangul jamo
+    (0x3130, 0x318F),  # hangul compat jamo
+    (0x3000, 0x303F),  # CJK symbols & punctuation (「」、。々 etc.)
+    (0xFF00, 0xFFEF),  # fullwidth forms
+)
+
+
+def is_cjk_char(ch: str) -> bool:
+    o = ord(ch)
+    return any(lo <= o <= hi for lo, hi in _CJK_RANGES)
+
+
+def segment_runs(text: str) -> list[tuple[str, str]]:
+    """Split text into ("t5"|"cjk", span) runs.
+
+    Whitespace immediately preceding a CJK run is folded into it (Qwen's
+    byte-BPE handles leading spaces natively; T5 spiece would just emit a
+    bare ``▁``).
+    """
+    runs: list[tuple[str, str]] = []
+    buf, kind = [], None
+    for ch in text:
+        k = "cjk" if is_cjk_char(ch) else "t5"
+        if k != kind and buf:
+            runs.append((kind, "".join(buf)))
+            buf = []
+        buf.append(ch)
+        kind = k
+    if buf:
+        runs.append((kind, "".join(buf)))
+
+    merged: list[tuple[str, str]] = []
+    for kind, span in runs:
+        if (
+            kind == "cjk"
+            and merged
+            and merged[-1][0] == "t5"
+            and merged[-1][1].isspace()
+        ):
+            span = merged.pop()[1] + span
+        if merged and merged[-1][0] == kind:
+            span = merged.pop()[1] + span
+        merged.append((kind, span))
+    return merged
+
+
+def collect_clean_qwen_tokens(qwen_tok) -> dict[int, str]:
+    """Qwen token ids whose decoded surface is pure CJK (spaces allowed)."""
+    n = qwen_tok.vocab_size
+    surfaces = qwen_tok.batch_decode([[i] for i in range(n)])
+    clean = {}
+    for i, s in enumerate(surfaces):
+        core = s.strip()
+        if core and "�" not in s and all(is_cjk_char(c) or c == " " for c in s):
+            clean[i] = s
+    return clean
+
+
+def build_anchor_pairs(t5_tok, qwen_tok) -> tuple[list[int], list[int]]:
+    """(t5_ids, qwen_ids) of tokens with identical decoded surfaces."""
+    qwen_surface_to_id: dict[str, int] = {}
+    n = qwen_tok.vocab_size
+    for i, s in enumerate(qwen_tok.batch_decode([[i] for i in range(n)])):
+        if s and "�" not in s:
+            qwen_surface_to_id.setdefault(s, i)
+
+    t5_ids, qwen_ids = [], []
+    for piece, tid in t5_tok.get_vocab().items():
+        if tid >= T5_TABLE_SIZE or piece.startswith("<"):
+            continue
+        surface = piece.replace("▁", " ")
+        qid = qwen_surface_to_id.get(surface)
+        if qid is not None:
+            t5_ids.append(tid)
+            qwen_ids.append(qid)
+    return t5_ids, qwen_ids
+
+
+def fit_anchor_map(
+    qwen_embed: torch.Tensor,
+    t5_embed: torch.Tensor,
+    t5_ids: list[int],
+    qwen_ids: list[int],
+    ridge: float = 1e-2,
+    holdout: int = 1000,
+) -> tuple[torch.Tensor, float]:
+    """Ridge least-squares W (d_qwen × d_t5) with a held-out cosine sanity.
+
+    Returns (W, mean held-out cosine of ``qwen_embed @ W`` vs the true T5 row).
+    """
+    A = qwen_embed[qwen_ids].float()
+    B = t5_embed[t5_ids].float()
+    g = torch.Generator().manual_seed(0)
+    perm = torch.randperm(len(t5_ids), generator=g)
+    hold, train = perm[:holdout], perm[holdout:]
+    At, Bt = A[train], B[train]
+    d = At.shape[1]
+    lam = ridge * At.pow(2).mean() * len(train)
+    W = torch.linalg.solve(At.T @ At + lam * torch.eye(d), At.T @ Bt)
+    cos = torch.nn.functional.cosine_similarity(A[hold] @ W, B[hold], dim=-1)
+    return W, float(cos.mean())
+
+
+def build_ext_table(
+    qwen_tok,
+    qwen_embed: torch.Tensor,
+    W: torch.Tensor,
+    clean: dict[int, str],
+) -> tuple[torch.Tensor, dict]:
+    """Extended rows + id mapping.
+
+    Rows = every clean Qwen CJK token, plus per-character supplementary rows
+    for standard-range chars whose Qwen tokenization is byte-fragments only
+    (init = mapped mean of fragment embeddings).
+    """
+    qwen_map: dict[int, int] = {}
+    vecs: list[torch.Tensor] = []
+    for qid in sorted(clean):
+        qwen_map[qid] = len(vecs)
+        vecs.append(qwen_embed[qid].float() @ W)
+
+    single_clean = {s: qid for qid, s in clean.items() if len(s) == 1}
+    char_map: dict[str, int] = {}
+    for lo, hi in _CJK_RANGES:
+        for o in range(lo, hi + 1):
+            ch = chr(o)
+            if ch in single_clean:
+                continue
+            ids = qwen_tok(ch, add_special_tokens=False)["input_ids"]
+            if not ids or qwen_tok.decode(ids) != ch:
+                continue
+            char_map[ch] = len(vecs)
+            vecs.append(qwen_embed[ids].float().mean(dim=0) @ W)
+
+    table = torch.stack(vecs) if vecs else torch.zeros(0, W.shape[1])
+    mapping = {
+        "qwen": {str(k): v for k, v in qwen_map.items()},
+        "char": char_map,
+        "rows": table.shape[0],
+    }
+    return table, mapping
+
+
+@dataclass
+class HybridT5Encoder:
+    """T5-side encoder: old spiece for covered text, extended rows for CJK.
+
+    Non-CJK spans tokenize exactly as before (bit-identical for pure-English
+    prompts). CJK spans tokenize with the Qwen tokenizer: clean tokens map to
+    ``T5_TABLE_SIZE + row``; byte-fragment runs are regrouped into characters
+    and looked up per-char (unknown chars degrade to the old ``<unk>``).
+    """
+
+    t5_tok: object
+    qwen_tok: object
+    qwen_map: dict[int, int]
+    char_map: dict[str, int]
+
+    @classmethod
+    def from_mapping(cls, t5_tok, qwen_tok, mapping: dict) -> "HybridT5Encoder":
+        qwen_map = {int(k): v for k, v in mapping["qwen"].items()}
+        # Chars that are clean single tokens were excluded from char_map (no
+        # separate row needed) — but they can still arrive as byte-fragments
+        # mid-word, so the char lookup must cover them via their token row.
+        char_map = dict(mapping["char"])
+        ids = sorted(qwen_map)
+        for qid, s in zip(ids, qwen_tok.batch_decode([[i] for i in ids])):
+            core = s.strip()
+            if len(core) == 1:
+                char_map.setdefault(core, qwen_map[qid])
+        return cls(
+            t5_tok=t5_tok, qwen_tok=qwen_tok, qwen_map=qwen_map, char_map=char_map
+        )
+
+    def _encode_cjk(self, span: str) -> list[int]:
+        out: list[int] = []
+        frag: list[int] = []
+
+        def flush_frag():
+            if not frag:
+                return
+            decoded = self.qwen_tok.decode(frag)
+            for ch in decoded:
+                if ch in self.char_map:
+                    out.append(T5_TABLE_SIZE + self.char_map[ch])
+                elif not ch.isspace():
+                    out.append(T5_UNK_ID)
+            frag.clear()
+
+        for qid in self.qwen_tok(span, add_special_tokens=False)["input_ids"]:
+            if qid in self.qwen_map:
+                # A clean token can never complete a byte sequence — any
+                # pending fragments are unresolvable, degrade them now.
+                flush_frag()
+                out.append(T5_TABLE_SIZE + self.qwen_map[qid])
+                continue
+            frag.append(qid)
+            if "�" not in self.qwen_tok.decode(frag):
+                flush_frag()
+        flush_frag()
+        return out
+
+    def encode(self, text: str, max_length: int = 512) -> tuple[list[int], list[int]]:
+        """Return (ids, attention_mask), eos-terminated and padded to max_length."""
+        ids: list[int] = []
+        for kind, span in segment_runs(text):
+            if kind == "cjk":
+                ids.extend(self._encode_cjk(span))
+            else:
+                ids.extend(self.t5_tok(span, add_special_tokens=False)["input_ids"])
+        ids = ids[: max_length - 1] + [T5_EOS_ID]
+        mask = [1] * len(ids)
+        pad = max_length - len(ids)
+        return ids + [T5_PAD_ID] * pad, mask + [0] * pad
+
+
+def load_ext_assets(prefix: Path) -> tuple[torch.Tensor, dict]:
+    """Load (table, mapping) written by build_ext.py from a path prefix."""
+    from safetensors.torch import load_file
+
+    table = load_file(str(prefix.with_suffix(".safetensors")))["ext_embed"]
+    mapping = json.loads(prefix.with_suffix(".json").read_text(encoding="utf-8"))
+    return table, mapping
