@@ -30,3 +30,9 @@ Active projects:
   point → EasyEdit ship proposal + paper prep are the owed write-ups
   (neither the line's `outcomes.md` nor an `easyedit_comfy_node` proposal
   exists yet).
+- [`cjk_aware_anima/`](cjk_aware_anima/) — native JA/CJK prompt conditioning
+  via an extended T5-side vocab distilled against the EN-translation teacher.
+  Probe + zero-shot ext vocab measured (`bench/cjk_adapter/`); the Phase 2a
+  data assets MT cannot produce are built ([`datasets/`](cjk_aware_anima/datasets/)
+  — Wikidata proper-noun lexicon, native-register manga eval set); the
+  distillation loop itself is unstarted.
