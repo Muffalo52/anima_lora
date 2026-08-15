@@ -52,6 +52,31 @@ def cmd_byg(extra):
     train("byg", extra)
 
 
+def cmd_cjk_cache(extra):
+    """Stage the CJK distillation cache (Qwen hidden states + teacher output).
+
+    One pass over ``post_image_dataset/cjk_distill/pairs.jsonl``. The teacher
+    is frozen and both arms share the Qwen side, so this is computed once and
+    reused by every ``exp-distill-cjk`` arm — rebuild only when the corpus, the
+    tokenizer, or the ext *mapping* changes (not when the ext *values* do).
+    The holdout split additionally caches the all-EN reference and the
+    unk-wall arms, which is what makes the recovery-fraction metric possible
+    without a text encoder at train time.
+    """
+    run([PY, "-m", "scripts.distill_cjk.cache", *extra])
+
+
+def cmd_distill_cjk(extra):
+    """Distill the extended T5-side vocab rows (project/cjk_aware_anima 2b).
+
+    Run the gates in order — ``--mode oracle`` (loop + trimming invariant),
+    ``--mode capacity`` (can the ext rows express the teacher at all?), then
+    ``--mode train``. Output is a vocab pack (``ext_embed.safetensors`` +
+    ``.json``), not a LoRA.
+    """
+    run([PY, "-m", "scripts.distill_cjk.distill", *extra])
+
+
 def cmd_byg_data(extra):
     """Build BYG edit-tuple sidecars (tag-swap) into ``post_image_dataset/byg/``.
 

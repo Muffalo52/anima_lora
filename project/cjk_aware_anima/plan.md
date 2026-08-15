@@ -1,13 +1,13 @@
 # CJK-aware Anima — plan (Phase 2 onward)
 
 *Line home: [`motivation.md`](motivation.md) (why) ·
-[`done.md`](done.md) (what is measured and built).*
+[`done.md`](done.md) (what is measured and built) ·
+[`report.md`](report.md) (Phase 2b measured verdicts).*
 
-Status: **PROPOSAL.** Phase 2a (corpus) is built and measured — see
-[`done.md`](done.md); only its user sign-off and the deferred `natural`
-register remain, below. Everything from Phase 2b on is unstarted. Scope is
-**Japanese only**; zh/ko are "rerun the same pipeline with a different
-corpus" once ja passes.
+Status: Phase 2a (corpus) built and measured; **Phase 2b built and run** —
+gates G0/G0b/G1 passed, G2 partial (see [`report.md`](report.md)). 2c onward
+is unstarted. Scope is **Japanese only**; zh/ko are "rerun the same pipeline
+with a different corpus" once ja passes.
 
 ## Phase 2 — distillation design
 
@@ -45,17 +45,24 @@ non-pad) — a position-wise MSE compares *different tokens of different
 counts*. Three loss candidates, to be settled by a small ablation at the top
 of Phase 2c:
 
-- **L_flat** — MSE/cosine on the full padded `[512, d]` output. Crude but the
-  probe's own metric; misalignment may act as tolerable noise because the
-  output at every position is Qwen-context-dominated (pad-position outputs
-  already track the Qwen side — that's why `ja_native` vs `en` cos ≈ 0 even
-  on 481 shared pad positions).
-- **L_attn (recommended if L_flat stalls)** — distill at the interface the
-  DiT actually consumes: cross-attention is permutation-invariant over KV, so
-  match `Attn(Q_probe, K(out), V(out))` for a fixed probe-query bank (e.g.
-  the first DiT cross-attn block's frozen K/V projections + a few hundred
-  cached image-token queries at 2–3 σ levels). One attention op, no DiT
-  forward, set-level by construction.
+- **L_flat** — cosine on the full padded `[512, d]` output. Control only. Its
+  first rationale was wrong: pads are **zeroed** after the adapter
+  (`inference/text.py:229`), so they carry no Qwen signal — `ja_native`'s 0.02
+  is 3 informative positions plus a norm-ratio penalty.
+- **L_attn (primary)** — the DiT's cross-attn applies **no RoPE to the
+  context** (`models.py:385`), so it consumes the output permutation-
+  invariantly, while the `512 − N` zero pads are unmasked sink mass whose
+  weight depends on N: the object is a *set plus a length*. Match
+  `Attn(Q_probe, K(out), V(out))` for a fixed probe-query bank: K/V read
+  straight out of the DiT safetensors, sink folded into the softmax
+  denominator analytically. **The queries must be real cached image-token
+  queries** (a few DiT forwards at 2–3 σ) — substituting random directions
+  degenerates the readout to a near-mean over the sequence and makes both the
+  loss and the metric nearly vacuous, measured in [`report.md`](report.md).
+- **L_span** — D1 captions are *composed* tag-by-tag, so EN↔JA alignment is
+  free and exact; supervises each ext row from its own tag instead of a
+  sequence average, and is the only loss that can carry a per-wording trust
+  weight.
 - **L_pool** — mean/max-pooled sequence statistics. Weakest; control arm only.
 
 ### Training loop
@@ -102,24 +109,73 @@ encoder mapping rather than shipping noise rows (a JSON edit).
 
 - **Phase 2a — corpus. BUILT** (`post_image_dataset/cjk_distill/`; measured in
   [`done.md`](done.md)). Two items left:
-  - **OPEN — user sign-off.** `assets/tag_glossary_review.md` (200 rows,
-    frequency-ordered ⇒ ~64% of occurrences) plus `spotcheck.md`. Fixes land in
-    `datasets/tag_overrides.json`.
+  - **OPEN — user sign-off. Hard blocker on 2c.** 34% of tag *occurrences* are
+    `mt_unverified` (`colored inner hair` → 色付きの陰毛, "colored pubic hair" —
+    its own back-translation says so), and the composed caption is the
+    *student's* input, so a bad wording trains that tag's ext rows toward the
+    wrong meaning. `assets/tag_glossary_review.md` (200 rows ⇒ ~64% of
+    occurrences) + `spotcheck.md`; fixes → `datasets/tag_overrides.json`. Until
+    then `--trust provenance` demotes those spans instead of dropping pairs.
+  - **D6 demoted to eval-only** (39% of pairs): `quote_preserved` puts the raw
+    JA string on the *teacher's* stock-spiece side (→ `<unk>`) and
+    `quote_translated` replaces it with `[TEXT]`, so both teach the ext rows to
+    be vacuous exactly where verbatim identity matters. Glyph identity is
+    Phase 4's job. Default `--train_registers tags,tags_alt`. **Owed
+    instrument**: D6's two registers share their JA text verbatim, so they
+    cannot measure glyph contrast at all — that needs pairs on the *same*
+    template with *different* quoted strings (one extra field out of
+    `build_pairs.py`, then a cache rebuild).
+  - **The corpus is 9,922 pairs, not the 10⁵–10⁶ the cost model assumed** — D1
+    is exhausted at the 3,008 local captions. Composition is CPU-only, so scale
+    is bounded by EN caption text, not GPU: widen from an HF-hosted tag dump
+    before 2c, but after G0/G2 (they may redirect the phase).
   - **Not run: the `natural` prose register.** Implemented and validated on 12
     captions, then deliberately not run — ~3 h of GPU to produce *MT-invented*
     Japanese, when the sentence-register coverage it buys is better bought from
     D3's human-written JA. Decide before 2c.
-- **Phase 2b — loop + unit gates.** `scripts/distill_cjk/` lands with:
-  (G1) EN bit-exactness test — `HybridT5Encoder` on pure-EN text produces
-  identical ids to stock spiece, and a pure-EN prompt's conditioning is
-  bitwise unchanged with the ext table attached; (G2) loss-ablation harness
-  (L_flat vs L_attn vs L_pool on a 1k subset).
+- **Phase 2b — loop + unit gates. BUILT** — `scripts/distill_cjk/`
+  (`make exp-cjk-cache` → `exp-distill-cjk`), `tests/test_cjk_distill.py`.
+  Corpus caches once (Qwen hidden + frozen-teacher output, trimmed to non-pad);
+  teacher and student are the *same* frozen adapter differing only in which
+  rows their ids reach. Trainable surface is a ladder: **2-i-a `global`**
+  (low-rank + diag + gain correction shared by every ext row — so the 95% of
+  rows the corpus never visits still move, and the build-time ×1.66 rescale
+  becomes a learned gain) → **2-i-b `global_row`** (+ per-row residuals above a
+  visit floor; 933 of 3002 visited rows are seen 1-4×) → 2-ii. Provenance ships
+  in three tiers: `tuned` / `mapped` / `zero-shot`. Gates, in order:
+  - **G0b `--mode oracle`** — student ids := teacher ids ⇒ loss ≡ 0. **PASSED**
+    (worst 1-cos 2.9e-4 = bf16 floor), which also certifies the trimming
+    invariant the cache rests on.
+  - **G0 `--mode capacity`** — overfit 32 pairs. Settles 2-i vs 2-ii for
+    minutes of GPU; run before any corpus work.
+  - **G1** — EN bit-exactness: pure-EN ids ≡ stock spiece, and the split
+    embedding returns stock rows bitwise before *and* after the ext params
+    move. **PASSED** (pytest).
+  - **G2** — loss × parameterization cross-tab, every arm scored on every
+    metric so no arm wins on its own objective.
+  - **G3 / G4** — teacher ceiling per register (is 0.6 even the right 2c
+    number?); corpus health: token-count ratio, occurrence-weighted provenance.
+  Headline metric is **recovery**, not raw cosine — `(cos(student,en) −
+  cos(native,en)) / (cos(teacher,en) − cos(native,en))` over a held-out slice
+  (each pair gives the whole triangle); the shared Qwen context puts an
+  untrained student well above zero, so read everything against step 0.
+  **Discrimination is stratified, and the two halves read in opposite
+  directions.** `far` (different images) is the pathology gate — it is what
+  the probe's 0.2 was measured on, between two maximally distant prompts.
+  `near` (same image, `tags` vs `tags_alt`) is *supposed* to be high: two
+  captions that differ only in wording should land on nearly the same
+  conditioning, and a single threshold over arbitrary pairs punishes that.
+  What `near` is good for is its distance from **1.0** — that residue is the
+  only evidence that wording, and downstream the individual glyphs an OCR
+  caption carries, reaches conditioning at all. Exactly 1.0 would mean
+  per-character identity is invisible, i.e. the failure this whole line exists
+  to prevent. Measured: zero-shot sits at far 0.10 / near 0.71.
 - **Phase 2c — train + eval.** Acceptance harness is **the existing bench
   unchanged**: `run_bench.py --ext --languages ja` pointed at the distilled
   sidecar. Gates:
   - `ja_ext` cos_vs_en ≥ **0.6** on both content prompts (teacher sits at
     0.69/0.77 — get within noise of it; stretch: match it),
-  - discrimination ≤ **0.2**,
+  - discrimination **far** ≤ **0.2** (the near half is not gated — see 2b),
   - held-out corpus: student-vs-teacher cos ≥ 0.9,
   - **native-register readout (D7)**: student-vs-teacher cos on the held-out
     LoveHina lines, reported *separately* from the MT-derived held-out set.

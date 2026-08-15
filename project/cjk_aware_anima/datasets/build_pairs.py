@@ -114,16 +114,40 @@ def alt_pool(entry: dict, min_f1: float) -> list[str]:
     ]
 
 
+def seg_provenance(entry: dict | None, ja: str) -> tuple[str, float]:
+    """(via, back-translation f1) of the wording actually chosen for a segment.
+
+    Consumed by the distillation side as a per-span trust weight: the composed
+    caption is the *student's* input, so a mistranslated tag teaches the ext
+    rows of the wrong word (``colored inner hair`` → 色付きの陰毛). Span-level
+    supervision can down-weight those instead of dropping the pair.
+    """
+    if not entry:
+        return "unmapped", 0.0
+    f1 = 0.0
+    for c in entry.get("candidates") or []:
+        if c.get("ja") == ja:
+            f1 = float(c.get("f1") or 0.0)
+            break
+    return str(entry.get("via") or "unknown"), f1
+
+
 def compose(
     segments: list[str], glossary: dict, *, alt: bool, rng: random.Random, min_f1: float
 ):
-    """Map each caption segment to JA; report what could not be mapped."""
-    out, missing = [], []
+    """Map each caption segment to JA; report what could not be mapped.
+
+    Returns ``(ja_segments, missing, spans)`` — ``spans`` carries the EN↔JA
+    segment alignment that composition makes free (each EN tag maps to exactly
+    one JA tag, in order), plus that wording's provenance.
+    """
+    out, missing, spans = [], [], []
     for seg in segments:
         e = glossary.get(seg)
         if not e or not e.get("ja"):
             out.append(seg)  # latin passthrough — trains no ext rows, counted below
             missing.append(seg)
+            spans.append({"en": seg, "ja": seg, "via": "unmapped", "f1": 0.0})
             continue
         ja = e["ja"]
         if alt:
@@ -131,7 +155,9 @@ def compose(
             if pool:
                 ja = rng.choice([ja, *pool])
         out.append(ja)
-    return out, missing
+        via, f1 = seg_provenance(e, ja)
+        spans.append({"en": seg, "ja": ja, "via": via, "f1": f1})
+    return out, missing, spans
 
 
 def build_d1(captions, glossary, args, rng) -> list[dict]:
@@ -141,7 +167,7 @@ def build_d1(captions, glossary, args, rng) -> list[dict]:
         for register, alt in (("tags", False), ("tags_alt", True)):
             if register == "tags_alt" and not args.alt_register:
                 continue
-            ja, missing = compose(
+            ja, missing, spans = compose(
                 segs, glossary, alt=alt, rng=rng, min_f1=args.alt_min_f1
             )
             pairs.append(
@@ -152,6 +178,7 @@ def build_d1(captions, glossary, args, rng) -> list[dict]:
                     "en": en,
                     "ja": "、".join(ja),
                     "n_missing": len(missing),
+                    "spans": spans,
                 }
             )
     return pairs

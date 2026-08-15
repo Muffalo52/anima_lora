@@ -210,46 +210,87 @@ class HybridT5Encoder:
             t5_tok=t5_tok, qwen_tok=qwen_tok, qwen_map=qwen_map, char_map=char_map
         )
 
-    def _encode_cjk(self, span: str) -> list[int]:
+    def _encode_cjk(self, span: str) -> tuple[list[int], list[tuple[int, int]]]:
+        """(ids, char offsets into ``span``) for one CJK run."""
         out: list[int] = []
+        offs: list[tuple[int, int]] = []
         frag: list[int] = []
+        frag_off: list[tuple[int, int]] = []
 
         def flush_frag():
             if not frag:
                 return
             decoded = self.qwen_tok.decode(frag)
+            # A byte-fragment group resolves to characters jointly, so every
+            # character it yields inherits the whole group's span.
+            group = (frag_off[0][0], frag_off[-1][1])
             for ch in decoded:
                 if ch in self.char_map:
                     out.append(T5_TABLE_SIZE + self.char_map[ch])
                 elif not ch.isspace():
                     out.append(T5_UNK_ID)
+                else:
+                    continue
+                offs.append(group)
             frag.clear()
+            frag_off.clear()
 
-        for qid in self.qwen_tok(span, add_special_tokens=False)["input_ids"]:
+        enc = self.qwen_tok(span, add_special_tokens=False, return_offsets_mapping=True)
+        for qid, off in zip(enc["input_ids"], enc["offset_mapping"]):
+            off = (int(off[0]), int(off[1]))
             if qid in self.qwen_map:
                 # A clean token can never complete a byte sequence — any
                 # pending fragments are unresolvable, degrade them now.
                 flush_frag()
                 out.append(T5_TABLE_SIZE + self.qwen_map[qid])
+                offs.append(off)
                 continue
             frag.append(qid)
+            frag_off.append(off)
             if "�" not in self.qwen_tok.decode(frag):
                 flush_frag()
         flush_frag()
-        return out
+        return out, offs
+
+    def encode_aligned(
+        self, text: str, max_length: int = 512
+    ) -> tuple[list[int], list[int], list[tuple[int, int]]]:
+        """``encode`` plus per-token ``(start, end)`` char offsets into ``text``.
+
+        The offsets are what makes span-level supervision possible: a caption
+        composed tag-by-tag (``build_pairs.py``) knows which EN tag each JA tag
+        came from, and these offsets turn that into token index sets on both
+        sides. Offsets cover the real tokens only — the trailing EOS gets a
+        zero-width span at ``len(text)`` and padding gets none.
+        """
+        ids: list[int] = []
+        offs: list[tuple[int, int]] = []
+        base = 0
+        for kind, span in segment_runs(text):
+            if kind == "cjk":
+                s_ids, s_offs = self._encode_cjk(span)
+            else:
+                enc = self.t5_tok(
+                    span, add_special_tokens=False, return_offsets_mapping=True
+                )
+                s_ids = list(enc["input_ids"])
+                s_offs = [(int(a), int(b)) for a, b in enc["offset_mapping"]]
+            ids.extend(s_ids)
+            offs.extend((base + a, base + b) for a, b in s_offs)
+            base += len(span)
+
+        keep = max_length - 1
+        ids, offs = ids[:keep], offs[:keep]
+        ids.append(T5_EOS_ID)
+        offs.append((len(text), len(text)))
+        mask = [1] * len(ids)
+        pad = max_length - len(ids)
+        return ids + [T5_PAD_ID] * pad, mask + [0] * pad, offs
 
     def encode(self, text: str, max_length: int = 512) -> tuple[list[int], list[int]]:
         """Return (ids, attention_mask), eos-terminated and padded to max_length."""
-        ids: list[int] = []
-        for kind, span in segment_runs(text):
-            if kind == "cjk":
-                ids.extend(self._encode_cjk(span))
-            else:
-                ids.extend(self.t5_tok(span, add_special_tokens=False)["input_ids"])
-        ids = ids[: max_length - 1] + [T5_EOS_ID]
-        mask = [1] * len(ids)
-        pad = max_length - len(ids)
-        return ids + [T5_PAD_ID] * pad, mask + [0] * pad
+        ids, mask, _ = self.encode_aligned(text, max_length)
+        return ids, mask
 
 
 def load_ext_assets(prefix: Path) -> tuple[torch.Tensor, dict]:

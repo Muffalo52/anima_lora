@@ -165,7 +165,7 @@ def test_compose_passes_unmapped_segments_through_and_counts_them():
         "1girl": {"axis": "general", "ja": "女の子1人", "candidates": []},
         "@aak": {"axis": "artist", "ja": "@aak"},
     }
-    ja, missing = build_pairs.compose(
+    ja, missing, spans = build_pairs.compose(
         ["1girl", "@aak", "unmapped tag"],
         glossary,
         alt=False,
@@ -174,3 +174,8 @@ def test_compose_passes_unmapped_segments_through_and_counts_them():
     )
     assert ja == ["女の子1人", "@aak", "unmapped tag"]
     assert missing == ["unmapped tag"]
+    # The EN↔JA span alignment the distillation side consumes: one entry per
+    # segment, in order, carrying the provenance of the wording actually used.
+    assert [s["en"] for s in spans] == ["1girl", "@aak", "unmapped tag"]
+    assert [s["ja"] for s in spans] == ja
+    assert spans[-1]["via"] == "unmapped"

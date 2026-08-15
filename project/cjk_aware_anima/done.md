@@ -4,7 +4,8 @@ What is finished. Details and measured numbers live with the code that
 produced them — this file only says *what exists* and *where*.
 
 *Line home: [`motivation.md`](motivation.md) (why, incl. directions already
-ruled out) · [`plan.md`](plan.md) (what remains).*
+ruled out) · [`plan.md`](plan.md) (what remains) ·
+[`report.md`](report.md) (Phase 2b measured verdicts).*
 
 ## Phase 0 — probe (2026-08-15)
 

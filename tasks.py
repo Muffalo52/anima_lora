@@ -425,6 +425,18 @@ COMMANDS = {
         "[experimental] Build BYG edit-tuple sidecars (tag-swap) into "
         "post_image_dataset/byg/. Usage: exp-byg-data [--limit N --overwrite].",
     ),
+    "exp-cjk-cache": (
+        exp_training.cmd_cjk_cache,
+        "[experimental] Stage the CJK distillation cache (Qwen hidden states + "
+        "frozen-teacher adapter outputs) from post_image_dataset/cjk_distill/"
+        "pairs.jsonl. Reused by every exp-distill-cjk arm.",
+    ),
+    "exp-distill-cjk": (
+        exp_training.cmd_distill_cjk,
+        "[experimental] Distill the extended CJK T5-vocab rows against the "
+        "en-translation teacher. Gates in order: ARGS='--mode oracle' → "
+        "'--mode capacity' → '--mode train'. Emits a vocab pack, not a LoRA.",
+    ),
     "exp-test-soft": (
         exp_inference.cmd_test_soft,
         "[experimental] Inference with latest soft_tokens weight "
