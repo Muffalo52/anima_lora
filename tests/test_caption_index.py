@@ -21,11 +21,13 @@ _SPEC.loader.exec_module(bci)
 
 # Minimal vocab sets: deliberately omits the newer characters so recovery must
 # carry them. "genshin impact" is a known copyright; "miside" is not (only
-# reachable via the same-caption bare tag).
+# reachable via the same-caption bare tag). "general" is loaded solely to veto
+# copyright promotion of homonym qualifiers (`lily (flower)`).
 VSETS = {
     "character": {"hatsune miku"},
     "copyright": {"genshin impact", "vocaloid", "hololive", "pokemon", "original"},
     "count": {"1girl", "1boy"},
+    "general": {"flower", "sky", "sex", "school uniform"},
 }
 
 
@@ -68,6 +70,34 @@ def test_recover_paren_can_be_disabled():
     )
     assert typed["character"] == []
     assert "genshin impact" in typed["copyright"]
+
+
+def test_general_qualifier_not_promoted_to_copyright():
+    # `lily (flower)` is a homonym disambiguator, not a franchise. The vocab types
+    # "flower" as general, so the co-tagged-bare fallback must not promote it —
+    # otherwise every caption carrying the general tag "flower" inherits a bogus
+    # copyright (consumers flatten groups.copyright into a plain name set).
+    typed = bci._classify("1girl, lily (flower), flower, @x", VSETS)
+    assert "flower" not in typed["copyright"]
+    assert typed["character"] == []
+
+
+def test_character_qualifier_not_promoted_to_copyright():
+    # `bubba (hatsune miku)` — a pet/prop disambiguated by its *character*, not a
+    # series. The vocab types the qualifier as a character, so it stays out of
+    # copyright (and keeps its own character slot via exact vocab membership).
+    typed = bci._classify("1girl, bubba (hatsune miku), hatsune miku, @x", VSETS)
+    assert "hatsune miku" not in typed["copyright"]
+    assert "hatsune miku" in typed["character"]
+    assert "bubba (hatsune miku)" not in typed["character"]
+
+
+def test_vocab_copyright_qualifier_still_promoted():
+    # The veto must not touch the normal path: a vocab-confirmed copyright is
+    # trusted even when it is also co-tagged bare.
+    typed = bci._classify("1girl, mualani (genshin impact), genshin impact, @x", VSETS)
+    assert "genshin impact" in typed["copyright"]
+    assert "mualani (genshin impact)" in typed["character"]
 
 
 def test_artist_prefix_unaffected():

@@ -55,6 +55,9 @@ DEFAULT_OUT = "post_image_dataset/captions/caption_index.json"
 # Artist is detected by the `@` prefix (superset of the vocab artist list);
 # character/copyright/count are classified by vocab membership.
 VOCAB_AXES = ("character", "copyright", "count")
+# Axes loaded from the vocab but not themselves emitted: `general` only serves
+# the copyright-recovery veto below (see _vocab_typed_non_copyright).
+VOCAB_LOAD_AXES = (*VOCAB_AXES, "general")
 
 # Danbooru disambiguator form ``character_name (copyright_name)``. The vocab
 # only carries character names frozen at its training cutoff, so newer ones miss
@@ -120,12 +123,33 @@ def _norm_words(tag: str) -> set[str]:
 def _load_vocab_sets(vocab_path: str) -> dict[str, set[str]]:
     with open(vocab_path, encoding="utf-8") as f:
         vocab = json.load(f)
-    sets: dict[str, set[str]] = {axis: set() for axis in VOCAB_AXES}
+    sets: dict[str, set[str]] = {axis: set() for axis in VOCAB_LOAD_AXES}
     for entry in vocab["tags"]:
         cat = entry.get("category")
         if cat in sets:
             sets[cat].add(entry["name"].strip().lower())
     return sets
+
+
+def _vocab_typed_non_copyright(tag: str, vsets: dict[str, set[str]]) -> bool:
+    """True if the tagger vocab already types ``tag`` as something else.
+
+    The vocab is the authority on tag category (``scripts/anima_tagger/vocab.py``
+    ``categorize()``: booru category cache + curator ``category_overrides``), and
+    a tag carries exactly one category there. So a name the vocab calls
+    ``general`` / ``character`` / ``count`` must never be promoted to copyright by
+    the parenthetical heuristic below, however it appears in a caption.
+
+    Without this veto, danbooru's *homonym* disambiguators — ``lily (flower)``,
+    ``star (sky)``, ``choko (cup)``, ``piledriver (sex)``,
+    ``hakui koyori (school uniform)`` — and its *pet/prop-of-character* ones —
+    ``bubba (watson amelia)``, ``friend (nanashi mumei)`` — leak their qualifier
+    into the copyright vocab. Consumers flatten ``groups.copyright`` into a plain
+    name set (e.g. ``color_caption.load_copyright_tags``), so one such caption
+    poisons the term corpus-wide: a single ``piledriver (sex)`` page made
+    ``sex`` a "copyright" on 525 of 2951 colorize captions (measured 2026-08-15).
+    """
+    return any(tag in vsets.get(axis, ()) for axis in ("general", "character", "count"))
 
 
 def _iter_captions(src: Path, path_pattern: str | None = None):
@@ -204,8 +228,12 @@ def _classify(
         m = _PAREN_RE.match(tag)
         if m:
             series = m.group(2).strip()
+            # A vocab-confirmed copyright is trusted outright; the co-tagged-bare
+            # fallback (which carries post-cutoff franchises) is vetoed when the
+            # vocab already types the qualifier as general/character/count.
             if series not in _GENERIC_PAREN_QUALIFIERS and (
-                series in vsets["copyright"] or series in bare
+                series in vsets["copyright"]
+                or (series in bare and not _vocab_typed_non_copyright(series, vsets))
             ):
                 _add("character", tag)
                 _add("copyright", series)
@@ -226,6 +254,8 @@ def _classify(
                     continue
                 if is_rating_tag(tag) or is_count_tag(tag) or _PAREN_RE.match(tag):
                     continue
+                if tag in vsets.get("general", ()):
+                    continue  # vocab says descriptive — position can't override it
                 if _norm_words(tag) & copy_words:
                     continue  # franchise sub-title of a known copyright
                 _add("character", tag)

@@ -39,7 +39,8 @@ def _setup_logging() -> None:
 
 def main() -> int:
     # Client verbs run *before* logging setup: they must print JSON on stdout and
-    # nothing else, and they never touch the daemon's state dirs.
+    # nothing else. They don't start or drive a daemon (`prune` is the one that
+    # touches the state dirs, read-mostly and daemon-independent by design).
     if len(sys.argv) > 1 and sys.argv[1] in cli.VERBS:
         return cli.main(sys.argv[1:])
 

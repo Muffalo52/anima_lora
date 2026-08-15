@@ -202,6 +202,11 @@ COMMANDS = {
         daemon.cmd_daemon_terminate,
         "Stop the daemon entirely (active job killed, GPU freed, queue discarded).",
     ),
+    "daemon-prune": (
+        daemon.cmd_daemon_prune,
+        "Delete old terminal job dirs (the daemon also sweeps at boot). Dry-run "
+        'unless ARGS="--apply"; --days N / --keep N override the retention knobs.',
+    ),
     # ── Inference ─────────────────────────────────────────────────────
     "test": (
         inference.cmd_test,

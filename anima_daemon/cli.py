@@ -1,17 +1,20 @@
-"""Client-side verbs for ``python -m anima_daemon`` — submit / wait / status.
+"""Client-side verbs for ``python -m anima_daemon`` — submit / wait / status / prune.
 
 The daemon's HTTP surface was fully capable of "run this argv on the GPU queue"
 long before anything on the command line could ask for it: submitting an
 arbitrary command job meant writing a Python snippet against
-``DaemonClient.submit_command``. These three verbs are that missing front door,
+``DaemonClient.submit_command``. These verbs are that missing front door,
 kept in the daemon package (rather than ``scripts/tasks/``) so they work from a
 bare checkout, a vendored node tree, or an agent shell — no ``tasks.py`` import,
-no ``library.*``, stdlib only.
+no ``library.*``, stdlib only. (``prune`` is the odd one: state-dir maintenance
+rather than a client call, but it belongs on the same front door and obeys the
+same stdlib-only rule.)
 
     python -m anima_daemon submit [--label L] [--stall-timeout S] [--wait]
                                   [--hold] -- <argv…>
     python -m anima_daemon wait <job_id> [--timeout S]
     python -m anima_daemon status [job_id]
+    python -m anima_daemon prune [--days N] [--keep N] [--apply]
 
 ``make daemon-run`` (``scripts/tasks/daemon.py``) is the repo-flavored wrapper
 over ``submit`` with attach-by-default streaming; this module is the plumbing.
@@ -27,8 +30,9 @@ from typing import Optional
 
 from . import client as _client
 from . import config
+from . import jobs as _jobs
 
-VERBS = ("submit", "wait", "status")
+VERBS = ("submit", "wait", "status", "prune")
 
 
 def _label_for(argv: list[str]) -> str:
@@ -162,6 +166,27 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Sweep old terminal job dirs. Dry-run unless ``--apply``.
+
+    Pure filesystem — it does not talk to the daemon, so it works whether or not
+    one is up. With a *live* daemon the pruned jobs stay in its in-memory table
+    until its next restart (harmless: they're finished history), so the boot
+    sweep in ``manager._reconcile`` remains the primary path and this is the
+    "I want the space back now" escape hatch.
+    """
+    summary = _jobs.prune_jobs(
+        max_age_days=args.days,
+        keep_recent=args.keep,
+        dry_run=not args.apply,
+    )
+    summary["freed_mb"] = round(summary["freed_bytes"] / 1e6, 1)
+    if not args.verbose:
+        summary["pruned"] = len(summary["pruned"])
+    _print_json(summary)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m anima_daemon",
@@ -202,6 +227,32 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="daemon health, or one job record")
     st.add_argument("job_id", nargs="?", help="omit for daemon-level health")
     st.set_defaults(func=cmd_status)
+
+    pr = sub.add_parser(
+        "prune", help="delete old terminal job dirs (dry-run by default)"
+    )
+    pr.add_argument(
+        "--days",
+        type=float,
+        default=None,
+        help=f"age threshold in days; 0 disables (default: {config.JOB_RETENTION_DAYS:g})",
+    )
+    pr.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help="always keep this many newest terminal jobs regardless of age "
+        f"(default: {config.JOB_RETENTION_KEEP})",
+    )
+    pr.add_argument(
+        "--apply", action="store_true", help="actually delete (default: dry-run)"
+    )
+    pr.add_argument(
+        "--verbose",
+        action="store_true",
+        help="list every pruned job id, not just the count",
+    )
+    pr.set_defaults(func=cmd_prune)
     return p
 
 

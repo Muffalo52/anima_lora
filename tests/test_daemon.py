@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -87,6 +88,67 @@ def test_job_roundtrip(tmp_path, monkeypatch):
     assert "j1" in loaded
     assert loaded["j1"].method == "lora"
     assert loaded["j1"].overrides == {"network_dim": 16}
+
+
+def _seed_job(state: str, age_days: float, job_id: str) -> jobs.Job:
+    """A persisted job in ``state``, finished ``age_days`` ago, with a stdout.log."""
+    ts = time.time() - age_days * 86400.0
+    job = jobs.Job(id=job_id, method="lora", preset="default", state=state)
+    job.submitted_at = ts
+    job.ended_at = ts if state in jobs.TERMINAL_STATES else None
+    job.persist()
+    (job.dir / "stdout.log").write_text("x" * 1024, encoding="utf-8")
+    return job
+
+
+def test_prune_jobs_age_state_and_floor(tmp_path, monkeypatch):
+    """Old + terminal prunes; young, active, and floor-protected survive."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    _seed_job(jobs.STATE_DONE, 60, "old-done")
+    _seed_job(jobs.STATE_ERROR, 45, "old-error")
+    _seed_job(jobs.STATE_STOPPED, 40, "old-stopped")
+    _seed_job(jobs.STATE_DONE, 1, "young-done")
+    # Never a candidate however old: it holds the queue slot / is mid-flight.
+    _seed_job(jobs.STATE_RUNNING, 90, "old-running")
+    _seed_job(jobs.STATE_QUEUED, 90, "old-queued")
+
+    summary = jobs.prune_jobs(max_age_days=30, keep_recent=0, dry_run=True)
+    assert set(summary["pruned"]) == {"old-done", "old-error", "old-stopped"}
+    assert summary["freed_bytes"] > 0
+    assert set(jobs.load_all()) == {  # dry run touched nothing
+        "old-done",
+        "old-error",
+        "old-stopped",
+        "young-done",
+        "old-running",
+        "old-queued",
+    }
+
+    # keep_recent protects the N newest *terminal* jobs regardless of age, so the
+    # two newest terminal records (young-done, old-stopped) are off the table.
+    summary = jobs.prune_jobs(max_age_days=30, keep_recent=2, dry_run=False)
+    assert set(summary["pruned"]) == {"old-done", "old-error"}
+    assert summary["kept"] == 2
+    assert set(jobs.load_all()) == {
+        "old-stopped",
+        "young-done",
+        "old-running",
+        "old-queued",
+    }
+
+
+def test_prune_jobs_disabled_and_unreadable(tmp_path, monkeypatch):
+    """0 days disables; an unparseable record is left alone, never guessed at."""
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    _seed_job(jobs.STATE_DONE, 99, "ancient")
+    assert jobs.prune_jobs(max_age_days=0, keep_recent=0)["pruned"] == []
+    assert set(jobs.load_all()) == {"ancient"}
+
+    (config.JOBS_DIR / "corrupt").mkdir()
+    (config.JOBS_DIR / "corrupt" / "job.json").write_text("{not json", encoding="utf-8")
+    summary = jobs.prune_jobs(max_age_days=30, keep_recent=0)
+    assert summary["pruned"] == ["ancient"]
+    assert (config.JOBS_DIR / "corrupt").is_dir()
 
 
 def test_liveness_pid_create_time():
@@ -1593,3 +1655,98 @@ def test_write_result_drops_daemon_pointer(tmp_path, monkeypatch):
     out = _common.write_result(run_dir, script=__file__, args=args, metrics={"a": 1})
     pointer = json.loads((job_dir / "result_path.json").read_text())
     assert pointer["path"] == str(out.resolve())
+
+
+def test_gpu_guard_skips_recycled_pid(tmp_path, monkeypatch):
+    """The pre-launch reaper acts on (pid, create_time), never a bare pid.
+
+    Issue #83: a 3-day-old job record's pid had been recycled onto `dwm.exe`,
+    which appeared in the (WDDM-polluted) holder list; matching on the number
+    alone made the guard try to kill the desktop compositor. A stale record
+    whose create_time no longer matches must be left strictly alone.
+    """
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+
+    me = os.getpid()  # a live pid that really is holding the "GPU"
+    monkeypatch.setattr(gpu, "gpu_pids", lambda: {me})
+    monkeypatch.setattr(gpu, "gpu_mem", lambda: (0, 10_000))  # free → one pass
+
+    killed: list[int] = []
+    monkeypatch.setattr(proc, "kill_tree", lambda pid, **kw: killed.append(pid))
+
+    mgr = JobManager.__new__(JobManager)  # no worker thread
+    mgr._lock = threading.RLock()
+    mgr._evict_resident_inference = lambda: None
+    launching = jobs.Job(id="new", method="lora", preset="default")
+
+    # Stale record: right pid, wrong create_time → the pid was recycled.
+    stale = jobs.Job(
+        id="stale",
+        method="lora",
+        preset="default",
+        state=jobs.STATE_DONE,
+        pid=me,
+        create_time=1.0,
+    )
+    mgr._jobs = {"stale": stale}
+    mgr._gpu_guard(launching, retries=1, delay=0)
+    assert killed == []  # dwm.exe lives
+
+    # Genuinely ours: pid *and* create_time match → reap it.
+    leaked = jobs.Job(
+        id="leaked",
+        method="lora",
+        preset="default",
+        state=jobs.STATE_DONE,
+        pid=me,
+        create_time=proc.create_time(me),
+    )
+    mgr._jobs = {"leaked": leaked}
+    mgr._gpu_guard(launching, retries=1, delay=0)
+    assert killed == [me]
+
+
+def test_kill_tree_survives_access_denied(monkeypatch):
+    """`kill_tree` must not raise when a family member can't be waited on.
+
+    psutil.wait_procs lets AccessDenied escape from its inner Process.wait(),
+    which crashed the daemon worker thread in issue #83 (`worker crashed
+    handling job ...`) instead of merely failing to kill an unkillable target.
+    One unwaitable member must also not abort the reap for the rest.
+    """
+    me = os.getpid()  # the denied "parent" (stands in for dwm.exe)
+    reaped: list[int] = []
+
+    # A real second process to play the ordinary family member, so the patched
+    # constructor stays a genuine psutil.Process subclass (psutil's own __eq__
+    # does isinstance() against it) and every pid here really exists.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    class Fake(psutil.Process):
+        """Real psutil.Process, with terminate/wait/kill scripted per pid."""
+
+        def children(self, recursive=False):
+            return [Fake(child.pid)]
+
+        def terminate(self):
+            if self.pid == me:
+                raise psutil.AccessDenied(pid=self.pid)
+
+        def wait(self, timeout=None):
+            if self.pid == me:  # unwaitable — WinError 5 in the field
+                raise psutil.AccessDenied(pid=self.pid)
+            raise psutil.TimeoutExpired(timeout or 0, pid=self.pid)
+
+        def kill(self):
+            reaped.append(self.pid)
+
+    try:
+        monkeypatch.setattr(proc.psutil, "Process", Fake)
+        proc.kill_tree(me, grace_seconds=0.01)  # must not raise
+    finally:
+        monkeypatch.undo()
+        child.kill()
+        child.wait()
+    # The denied member is skipped, but the reachable one still gets escalated.
+    assert reaped == [child.pid]

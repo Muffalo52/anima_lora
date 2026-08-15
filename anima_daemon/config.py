@@ -61,6 +61,15 @@ GPU_GUARD_DELAY = float(os.environ.get("ANIMA_DAEMON_GPU_DELAY", "2.0"))
 CMD_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_CMD_STALL_TIMEOUT", "120"))
 JOB_STALL_TIMEOUT = float(os.environ.get("ANIMA_DAEMON_JOB_STALL_TIMEOUT", "0"))
 
+# Job-dir retention (see jobs.prune_jobs). Nothing ever removed a finished job's
+# directory, so `jobs/` grew without bound — a few hundred dirs and tens of MB of
+# stdout.log within a couple of months. The daemon prunes *terminal* jobs older
+# than RETENTION_DAYS at boot, always keeping the newest RETENTION_KEEP whatever
+# their age (so a quiet week never empties the history you'd actually consult).
+# Queued / running / paused dirs are never candidates. 0 days disables pruning.
+JOB_RETENTION_DAYS = float(os.environ.get("ANIMA_DAEMON_JOB_RETENTION_DAYS", "30"))
+JOB_RETENTION_KEEP = int(os.environ.get("ANIMA_DAEMON_JOB_RETENTION_KEEP", "200"))
+
 
 # --- Phase 0a: daemon-source fingerprint ------------------------------------
 # The daemon is disposable: a resident process serving last week's
