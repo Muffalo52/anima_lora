@@ -34,14 +34,15 @@ Active projects:
   via an extended T5-side vocab distilled against the EN-translation teacher.
   Probe + zero-shot ext vocab measured (`bench/cjk_adapter/`); the Phase 2a
   data assets MT cannot produce are built ([`datasets/`](cjk_aware_anima/datasets/)
-  — Wikidata proper-noun lexicon, native-register manga eval set); the
-  distillation loop is built and its unit gates run (`scripts/distill_cjk/`,
-  verdicts in [`report.md`](cjk_aware_anima/report.md)). Split four ways
+  — Wikidata proper-noun lexicon, native-register manga eval set); Phase 2b is
+  closed (loop in `scripts/distill_cjk/`, one-off gate drivers in
+  [`gates/`](cjk_aware_anima/gates/)) and Phase 2c is running. Split four ways
   instead of a single founding proposal: [`motivation.md`](cjk_aware_anima/motivation.md) (why,
   incl. the directions already ruled out),
   [`done.md`](cjk_aware_anima/done.md) (completed-item checklist),
-  [`plan.md`](cjk_aware_anima/plan.md) (Phase 2 design, gates, deployment,
-  risks), [`report.md`](cjk_aware_anima/report.md) (Phase 2b verdicts, incl.
-  the two withdrawn metrics). Measured numbers stay with the code:
+  [`plan.md`](cjk_aware_anima/plan.md) (what remains — live phase, deployment,
+  risks), and one **dated per-phase report** carrying the measured verdicts:
+  [`report_0816_phase2.md`](cjk_aware_anima/report_0816_phase2.md) (Phase 2b/2c,
+  incl. the two withdrawn metrics). Measured numbers stay with the code:
   [`datasets/README.md`](cjk_aware_anima/datasets/README.md) and
   `bench/cjk_adapter/results/`.

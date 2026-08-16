@@ -320,6 +320,35 @@ class CachedPairs:
     def __len__(self) -> int:
         return len(self.records)
 
+    def apply_trust(self, weights: dict[str, float] | None) -> None:
+        """Re-derive every span's weight from its ``via``, in place.
+
+        The cache bakes one trust policy in at build time, which would make the
+        G4 ablation a cache rebuild per arm. It does not have to be: ``via`` is
+        stored alongside the weight, so the policy can be re-applied on load.
+
+        **One asymmetry to know**: a policy that maps a `via` to 0 *drops* the
+        span, and the build-time policy already dropped its own zeros (under
+        `provenance`: `unresolved`, `unmapped`). Those cannot be resurrected
+        here, so this re-weights the surviving spans only — which is exactly the
+        G4 question (does demoting `mt_unverified` help?), but it means `all`
+        means "every *mappable* span at 1.0", not "every span".
+        """
+        if weights is None:
+            return
+        for rec in self.records:
+            spans = rec.get("spans")
+            if not spans:
+                continue
+            kept = []
+            for s in spans:
+                w = float(weights.get(str(s[3]), 1.0))
+                if w <= 0.0:
+                    continue
+                kept.append([s[0], s[1], w, s[3], s[4]])
+            rec["spans"] = kept
+        self._span_cache.clear()
+
     def _shard(self, name: str) -> dict:
         if name not in self._shards:
             self._shards[name] = self._load_file(str(self.dir / name))

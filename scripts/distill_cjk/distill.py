@@ -163,7 +163,7 @@ def discrimination(
 
 @torch.no_grad()
 def evaluate(
-    adapter, cached, cfg, device, dtype, limit=256, batch_size=32, probes=None
+    adapter, cached, cfg, device, dtype, limit=None, batch_size=32, probes=None
 ) -> dict:
     """Recovery fraction + the Phase-2c gate quantities, on held-out pairs.
 
@@ -192,7 +192,9 @@ def evaluate(
     cross-tab is the whole point of G2: an arm that wins only on its own
     objective has told you nothing.
     """
-    n = min(limit, len(cached))
+    if limit is None:
+        limit = getattr(cfg, "eval_limit", 256)
+    n = len(cached) if limit <= 0 else min(limit, len(cached))
     if n == 0:
         return {}
     acc = {

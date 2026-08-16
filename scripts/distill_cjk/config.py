@@ -149,7 +149,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--allow_random_queries",
         action="store_true",
         help="probe with random directions instead — reproduces the withdrawn "
-        "G2 run only; the readout space is near-blind to wording (report.md)",
+        "G2 run only; the readout space is near-blind to wording (report_0816_phase2.md)",
     )
 
     # ---- loop -------------------------------------------------------------
@@ -162,6 +162,14 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval_every", type=int, default=250)
+    p.add_argument(
+        "--eval_limit",
+        type=int,
+        default=256,
+        help="held-out pairs scored per eval (0 = the whole split). 256 keeps a "
+        "G2 arm's eval cheap; a register-decomposed readout wants the whole "
+        "split, since a 256-record prefix leaves some registers thin.",
+    )
     p.add_argument("--log_every", type=int, default=25)
     p.add_argument("--capacity_pairs", type=int, default=32, help="G0 overfit set size")
 
@@ -202,6 +210,7 @@ class CJKDistillConfig:
     wd: float = 0.0
     seed: int = 0
     eval_every: int = 250
+    eval_limit: int = 256
     log_every: int = 25
     capacity_pairs: int = 32
 
@@ -271,6 +280,7 @@ def resolve_config(args: argparse.Namespace) -> CJKDistillConfig:
         wd=float(args.wd),
         seed=int(args.seed),
         eval_every=int(args.eval_every),
+        eval_limit=int(args.eval_limit),
         log_every=int(args.log_every),
         capacity_pairs=int(args.capacity_pairs),
         out=Path(args.out),

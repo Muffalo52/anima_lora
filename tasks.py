@@ -437,6 +437,12 @@ COMMANDS = {
         "en-translation teacher. Gates in order: ARGS='--mode oracle' → "
         "'--mode capacity' → '--mode train'. Emits a vocab pack, not a LoRA.",
     ),
+    "exp-cjk-gates": (
+        exp_training.cmd_cjk_gates,
+        "[experimental] CJK Phase-2b closing gates: G3 (teacher ceiling per "
+        "register — is the 2c cos>=0.6 gate even the right number?) and G4 "
+        "(corpus health + trust ablation). ARGS='--gates g3,g4a,g4b'.",
+    ),
     "exp-test-soft": (
         exp_inference.cmd_test_soft,
         "[experimental] Inference with latest soft_tokens weight "

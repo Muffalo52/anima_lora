@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import itertools
+import json
 import sys
 from pathlib import Path
 
@@ -167,19 +169,32 @@ PROMPTS = {
 }
 
 
-def build_arms(languages, with_ext=False):
-    """Return {content: {arm_name: composed prompt string}}."""
+def build_arms(languages, with_ext=False, prompts=None, keep=None):
+    """Return {content: {arm_name: composed prompt string}}.
+
+    ``keep`` restricts the arm set (the Phase-2c eyeball grid wants only
+    ``en,ja_t5en,ja_ext`` over ~20 prompts, not 6 arms over 2). A prompt set
+    that omits ``{lang}_rom`` simply drops the ``t5rom`` arm — romanization was
+    closed in Phase 0, so an eval set has no reason to carry transliterations.
+    """
     arms = {}
-    for content, p in PROMPTS.items():
+    for content, p in (prompts or PROMPTS).items():
+        if content.startswith("_"):  # `_comment` and friends in a JSON set
+            continue
         table = {"en": p["en"]}
         for lang in languages:
-            native, rom, en = p[lang], p[f"{lang}_rom"], p["en"]
+            if lang not in p:
+                continue
+            native, en = p[lang], p["en"]
             table[f"{lang}_native"] = native
             table[f"{lang}_t5en"] = f"{native}{DELIM}{en}"
-            table[f"{lang}_t5rom"] = f"{native}{DELIM}{rom}"
+            if f"{lang}_rom" in p:
+                table[f"{lang}_t5rom"] = f"{native}{DELIM}{p[f'{lang}_rom']}"
             table[f"{lang}_q_en"] = f"{en}{DELIM}{native}"
             if with_ext:
                 table[f"{lang}_ext"] = f"{native}{DELIM_EXT}{native}"
+        if keep:
+            table = {k: v for k, v in table.items() if k in keep}
         arms[content] = table
     return arms
 
@@ -237,6 +252,27 @@ def main() -> None:
         help="Add {lang}_ext arms: native CJK on both sides, T5 side through "
         "the extended vocab (build assets first via build_ext.py).",
     )
+    parser.add_argument(
+        "--ext_prefix",
+        type=Path,
+        default=Path(__file__).resolve().parent / "assets" / "ext_embed",
+        help="Path prefix of the {.safetensors,.json} vocab pack the ext arms "
+        "read. Defaults to the Phase-1 zero-shot build; point it at a distilled "
+        "pack (output/ckpt/cjk_vocab_pack*) to score Phase 2c.",
+    )
+    parser.add_argument(
+        "--prompts",
+        type=Path,
+        default=None,
+        help="JSON {content: {en, ja, ...}} replacing the built-in 2-prompt "
+        "set — the wider eyeball grid. Missing {lang}_rom drops the t5rom arm.",
+    )
+    parser.add_argument(
+        "--arms",
+        default="",
+        help="comma-separated arm allow-list (e.g. 'en,ja_t5en,ja_ext'); "
+        "default = every arm the languages imply.",
+    )
     opts = parser.parse_args()
 
     run_dir = make_run_dir("cjk_adapter", opts.label)
@@ -270,14 +306,21 @@ def main() -> None:
 
     ext_table = None
     if opts.ext:
-        prefix = Path(__file__).resolve().parent / "assets" / "ext_embed"
-        ext_table, mapping = ext_vocab.load_ext_assets(prefix)
+        ext_table, mapping = ext_vocab.load_ext_assets(opts.ext_prefix)
         tokenize_strategy.ext_encoder = ext_vocab.HybridT5Encoder.from_mapping(
             tokenize_strategy.t5_tokenizer, tokenize_strategy.qwen3_tokenizer, mapping
         )
-        print(f"ext vocab: {ext_table.shape[0]} rows loaded")
+        trained = (mapping.get("training") or {}).get("losses")
+        print(
+            f"ext vocab: {ext_table.shape[0]} rows loaded from {opts.ext_prefix} "
+            f"({'distilled: ' + str(trained) if trained else 'zero-shot build'})"
+        )
 
-    arms = build_arms(opts.languages, with_ext=opts.ext)
+    prompts = None
+    if opts.prompts:
+        prompts = json.loads(opts.prompts.read_text(encoding="utf-8"))
+    keep = {a.strip() for a in opts.arms.split(",") if a.strip()}
+    arms = build_arms(opts.languages, with_ext=opts.ext, prompts=prompts, keep=keep)
 
     # ---- encode all arms (DiT needed: the adapter lives inside it) ----------
     anima = load_dit_model(args, device, torch.bfloat16)
@@ -316,12 +359,28 @@ def main() -> None:
     # P1-vs-P2 discrimination per arm type: cosine between the two contents'
     # adapter outputs. ~1.0 for an arm type means different prompts collapse
     # to the same conditioning under that routing.
-    c1, c2 = list(arms.keys())
+    contents = list(arms)
+    c1, c2 = contents[0], contents[1]
     discrimination = {}
     for arm in arms[c1]:
         discrimination[arm] = flat_cos(
             contexts[(c1, arm)][0]["embed"][0], contexts[(c2, arm)][0]["embed"][0]
         )
+    # With a wider prompt set the first-two-prompts reading is an arbitrary
+    # sample of one pair; average over every content pair as well. The
+    # `_p1_vs_p2` key keeps its exact old meaning so historical runs stay
+    # comparable.
+    discrimination_mean = {}
+    if len(contents) > 2:
+        for arm in arms[c1]:
+            vals = [
+                flat_cos(
+                    contexts[(a, arm)][0]["embed"][0], contexts[(b, arm)][0]["embed"][0]
+                )
+                for a, b in itertools.combinations(contents, 2)
+                if arm in arms[a] and arm in arms[b]
+            ]
+            discrimination_mean[arm] = sum(vals) / len(vals)
 
     print("\n=== adapter-output diagnostics ===")
     for content, rows in diagnostics.items():
@@ -334,7 +393,12 @@ def main() -> None:
             )
     print("[p1-vs-p2 discrimination]")
     for arm, cos in discrimination.items():
-        print(f"  {arm:14s} cos={cos:+.4f}")
+        print(f"  {arm:14s} cos={cos:+.4f}", end="")
+        print(
+            f"   mean-over-pairs={discrimination_mean[arm]:+.4f}"
+            if discrimination_mean
+            else ""
+        )
 
     # ---- render every arm (same seed / noise, conditioning is the only     ----
     # ---- free variable), then decode after the DiT is freed                ----
@@ -381,6 +445,12 @@ def main() -> None:
         metrics={
             "diagnostics": diagnostics,
             "discrimination_p1_vs_p2": discrimination,
+            **(
+                {"discrimination_mean_over_pairs": discrimination_mean}
+                if discrimination_mean
+                else {}
+            ),
+            "ext_prefix": str(opts.ext_prefix) if opts.ext else None,
             "arms": {c: list(t) for c, t in arms.items()},
             "images_rendered": sorted(images),
         },

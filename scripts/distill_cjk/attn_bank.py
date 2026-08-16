@@ -27,7 +27,7 @@ forward, so they come from a pre-built pool
 That pool is not optional. Seeded random directions were used once and the
 readout space collapsed — a random query attends almost uniformly, so the
 readout degenerates to a near-mean over the sequence, which is blind to wording.
-Measured in ``project/cjk_aware_anima/report.md``: unrelated prompts at 0.374
+Measured in ``project/cjk_aware_anima/report_0816_phase2.md``: unrelated prompts at 0.374
 *rising to 0.738 during training*, two captions of one image at exactly 1.000.
 It broke ``L_attn`` as an objective as well as the metric, so ``--allow_random_queries``
 exists only to reproduce that withdrawn run.
@@ -105,7 +105,7 @@ def build_bank(
         raise FileNotFoundError(
             f"no query bank at {bank_path}. The attn loss needs REAL cross-attn "
             "queries — random directions collapse the readout space (see "
-            "project/cjk_aware_anima/report.md). Build one with:\n"
+            "project/cjk_aware_anima/report_0816_phase2.md). Build one with:\n"
             "    make daemon-run ARGS='scripts/distill_cjk/build_query_bank.py "
             f"--blocks {','.join(str(b) for b in blocks)}'\n"
             "or pass --allow_random_queries to reproduce the withdrawn G2 run."
@@ -192,7 +192,7 @@ def fit_centers(
     cached *teacher* outputs) so the center is identical across G2 arms and
     independent of the batch being scored.
 
-    Why this exists — measured, and it is not what ``report.md`` blamed. The
+    Why this exists — measured, and it is not what ``report_0816_phase2.md`` blamed. The
     readout is *not* a washed-out sequence mean: attention is sharp (3-9
     effective tokens of ~99, with 80-87% of the softmax mass on the zero-pad
     sink) under both random and real queries. The defect is that every readout

@@ -58,7 +58,7 @@ def test_translation_cache_survives_a_killed_job(tmp_path):
         json.dumps({"key": key, "out": "こんにちは"}) + '\n{"torn line\n',
         encoding="utf-8",
     )
-    loaded = mt.MTEngine._load_cache(cache)
+    loaded = mt.load_cache(cache)
     assert loaded == {key: "こんにちは"}
 
 

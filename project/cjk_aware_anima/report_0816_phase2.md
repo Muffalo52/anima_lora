@@ -1,0 +1,454 @@
+# CJK-aware Anima — Phase 2 report
+
+Measured verdicts from the distillation loop's unit gates (2026-08-15, G2
+re-run 2026-08-16) **and the Phase-2c first pass** (2026-08-16, from
+[G5](#g5--the-flat-gate-is-measured-blind-2026-08-16) on). Run envelopes:
+`bench/cjk_distill/results/` and (rendered eval)
+`bench/cjk_adapter/results/`. Code: `scripts/distill_cjk/`.
+
+*Line home: [`motivation.md`](motivation.md) (why) · [`done.md`](done.md)
+(what exists) · [`plan.md`](plan.md) (design, phases, gates).*
+
+## What ran
+
+| Gate | Question | Verdict |
+|---|---|---|
+| **G0b** `--mode oracle` | student ids := teacher ids ⇒ loss ≡ 0? | **PASS** — worst `1-cos` 2.9e-4 (bf16 floor). Also certifies the trimming invariant the cache rests on: a non-pad adapter output does not depend on how many pads follow it. |
+| **G1** pytest | EN bit-identical? | **PASS** — pure-EN text tokenizes to stock spiece ids exactly; the split embedding returns stock rows bitwise, before *and* after the ext parameters move. |
+| **G0** `--mode capacity` | can ext rows *express* the teacher at all? | **PASS** — 32 pairs, loss 0.574 → **0.0244**, monotone. No escalation to 2-ii (adapter LoRA) needed. |
+| **G2** `g2.py` | which loss × which parameterization? | **PASS** (2026-08-16) — `span` at `param=global`. The 2026-08-15 attempt was withdrawn; three instrumentation defects had to be fixed first, below. |
+| **G3** `g34.py` | is 0.6 even the right 2c number? | **PASS** (2026-08-16) — the `tags` teacher ceiling is **0.823**, so the gate asks for 73% of it. It also found that the readout-space floor is register-dependent by 100×, which makes `recovery_attn` a mix statistic. |
+| **G4** `g34.py` | corpus health; does translation noise hurt? | see below |
+| **2c first pass** | train the packs, render the grid | **RAN** (2026-08-16) — packs trained to span-loss saturation; renders split cleanly by per-row supervision density. See [Phase 2c](#phase-2c--first-pass-2026-08-16). |
+| **G5** `g5.py` | is the flat 0.6 gate reachable *under the settled objective*? | **NO — the gate is demoted, not the student.** The exact argmin of `L_span` scores **0.13** flat on `tags` (generous variant 0.31) against the 0.6 gate; the same oracles sit at 0.71–0.97 in the readout space. |
+
+## The three instrumentation defects
+
+The first G2 answered its design questions but its headline metrics were not
+trustworthy, and the diagnosis recorded at the time was itself wrong. All three
+faults are fixed; the numbers in the next section are from the corrected loop.
+
+**1. The probe queries were random.** `attn_bank` synthesized them with
+`torch.randn`. Queries are `q_proj(image tokens)` — they only exist during a
+forward and cannot be read out of a checkpoint. `build_query_bank.py` now taps
+the real thing: 32 DiT forwards on cached latents and cached post-adapter
+contexts at σ ∈ {0.3, 0.6, 0.9}, hooking each sampled block's
+`cross_attn.q_norm`, banking 768 real token queries per block into
+`bench/cjk_distill/assets/query_bank.safetensors`. `build_bank` refuses to run
+without it (`--allow_random_queries` reproduces the withdrawn run). Two traps
+worth knowing: `load_anima_model`'s `device=` does not reach the runtime
+buffers, so a directly-loaded DiT keeps a CPU mod-guidance schedule and dies in
+`_run_blocks` (the shared harness's `.to(device)` is load-bearing); and a suffix
+match on `blocks.0.cross_attn.q_norm` hits **`LLMAdapter`'s own block 0** first,
+which is a text→text attention that does not even run on this path.
+
+**2. The recorded root cause was wrong, and real queries alone made things
+worse.** The withdrawn report blamed near-uniform attention ("a random query
+attends almost uniformly, so the readout degenerates to a near-mean over the
+sequence"). Measured: attention is **sharp** under both banks — 3–9 effective
+tokens of ~99 real ones, with 80–87% of the softmax mass sitting on the zero-pad
+sink. The actual defect is that every readout carries a large **common offset**
+(`‖mean‖/‖vec‖` = 0.73 with random queries, **1.02** with real ones), and an
+*uncentered* cosine over vectors sharing an offset that big saturates at 1 for
+everything:
+
+| step-0 metric | random q | real q, raw | real q, centered |
+|---|---|---|---|
+| `cos_native_vs_en_attn` (the floor) | 0.287 | 0.997 | **−0.031** |
+| `cos_teacher_vs_en_attn` (the ceiling) | 0.916 | 0.999 | 0.841 |
+| far discrimination, readout space | 0.374 | 0.999 | 0.269 |
+
+The offset is real conditioning, but it is *shared* — teacher and student both
+have it, so matching it is free and carries no information. `fit_centers` fits it
+once on the frozen teacher outputs (arm-independent, batch-independent) and
+`readout()` projects it out. This repaired `L_attn` as an **objective** as well
+as a metric: uncentered, two unrelated prompts read 0.997 alike, so the loss had
+almost no dynamic range about wording.
+
+**3. The holdout was split by pair, not by image.** Every image contributes
+several pairs that share tag content and differ only in wording (`tags` /
+`tags_alt`, plus D6's two quote registers). A per-pair shuffle therefore
+(a) **leaked** each held-out pair's sibling register into training ~91% of the
+time — "held-out" was measuring generalization to new *wording of trained
+content*, not to new content — and (b) left **exactly one** near pair in the
+256-record eval slice. `discrimination_near` was a single-sample statistic; that
+is the provenance of the **0.71 zero-shot near figure** previously quoted in
+`plan.md`. Split by image it is **0.411 over 72 pairs**. `load_pairs` now groups
+by image and logs the near-pair count so this cannot silently regress.
+
+## G2 — the measured cross-tab
+
+6 arms, staged (loss chosen at `param=global`, then parameterization at the
+winning loss), 1500 steps × batch 32, 5,728 training pairs (`tags` +
+`tags_alt`; D6 excluded — its teacher is degraded by construction).
+Envelope: `bench/cjk_distill/results/20260816-1152-g2/`.
+
+| param | loss | recovery_attn | disc far | disc near | held span | held attn | held flat | held pool |
+|---|---|---|---|---|---|---|---|---|
+| _(zero-shot)_ | — | 0.516 | 0.111 | 0.411 | 0.654 | 0.623 | 0.899 | 0.445 |
+| global | `flat` | 0.758 | **0.304** | **0.910** | 0.590 | 0.392 | 0.753 | 0.279 |
+| global | `span` | 0.974 | 0.085 | 0.394 | **0.120** | 0.123 | 0.859 | 0.163 |
+| global | `attn` | 0.967 | 0.088 | 0.380 | 0.334 | **0.082** | 0.876 | 0.172 |
+| global | `attn+span` | 0.962 | 0.094 | 0.392 | 0.173 | 0.076 | 0.869 | 0.165 |
+| global_row | `span` | **0.975** | 0.089 | 0.392 | 0.107 | 0.120 | 0.858 | 0.162 |
+| row | `span` | 0.923 | 0.101 | 0.408 | 0.338 | 0.318 | 0.879 | 0.280 |
+
+- **`flat` is disqualified**, and now on a near metric that can actually see it:
+  far 0.111 → **0.304** and near 0.411 → **0.910**. It buys recovery by pushing
+  every prompt's conditioning toward one direction — risk 6 in `plan.md`. Both
+  halves of the stratified discrimination catch it. (In the readout space its
+  near reads exactly 1.000, so the *flat*-space discrimination is the collapse
+  guard that matters.)
+- **`span` wins, and the cross-tab is what shows it.** Each objective wins on
+  its own held-out term, as expected — the question is what it costs on the
+  others. `span` scores 0.123 on the attn term against `attn`'s own best 0.082;
+  `attn` scores 0.334 on the span term against `span`'s own best 0.120. Span
+  transfers, attn does not. `span` also wins `recovery_attn` (0.974 vs 0.967) —
+  on attn's home turf. Adding attn to span (`attn+span`) does not help
+  (0.962). **Ship `span`.**
+- **The global correction does the work; per-row residuals do not.** `global`
+  0.974, `global_row` 0.975, **`row`-only 0.923** — per-row freedom adds 0.001,
+  removing the shared map costs 0.051. This reconfirms the 2-i-a hypothesis with
+  trustworthy metrics: the zero-shot table's error is systematic (the anchor map
+  was fit on non-CJK anchors), not 58,968 independent per-row errors — so the
+  95% of rows the corpus never visits still move. `global_row` is nominally the
+  winner but is inside the noise of `global` at 1,887 extra tunable rows;
+  **prefer `global`** unless a later corpus makes the residuals earn their keep.
+- **Discrimination stays healthy on every honest arm**: far ends at 0.085–0.101,
+  *below* the 0.111 zero-shot baseline and far below the 0.2 gate. Near ends at
+  0.380–0.408, i.e. wording still reaches conditioning.
+
+**Do not read `recovery_attn` ≈ 0.97 as "97% done."** The readout is a heavy
+compression (64 queries × 3 blocks) and is permutation-invariant by design, so a
+student that carries the right content under a different segmentation scores
+high there and low in flat space — which is exactly what happens: flat recovery
+is **0.066** and `cos_student_vs_en` is 0.096 against the teacher's 0.777. The
+Phase-2c gate is the existing bench's `cos_vs_en ≥ 0.6` on rendered prompts, and
+nothing here says that gate is close. What G2 settled is the *design* — which
+loss, which parameterization — not the distance to 2c.
+
+## Next
+
+*Phase 2b closed 2026-08-16 (G0b, G0, G1, G2, G3, G4 green); the 2c first pass
+ran the same day and G5 re-based its gate. This list is the post-2c state —
+the 2b-era version of it (superseded 2026-08-16) ordered the objective decision
+first; the render grid re-ordered the levers because the tag-register failures
+turned out to be coverage, which is unblocked now.*
+
+1. **Widen D1 with a coverage floor — the highest-value work, and it is
+   unblocked.** The render failures are measurably thin-row failures
+   (`騎`/`鎧` = 0 visits, `博麗` = 2 — see the
+   [coverage table](#the-render-failures-are-coverage-token-by-token)), and
+   G4b already showed the corpus is supervision-starved. The source exists:
+   `~/gelcrawl/retrieved/` holds **16,053** EN tag captions against the 3,008
+   `image_dataset/` captions D1 is built on (5.3×), text-only so curation
+   state is irrelevant, and the crawler can fetch more caption-only. Target it
+   with `gates/coverage.py`: compose until no user-facing content token
+   (caption_index.json + the D5 lexicon) sits under a visit floor —
+   the working head suggests O(100+) visits; identity-carrying tokens need it
+   most.
+2. **Mint a name register from the D5 lexicon.** Character identity is the
+   hardest render target and gets the thinnest supervision (risk 4 measured:
+   MT transliterates names, so 博麗霊夢's rows saw 2–37 visits and the render
+   lost Reimu while the teacher nailed her). The lexicon already pairs
+   thousands of names — compose name-bearing captions directly rather than
+   waiting for them to surface in D1.
+3. **The objective decision still gates D2/D3/D4** (unchanged from the 2b
+   handoff): prose registers carry no spans, contribute zero gradient under
+   `loss=span`, and only pay through a sequence-level term (`attn+span` lifts
+   commentary 0.096 → 0.109 in its own register, tags unharmed). Decide that
+   before sizing any prose corpus. The flat probes rule out `flat` as the
+   extra term (see [the probes](#the-two-flat-probes--the-gate-cannot-be-bought)).
+4. **Score 2c on the re-based surface, not flat `cos_vs_en`** — G5 demoted the
+   flat gate to a control (its oracle argmin scores 0.13 against the 0.6 bar).
+   Acceptance = rendered-grid parity with the teacher + per-register
+   `cos_student_vs_en_attn` (fixed holdout mix, per G3) + the coverage floor.
+5. The **owed D6 instrument** (same template, different quoted strings) is
+   still owed; whatever measures glyph contrast will not be a cosine in this
+   space (G3: ~0.02 of readout headroom).
+6. **`tag_glossary_review.md` sign-off is still open** and G4b does not close
+   it — a per-row correctness question, not an aggregate-loss question. Still
+   a ship blocker.
+
+## D2 — what the commentary corpus buys (2026-08-16)
+
+First measured slice of D2: **9,068 pairs** (5,721 JA→EN by Hy-MT2-7B greedy +
+3,347 free human translations), from a partial MT pass stopped at ~6k cached
+rows out of 69,668 candidates. Envelopes:
+`bench/cjk_distill/results/20260816-1400-g2` (control) and
+`…-1409-g2` (+D2). Both share one cache (18,090 train / 900 holdout) and one
+seed; the only free variable is `--train_registers`.
+
+**Coverage — D2 more than doubles the reachable table.** Ext rows visited by
+the corpus: **3,002 → 6,394** of 58,968 (5.09% → 10.84%) for +9,068 pairs. Most
+of the new rows are thin (1–4 visits: 933 → 2,463), but the 5–49 band also
+doubles (1,106 → 2,411), so this is not only a tail.
+
+| arm | train regs | pairs | recovery_attn | far | near | **cos(s,en) commentary** | cos(s,en) tags | held span | held attn |
+|---|---|---|---|---|---|---|---|---|---|
+| _(zero-shot)_ | — | — | 0.511 | 0.087 | 0.480 | 0.081 | 0.058 | 0.642 | 0.417 |
+| `span` | tags,tags_alt | 5,730 | 0.886 | 0.068 | 0.449 | 0.097 | **0.100** | **0.128** | 0.171 |
+| `attn+span` | tags,tags_alt | 5,730 | 0.868 | 0.065 | 0.442 | 0.096 | 0.096 | 0.166 | 0.146 |
+| `span` | +commentary | 14,356 | 0.910 | 0.069 | 0.450 | 0.098 | 0.100 | 0.134 | 0.176 |
+| `attn+span` | +commentary | 14,356 | **0.953** | 0.069 | 0.450 | **0.109** | 0.097 | 0.190 | **0.115** |
+
+- **D2 is structurally inert under the settled `loss=span`.** Prose has no
+  tag-by-tag alignment, so D2 pairs carry no `spans` and contribute *zero*
+  gradient to the span term — their only effect there is to dilute the batch
+  (~39% span-carrying rows instead of 100%). The `span` +D2 row moves
+  commentary 0.097 → 0.098, i.e. nothing. **A corpus addition is not a mix
+  question until the objective can consume it.**
+- **Under a sequence-level term it works, in its own register.** `attn+span`
+  +D2 lifts commentary **0.096 → 0.109 (+13%)** and leaves tags flat
+  (0.096 → 0.097). It buys prose conditioning; it does **not** transfer to the
+  tag register, which is what the 2c gate is scored on.
+- **Read `recovery_attn` 0.953 with the holdout in mind.** The 900-pair holdout
+  is ~48% commentary, so the D2-trained arm is partly being graded on its own
+  domain. The per-register decomposition above is the honest column, and it is
+  why the headline flip (`attn+span` 0.953 > `span` 0.910, reversing G2's
+  verdict) is **not** grounds to re-open G2: on `tags`, `span` still wins.
+- **Discrimination is unharmed**: far 0.065–0.069 across every arm, below the
+  0.111 zero-shot baseline and far under the 0.2 gate. Near stays ~0.45.
+- The 2c gate is untouched by this: `cos_vs_en` is 0.10 against a 0.6 target.
+
+**What this settles.** D2 is worth finishing (the coverage doubling is real and
+the register gain is real), but shipping it requires an objective change, not
+just more data — either keep a sequence-level term in the mix for span-less
+registers, or find an alignment for prose. Both are Phase-2c decisions.
+
+## G3 — the teacher ceiling, per register (2026-08-16)
+
+The 2c gate is `cos_vs_en ≥ 0.6`, a number taken from the Phase-0 probe where
+the *teacher* measured 0.69/0.77 — on two hand-written prompts, in one
+register. Distillation cannot pass its own teacher, so the gate is only
+meaningful as a fraction of a ceiling, and the ceiling had never been measured
+on the corpus. Measured now on all **900** held-out pairs (no training; the
+teacher/reference/native arms are all cached, so this is a readout, not a run).
+Envelope: `bench/cjk_distill/results/20260816-1428-g34/`.
+
+| register | n | teacher (ceiling) | native (floor) | addressable | zero-shot student | ceiling attn | floor attn | addressable attn |
+|---|---|---|---|---|---|---|---|---|
+| tags | 143 | **0.823** | 0.017 | 0.806 | 0.057 | 0.864 | **−0.669** | **1.533** |
+| tags_alt | 143 | **0.824** | 0.016 | 0.807 | 0.057 | 0.864 | −0.672 | 1.535 |
+| commentary | 442 | 0.786 | 0.056 | 0.731 | 0.091 | 0.845 | 0.737 | 0.108 |
+| quote_translated | 86 | 0.725 | 0.080 | 0.646 | 0.058 | 0.983 | 0.962 | **0.021** |
+| quote_preserved | 86 | 0.706 | 0.097 | 0.609 | 0.063 | 0.963 | 0.948 | **0.015** |
+| _(pooled)_ | 900 | 0.785 | 0.049 | 0.735 | 0.074 | 0.875 | 0.331 | 0.544 |
+
+**The 0.6 gate stands, and it is a real gate, not a formality.** The `tags`
+ceiling is 0.823, so 0.6 asks for **73% of the teacher** — above the Phase-0
+probe's 0.77 reading of the same register, i.e. if anything the gate is
+slightly conservative against the corpus teacher rather than unreachable.
+Matching the teacher would be 0.82. Current student: **0.10** (previous
+section). The gate is far away, and it is not the gate's fault.
+
+**`recovery_attn` is a mix statistic and must not be compared across runs.**
+This is the load-bearing finding. The readout-space *floor* is register-
+dependent by two orders of magnitude — `tags` sits at **−0.669** (the unk-wall
+is anti-correlated with the EN reference once you look through the DiT's own
+cross-attention), while `quote_preserved` sits at **+0.948**. So the
+addressable denominator runs from 0.015 to 1.535 depending on register, and the
+pooled `recovery_attn` divides by whatever mix the holdout happened to have
+(0.544 here). Consequences, in order of importance:
+
+- The D2 section's headline flip — `attn+span` 0.953 vs `span` 0.910 on a
+  holdout that is 49% commentary — is **not** an arm difference of that size;
+  it is partly a denominator that the commentary share moved. The verdict
+  recorded there (read the per-register `cos(s,en)` column, not the headline)
+  was right for a reason that is now measured rather than suspected.
+- G2's cross-tab is unaffected: all six arms shared one holdout and one mix, so
+  the ranking is internally valid. Only *cross-run* readings were ever at risk.
+- Going forward, rank arms on the per-register `cos_student_vs_en_by_register`
+  and quote `recovery_attn` only inside a fixed mix.
+
+**D6's demotion is confirmed quantitatively, and the flat number is the liar.**
+In flat space the quote registers look distillable (addressable 0.61/0.65); in
+the space the DiT actually consumes there is **nothing there** — 0.015 and
+0.021 of headroom between floor and ceiling. The flat gap is almost entirely
+token-count difference (a raw JA string collapsing to an `<unk>` run changes
+lengths, which a position-wise cosine sees and a permutation-invariant
+consumer largely does not). D6 was demoted to eval-only on the argument that
+its teacher is degraded by construction; this is the independent measurement
+of that argument. Glyph identity remains Phase 4's job.
+
+**Commentary is a legitimate register at the flat level** (ceiling 0.786, only
+0.04 below `tags`) but carries just 0.108 of readout-space headroom. It is
+worth distilling; it is not worth grading a mixed-mix `recovery_attn` on.
+
+## G4a — corpus health (2026-08-16)
+
+Same envelope, CPU-only, over the cache training actually reads (18,090 train /
+900 holdout).
+
+| register | train | holdout | mean JA tok | mean EN tok | JA/EN ratio (mean/median) | pairs w/ spans | span tokens |
+|---|---|---|---|---|---|---|---|
+| tags | 2,865 | 143 | 179.3 | 153.9 | 1.17 / 1.17 | 3,008 | 417,621 |
+| tags_alt | 2,865 | 143 | 183.9 | 153.9 | 1.20 / 1.20 | 3,008 | 431,538 |
+| commentary | 8,626 | 442 | 33.5 | 35.1 | 1.06 / 0.94 | 0 | 0 |
+| quote_preserved | 1,867 | 86 | 13.5 | 11.7 | 1.17 / 1.13 | 0 | 0 |
+| quote_translated | 1,867 | 86 | 13.5 | 14.2 | 0.96 / 0.93 | 0 | 0 |
+
+**No register is length-pathological.** The JA-student / EN-teacher token ratio
+is 0.96–1.20 everywhere; the position misalignment that demoted `L_flat` from
+objective to control is a ~17–20% count difference on the tag registers, not
+the 2× blowup a naive character-level ext vocab would have produced. This is a
+*bound* on the misalignment, not a licence to re-open `L_flat` — a matched
+count says nothing about matched content at position *i*.
+
+Occurrence-weighted span provenance, recomputed off the cache (`plan.md` quotes
+34% from the corpus build; against what training reads it is **36.6%**):
+
+| via | span tokens | share | spans | weight under `provenance` |
+|---|---|---|---|---|
+| mt_unverified | 310,944 | **36.6%** | 81,163 | 0.3 |
+| mt_verified | 274,419 | 32.3% | 80,114 | 0.8 |
+| wiki_verified | 93,674 | 11.0% | 32,901 | 1.0 |
+| override | 54,902 | 6.5% | 19,104 | 1.0 |
+| wiki | 39,894 | 4.7% | 8,994 | 0.7 |
+| passthrough | 38,422 | 4.5% | 6,076 | 1.0 |
+| rating | 21,850 | 2.6% | 6,016 | 1.0 |
+| wikidata | 12,576 | 1.5% | 2,606 | 1.0 |
+| wiki_han | 2,478 | 0.3% | 808 | 1.0 |
+
+Ext-row coverage over the `tags,tags_alt` training pool: **2,656 / 58,968
+(4.50%)** visited — bands 1–4: 764, 5–49: 983, 50+: 909. The 909-row head is
+what the span loss is really training; everything else rides the global map.
+
+## G4b — the trust ablation (2026-08-16)
+
+Does the 36.6% of span tokens that come from unverified MT actually hurt? Three
+policies at the settled `param=global, loss=span`, 1500 steps × batch 32, one
+seed, one cache. Held-out scoring uses the **cached (`provenance`) weighting for
+every arm**, so no arm is graded on its own weighting. `CachedPairs.apply_trust`
+re-derives weights from each span's `via` on load, so an arm is not a cache
+rebuild. Envelope: `bench/cjk_distill/results/20260816-1428-g34-g4b/`.
+
+| trust | spans kept | recovery_attn | cos(s,en) tags | disc far | disc near | held span | held attn |
+|---|---|---|---|---|---|---|---|
+| _(zero-shot)_ | — | 0.581 | 0.057 | 0.087 | 0.442 | 0.6465 | 0.4270 |
+| `all` | 226,546 | **0.904** | **0.098** | 0.072 | 0.410 | 0.1258 | 0.1756 |
+| `provenance` | 226,546 | 0.889 | **0.098** | 0.072 | 0.412 | **0.1230** | **0.1693** |
+| `verified_only` | 149,295 | 0.864 | 0.096 | 0.072 | 0.412 | 0.1429 | 0.1746 |
+
+**The trust policy is not a lever at this corpus size.** `all` and `provenance`
+keep the *same* 226,546 spans (the build-time policy already dropped its own
+zeros — `unresolved`, `unmapped`), so they differ only in weighting, and they
+land on the same `cos(s,en)` to three decimals. `provenance` wins `held span` by
+0.003 while being the arm whose objective *is* the eval weighting; that is not a
+result. **Dropping the unverified spans is actively worse**: `verified_only`
+gives up 34.1% of the supervision and pays for it everywhere — 0.098 → 0.096 on
+tags, 0.904 → 0.864 recovery, and `held span` moves the *wrong* way,
+0.1230 → 0.1429. Discrimination is 0.072 on all three. At ~10⁴ pairs the corpus
+is supervision-starved, and noisy supervision beats none.
+
+**This does not close the 2a sign-off blocker, and must not be read as
+closing it.** What G4b measures is an *aggregate* objective over 226k spans; a
+bad wording is a *local* vocabulary error. `colored inner hair` → 色付きの陰毛
+trains the rows for 陰毛 toward the EN embedding of "inner hair" — a specific
+row bound to the wrong meaning, invisible in a mean over 226k spans and fully
+visible to a user who types 陰毛. `--trust provenance` was never a fix for that;
+it was a hedge, and G4b says the hedge costs nothing and buys nothing.
+`tag_glossary_review.md` still needs eyes. Keep `provenance` as the default
+(free, and it is the right prior if the corpus ever gets big enough for the
+noise to bite).
+
+## Phase 2c — first pass (2026-08-16)
+
+Two packs trained at the settled design (`loss=span`, `--trust provenance`,
+`--train_registers tags,tags_alt`, 8,000 steps × batch 32, lr 1e-3):
+`output/ckpt/cjk_vocab_pack_global{,_row}.{safetensors,json}`. Envelopes:
+`bench/cjk_distill/results/20260816-1450-2c-global/` and `…-1511-2c-global-row/`;
+rendered eval under `bench/cjk_adapter/results/20260816-16{18,19,34,50}-2c-*`.
+
+| pack | final span loss | cos(s,en) flat | tags flat | cos(s,en) attn | recovery_attn | disc far | disc near |
+|---|---|---|---|---|---|---|---|
+| `global` | 0.095 | 0.094 | 0.096 | **0.804** | 0.869 | 0.069 | 0.406 |
+| `global_row` | 0.064 | 0.096 | 0.096 | **0.809** | 0.878 | 0.074 | 0.400 |
+
+(Holdout teacher: 0.785 flat / 0.875 attn; native floor 0.049 / 0.331.) The
+span loss saturates — held-out span 0.646 → 0.105/0.073 — and the two packs are
+indistinguishable end-to-end (render-gate `cos_vs_en` 0.070–0.077 both, one
+render grid apiece telling the same story), so G2's "prefer `global`" stands.
+
+The two headline numbers **disagree by design**: flat 0.09 against the 0.6
+gate, readout-space 0.80 against the 0.875 teacher ceiling (≈87% of the
+addressable interval on the corpus holdout). G5 resolves which one is lying.
+
+### G5 — the flat gate is measured-blind (2026-08-16)
+
+The oracle the plan demanded before treating a flat-gate failure as a verdict.
+`gates/g5.py` builds synthetic students from the *teacher's own rows* and
+scores them with 2c's own metric. Envelope:
+`bench/cjk_distill/results/20260816-1532-g5-flat-ceiling/`. On `tags`
+(143 held-out pairs; teacher ceiling 0.823 flat / 0.864 attn):
+
+| oracle | flat vs en | attn vs en |
+|---|---|---|
+| `span_perfect` (exact argmin of `L_span`) | **0.130** | 0.711 |
+| `span_plus` (argmin + free unsupervised positions) | **0.315** | 0.756 |
+| `ref_remap` (perfect content, student's segmentation) | 0.123 | **0.975** |
+| `prefix_bound` (any tensor of that length) | 0.9999 | — |
+
+**A perfectly-distilled span student cannot pass the 0.6 flat gate — the gate
+is blind to the objective, not the student to the gate.** `prefix_bound` ≈ 1.0
+says nothing is arithmetically impossible; `ref_remap` (0.123 flat, 0.975 attn)
+isolates the cause — the flat cosine charges position-by-position for
+segmenting the same content into a different token count, which the teacher is
+exempt from because its T5 ids *are* the reference's. The same oracles sitting
+at 0.71–0.97 in the readout space is the contrast that certifies the
+attn-space metric as the honest one. Verdict: **flat `cos_vs_en` is demoted
+from gate to control**; the student's 0.09 was never the size of the gap.
+
+### The two flat probes — the gate cannot be bought
+
+Could the flat number be trained up anyway? Two arms at `param=global_row`,
+same corpus/steps. Envelopes: `…-1533-2c-probe-flatmax/`, `…-1557-2c-probe-spanflat/`.
+
+| arm | loss | tags flat | cos(s,en) attn | recovery_attn | disc far | disc near |
+|---|---|---|---|---|---|---|
+| 2c ship | `span` | 0.096 | 0.809 | 0.878 | 0.074 | 0.400 |
+| probe | `span + 0.5·flat` | 0.156 | 0.686 | 0.653 | 0.106 | 0.544 |
+| probe | `flat` only | 0.245 | **−0.072** | −0.742 | 0.235 | **0.914** |
+
+Every flat point is paid for in the space the DiT consumes: the mixed arm
+gives back 0.12 of attn-space alignment for +0.06 flat, and pure `flat`
+reproduces G2's disqualification exactly — near-discrimination 0.914 is the
+mode-collapse signature, and the readout alignment goes *negative*. **No flat
+term ships.** This is the same verdict G2 reached as an objective question,
+now confirmed at the 2c scale as a gate question.
+
+### The render failures are coverage, token by token
+
+The 20-prompt grid (`assets/ja_eval_prompts.json`, seed 42, arms
+`en / ja_t5en / ja_ext`): the **teacher is at EN parity everywhere sampled**,
+including the prompts the student fails — knight + castle + red cape on t3,
+canonical Reimu on n1 — so the remaining gap is entirely student-side. The
+student splits cleanly:
+
+- **Transfers**: t1 school (every content token ≥ 300 span visits), t2 maid
+  (maid/blonde/twintails/blue-eyes land; the background is lost — and `緻密`
+  "detailed [background]" has **0** visits), t6, s5.
+- **Collapses**: t3 armor (`騎`:0, `鎧`:0, `照明`:1 — no knight, no armor),
+  n1/n2 names (identity tokens `博`:2 `麗`:2 `巫`:18 `霊`:22 `夢`:37 — girl
+  present, character gone), prose s1–s4 (function words `っていて`/`路面`/
+  `を作る` etc. have 0 visits by construction — kept "rain + girl", lost
+  umbrella/crosswalk/neon).
+
+`gates/coverage.py` is the diagnostic (CPU-only): it tokenizes each eval
+prompt through the pack and prints span-visit counts per ext row —
+2,672 of 58,968 rows visited by `tags,tags_alt`, and the failure set of the
+grid is exactly the prompts whose *content* tokens sit in the 0–40 band. The
+working head suggests identity-carrying tokens want O(100+) visits (`教室`:39
+renders a classroom; `霊夢`:37 does not render Reimu — identity is a harder
+target than a generic concept).
+
+### What the first pass settles
+
+1. The design shipped as-is is **on-distribution correct**: ~87% addressable
+   recovery in the consumed space, discrimination healthy (far 0.07, native
+   render-gate control 0.91), EN bit-exactness untouched.
+2. The gap to "usable from a JA prompt" is **not the objective and not
+   capacity — it is supervision coverage** of the content vocabulary, plus the
+   already-known span-less-register hole. Both have named levers (Next 1–3).
+3. The 2c acceptance surface is re-based (Next 4); the 0.6 flat gate is
+   retired as a gate and kept as a control alongside flat discrimination.

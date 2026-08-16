@@ -16,7 +16,7 @@ share the Qwen context and an untrained student already scores well above zero.
 
 Usage (GPU work goes through the daemon)::
 
-    make daemon-run ARGS="-m scripts.distill_cjk.g2 --steps 1500 --batch_size 32"
+    make daemon-run ARGS="project/cjk_aware_anima/gates/g2.py --steps 1500 --batch_size 32"
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import torch
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 

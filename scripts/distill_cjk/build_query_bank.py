@@ -7,7 +7,7 @@ they are ``q_proj(image tokens)``, so they only exist during a forward. The
 first G2 run substituted seeded random directions for them and the whole
 readout space collapsed: a random query attends almost uniformly, so the
 readout degenerates to a near-mean over the sequence. Measured consequence
-(``project/cjk_aware_anima/report.md``): unrelated prompts sat at 0.374 and
+(``project/cjk_aware_anima/report_0816_phase2.md``): unrelated prompts sat at 0.374 and
 *rose to 0.738 during training*, and two captions of the same image landed at
 exactly 1.000 — the space was blind to wording, which is the one axis this line
 exists to serve. That contaminated ``L_attn`` as an objective, not just as a

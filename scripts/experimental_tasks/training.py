@@ -77,6 +77,27 @@ def cmd_distill_cjk(extra):
     run([PY, "-m", "scripts.distill_cjk.distill", *extra])
 
 
+def cmd_cjk_gates(extra):
+    """Phase-2b closing gates G3 + G4 (project/cjk_aware_anima).
+
+    ``G3`` measures the *teacher ceiling per register* on the whole holdout —
+    the Phase-2c gate is a fraction of a ceiling that was only ever measured on
+    two hand-written prompts, and a register whose ceiling and floor nearly
+    coincide has nothing to distil regardless of how many pairs it adds.
+    ``G4`` is corpus health (token-count ratio, occurrence-weighted span
+    provenance, ext-row visit bands) plus the trust ablation. Read these before
+    deciding how much further to grow the corpus.
+
+    The driver is a one-off gate script and lives with the line
+    (``project/cjk_aware_anima/gates/``), not in ``scripts/distill_cjk/`` — the
+    latter holds only what a later phase reuses (cache, loop, losses, table).
+    Its siblings there run the same way, by path:
+    ``g2.py`` (the loss × parameterization cross-tab) and ``g5.py`` (what the
+    settled objective's *exact optimum* scores on the Phase-2c gate).
+    """
+    run([PY, "project/cjk_aware_anima/gates/g34.py", *extra])
+
+
 def cmd_byg_data(extra):
     """Build BYG edit-tuple sidecars (tag-swap) into ``post_image_dataset/byg/``.
 

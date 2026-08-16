@@ -5,7 +5,8 @@ produced them — this file only says *what exists* and *where*.
 
 *Line home: [`motivation.md`](motivation.md) (why, incl. directions already
 ruled out) · [`plan.md`](plan.md) (what remains) ·
-[`report.md`](report.md) (Phase 2b measured verdicts).*
+[`report_0816_phase2.md`](report_0816_phase2.md) (Phase 2 measured verdicts —
+2b unit gates + 2c first pass).*
 
 ## Phase 0 — probe (2026-08-15)
 
@@ -54,10 +55,12 @@ run).
 
 ## Phase 2b — loop + gates (2026-08-15/16)
 
-Measured verdicts: [`report.md`](report.md).
+Measured verdicts: [`report_0816_phase2.md`](report_0816_phase2.md).
 
 - [x] `scripts/distill_cjk/` — corpus cache, ext-table ladder, four objectives,
-      G2 driver (`make exp-cjk-cache` → `exp-distill-cjk`).
+      the training loop (`make exp-cjk-cache` → `exp-distill-cjk`). The
+      **one-off gate drivers live with the line** in [`gates/`](gates/), not in
+      `scripts/`: `scripts/distill_cjk/` holds only what a later phase reuses.
 - [x] `tests/test_cjk_distill.py` — G1 EN bit-exactness.
 - [x] `scripts/distill_cjk/build_query_bank.py` — real cross-attn probe queries
       (DiT forwards at 2–3 σ) → `bench/cjk_distill/assets/query_bank.safetensors`.
@@ -66,6 +69,45 @@ Measured verdicts: [`report.md`](report.md).
 - [x] `load_pairs` splits **by image**, not by pair (no sibling leakage; the
       near metric is populated).
 - [x] Gates G0b / G1 / G0 / G2 all passed. Settled: `param=global`, `loss=span`.
+- [x] `gates/g34.py` — the closing gates G3 (teacher ceiling per
+      register) + G4 (corpus health + trust ablation), `make exp-cjk-gates`.
+      `data.CachedPairs.apply_trust` re-derives span weights from `via` on load,
+      so a trust arm is not a cache rebuild; `--eval_limit 0` scores the whole
+      holdout, which the per-register decomposition needs.
+- [x] G3 passed: the `tags` teacher ceiling is **0.823**, so the 2c `≥0.6` gate
+      stands (73% of teacher). Found that `recovery_attn` is a **mix
+      statistic** — the readout floor is register-dependent by 100× — and
+      confirmed D6's eval-only demotion quantitatively (0.015/0.021 of
+      addressable gap in readout space).
+- [x] G4 passed: JA/EN token ratio 0.96–1.20 (no length pathology),
+      `mt_unverified` = 36.6% of span tokens, 2,656/58,968 rows visited. The
+      trust ablation is flat — `all` ≡ `provenance` to 3 dp and `verified_only`
+      is *worse* on every column, so at 10⁴ pairs noisy supervision beats none.
+      It does **not** close the 2a glossary sign-off (aggregate loss cannot see
+      a single row bound to the wrong meaning).
+
+**Phase 2b is closed.** Gates G0b / G0 / G1 / G2 / G3 / G4 all green; the
+handoff to 2c is [`report_0816_phase2.md`](report_0816_phase2.md#next).
+
+## Phase 2c — first pass (2026-08-16)
+
+Measured verdicts:
+[`report_0816_phase2.md`](report_0816_phase2.md#phase-2c--first-pass-2026-08-16).
+
+- [x] Trained packs — `output/ckpt/cjk_vocab_pack_global{,_row}.{safetensors,json}`
+      (`param=global` is the keeper; `_row` indistinguishable end-to-end).
+      Envelopes `bench/cjk_distill/results/20260816-1450-2c-global/`, `…-1511…`.
+- [x] `gates/g5.py` — the flat-gate oracle (span_perfect / span_plus /
+      ref_remap / prefix_bound). Verdict: flat `cos_vs_en` demoted from gate to
+      control. Envelope `…-1532-g5-flat-ceiling/`.
+- [x] Flat probes (`…-1533-2c-probe-flatmax/`, `…-1557-2c-probe-spanflat/`) —
+      no flat term ships; buying flat points costs readout-space alignment.
+- [x] Rendered eval — `assets/ja_eval_prompts.json` (20 prompts, five
+      registers) through `run_bench.py --ext --prompts`; gate + grid per pack
+      under `bench/cjk_adapter/results/20260816-16{18,19,34,50}-2c-*`.
+- [x] `gates/coverage.py` — CPU-only per-prompt span-visit diagnostic; ties
+      each render failure to its 0–40-visit content tokens and sizes the D1
+      widening (the next work item — see [`plan.md`](plan.md#corpus--where-the-next-win-is)).
 
 ## Phase 2a — D2 (2026-08-16)
 
@@ -85,7 +127,7 @@ Measured verdicts: [`report.md`](report.md).
       output gate (`untranslated_cjk` / `empty` / `runaway`).
 - [x] `build_pairs.py --commentary` — the D2 `commentary` register (9,068 pairs
       = 5,721 MT + 3,347 human). Span-less by construction. Measured in
-      [`report.md`](report.md#d2--what-the-commentary-corpus-buys-2026-08-16).
+      [`report_0816_phase2.md`](report_0816_phase2.md#d2--what-the-commentary-corpus-buys-2026-08-16).
 - [x] `datasets/manga_text.py` — danbooru text-detection corpus, piloted and
       **rejected as corpus material** (register duplicates D4; OCR noise arrives
       MT-laundered and undetectable). Kept for geometry: mask validation and
