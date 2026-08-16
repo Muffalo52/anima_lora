@@ -226,6 +226,43 @@ def build_d6(glossary, args, rng) -> list[dict]:
     return pairs
 
 
+def build_d2(args, rng) -> list[dict]:
+    """Native JA artist commentary, teacher side from ``commentary.py --mt``.
+
+    The only register in the corpus whose JA side no pipeline of ours composed:
+    D1 is assembled from the glossary and D6 from templates, so both can only
+    visit the ext rows our own vocabulary already knows about. D2 is what a
+    Japanese artist actually typed, which is the point — and also why it carries
+    no ``spans``: prose has no tag-by-tag alignment, so it trains the global map
+    and the sequence-level term, not the span term.
+    """
+    if not args.commentary.exists():
+        print(f"  [pairs] no {args.commentary} — skipping D2")
+        return []
+    sys.path.insert(0, str(ROOT))
+    from commentary import read_records  # noqa: PLC0415
+
+    _, records = read_records(args.commentary)
+    if args.n_commentary and len(records) > args.n_commentary:
+        records = rng.sample(records, args.n_commentary)
+    pairs = [
+        {
+            "id": f"D2/{r['post_id']}/commentary",
+            "source": "D2",
+            "register": "commentary",
+            "en": r["en"],
+            "ja": r["ja"],
+            "via": r.get("via", "mt"),
+            "n_missing": 0,
+        }
+        for r in records
+        if r.get("en") and r.get("ja")
+    ]
+    n_human = sum(1 for p in pairs if p["via"] == "human")
+    print(f"  [pairs] D2: {len(pairs)} commentary pairs ({n_human} human-translated)")
+    return pairs
+
+
 def build_natural(captions, glossary, args) -> list[dict]:  # noqa: C901
     """Prose register: MT rewrites the caption, with our wording pinned (GPU).
 
@@ -427,6 +464,19 @@ def main() -> None:
         help="back-translation score an alternate wording must clear to be swapped in",
     )
     ap.add_argument("--n-quotes", type=int, default=2000)
+    ap.add_argument(
+        "--commentary",
+        type=Path,
+        default=ASSETS / "commentary_pairs.jsonl",
+        help="D2 pair file from `commentary.py --mt` (skipped when absent)",
+    )
+    ap.add_argument(
+        "--n-commentary",
+        type=int,
+        default=0,
+        help="cap the D2 register at N pairs (0 = all); D2 is 7x the rest of the "
+        "corpus at full size, and the mix should not be one source",
+    )
     ap.add_argument("--spotcheck", type=int, default=200)
     ap.add_argument("--max-length", type=int, default=512)
     ap.add_argument("--seed", type=int, default=0)
@@ -448,7 +498,11 @@ def main() -> None:
     glossary = json.loads(args.glossary.read_text())["tags"]
     captions = load_captions(args.captions)
 
-    pairs = build_d1(captions, glossary, args, rng) + build_d6(glossary, args, rng)
+    pairs = (
+        build_d1(captions, glossary, args, rng)
+        + build_d6(glossary, args, rng)
+        + build_d2(args, rng)
+    )
     if args.mt:
         pairs += build_natural(captions, glossary, args)
     args.out.mkdir(parents=True, exist_ok=True)

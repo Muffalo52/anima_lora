@@ -109,7 +109,9 @@ def main() -> None:
     parser.add_argument(
         "--arms",
         default="",
-        help="comma-separated 'param:loss' subset, overriding the staged plan",
+        help="';'-separated 'param:loss' subset, overriding the staged plan. "
+        "Semicolons, because a loss spec is itself comma-separated "
+        '("global:attn:1.0,span:0.5")',
     )
     parser.add_argument(
         "--full_grid",
@@ -178,7 +180,7 @@ def main() -> None:
     if args.arms or args.full_grid:
         grid = FULL_GRID
         if args.arms:
-            wanted = {a.strip() for a in args.arms.split(",") if a.strip()}
+            wanted = {a.strip() for a in args.arms.split(";") if a.strip()}
             grid = [(p, loss) for p, loss in FULL_GRID if f"{p}:{loss}" in wanted]
             if not grid:
                 raise SystemExit(

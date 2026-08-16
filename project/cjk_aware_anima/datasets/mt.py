@@ -89,6 +89,41 @@ def build_prompt(req: Request, target_lang: str = "ja") -> str:
     return "\n".join([*head, task, "", req.text])
 
 
+def cache_key(
+    model_path: str,
+    prompt: str,
+    *,
+    target_lang: str,
+    max_new_tokens: int,
+    greedy: bool,
+    seed: int = 0,
+) -> str:
+    """Hash everything that changes the output — model, decode mode, prompt.
+
+    Module-level so a caller can look a translation up **without loading the
+    model**: a partial pass can be harvested from its cache on CPU.
+    """
+    mode = "greedy" if greedy else f"sample{seed}"
+    blob = f"{model_path}|{target_lang}|{mode}|{max_new_tokens}|{prompt}"
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def load_cache(cache: "Path | None") -> dict[str, str]:
+    """key -> translation, tolerating a torn last line from a killed job."""
+    if cache is None or not cache.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in cache.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out[row["key"]] = row["out"]
+    return out
+
+
 class MTEngine:
     """Batched chat-template generation over a local Hy-MT2 checkpoint."""
 
@@ -167,7 +202,7 @@ class MTEngine:
 
         prompts = [build_prompt(r, target_lang) for r in requests]
         keys = [self._cache_key(p, target_lang, budget) for p in prompts]
-        done: dict[str, str] = self._load_cache(cache)
+        done: dict[str, str] = load_cache(cache)
         todo = [i for i, k in enumerate(keys) if k not in done]
         if cache is not None and len(todo) < len(requests):
             print(
@@ -229,25 +264,14 @@ class MTEngine:
         return [done[k] for k in keys]
 
     def _cache_key(self, prompt: str, target_lang: str, budget: int) -> str:
-        """Hash everything that changes the output — model, decode mode, prompt."""
-        mode = "greedy" if self.greedy else f"sample{self.seed}"
-        blob = f"{self.model_path}|{target_lang}|{mode}|{budget}|{prompt}"
-        return hashlib.sha1(blob.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _load_cache(cache: "Path | None") -> dict[str, str]:
-        if cache is None or not cache.exists():
-            return {}
-        out: dict[str, str] = {}
-        for line in cache.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # a torn last line from a killed job
-            out[row["key"]] = row["out"]
-        return out
+        return cache_key(
+            self.model_path,
+            prompt,
+            target_lang=target_lang,
+            max_new_tokens=budget,
+            greedy=self.greedy,
+            seed=self.seed,
+        )
 
 
 TAG_BACKGROUND = (

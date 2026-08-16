@@ -64,7 +64,26 @@ def load_pairs(
     holdout: int = 0,
     seed: int = 0,
 ) -> tuple[list[dict], list[dict]]:
-    """(train, held-out) pair records — deterministic split by a seeded shuffle."""
+    """(train, held-out) pair records — deterministic split, **grouped by image**.
+
+    The split is over images, not pairs, because every image contributes several
+    pairs that share their tag content and differ only in wording (`tags` /
+    `tags_alt`, and D6's two quote registers). Splitting per pair broke both
+    things the holdout is for:
+
+    * **Leakage** — a pair's sibling register lands in train ~91% of the time,
+      so "held-out" measured generalization to new *wording of trained content*,
+      not to new content.
+    * **Near-pair starvation** — the `near` half of the stratified
+      discrimination needs both registers of one image inside the eval slice. A
+      per-pair split left exactly **one** such pair in a 256-record slice, so
+      `discrimination_near` was a single-sample statistic (that is the provenance
+      of the 0.71 zero-shot figure quoted in ``plan.md``).
+
+    Grouping fixes both at once: whole images travel together, so no sibling
+    crosses the boundary and every held-out image contributes its own near pair.
+    ``holdout`` stays a pair budget — images are added until it is reached.
+    """
     rows = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -78,19 +97,42 @@ def load_pairs(
     if not rows:
         raise ValueError(f"no pairs in {path} for registers={registers or 'ALL'}")
 
+    by_image = _group(rows)
+    keys = sorted(by_image)
     rng = random.Random(seed)
-    rng.shuffle(rows)
-    held = rows[:holdout] if holdout else []
-    train = rows[holdout:]
+    rng.shuffle(keys)
+
+    held: list[dict] = []
+    train: list[dict] = []
+    for k in keys:
+        # Whole image to one side; `holdout` is a pair budget, so the last image
+        # admitted may overshoot it slightly.
+        (held if len(held) < holdout else train).extend(by_image[k])
+    rng.shuffle(train)
     if max_pairs:
         train = train[:max_pairs]
+
+    n_near = sum(
+        {"tags", "tags_alt"} <= {r["register"] for r in grp}
+        for grp in _group(held).values()
+    )
     logger.info(
-        "pairs: %d train / %d held-out (registers=%s)",
+        "pairs: %d train / %d held-out over %d images (registers=%s); "
+        "held-out images carrying a tags/tags_alt near pair: %d",
         len(train),
         len(held),
+        len(keys),
         ",".join(registers) if registers else "ALL",
+        n_near,
     )
     return train, held
+
+
+def _group(rows: list[dict]) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["id"].rsplit("/", 1)[0], []).append(r)
+    return out
 
 
 def _en_span_chars(text: str, segments: list[str]) -> list[tuple[int, int]]:

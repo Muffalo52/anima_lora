@@ -323,3 +323,91 @@ def test_tokens_in_span_uses_overlap_not_containment():
     mask = [1, 1, 1]
     assert data._tokens_in_span(offsets, mask, (2, 8)) == [0, 1, 2]
     assert data._tokens_in_span(offsets, mask, (-1, -1)) == []
+
+
+# ---------------------------------------------------------------------------
+# Readout centering — the offset that made every cosine read ~1
+# ---------------------------------------------------------------------------
+
+
+def _toy_probe():
+    torch.manual_seed(0)
+    return attn_bank.BlockProbe(
+        block=0,
+        k_weight=torch.randn(8, 6) * 0.1,
+        v_weight=torch.randn(8, 6) * 0.1,
+        k_gain=torch.ones(4),
+        queries=torch.randn(2, 3, 4),
+    )
+
+
+def test_fit_centers_zeroes_the_mean_readout_over_its_own_reference():
+    """The whole point: after centering, the reference set's mean readout is 0.
+
+    Uncentered, every readout carries a common offset as large as the vectors
+    themselves (measured ||mean||/||vec|| = 1.02 with real queries), so a cosine
+    over them saturates at 1 even for unrelated prompts.
+    """
+    torch.manual_seed(1)
+    probe = _toy_probe()
+    x = torch.randn(8, 9, 6)
+    mask = torch.ones(8, 9, dtype=torch.long)
+    attn_bank.fit_centers([probe], [(x, mask)], seq_total=32)
+    centered = attn_bank.readout(x, mask, probe, seq_total=32)
+    assert centered.mean(dim=0).abs().max() < 1e-5
+
+
+def test_centering_is_exactly_a_constant_shift():
+    torch.manual_seed(2)
+    probe = _toy_probe()
+    x = torch.randn(4, 9, 6)
+    mask = torch.ones(4, 9, dtype=torch.long)
+    attn_bank.fit_centers([probe], [(x, mask)], seq_total=32)
+    raw = attn_bank.readout(x, mask, probe, seq_total=32, center=False)
+    got = attn_bank.readout(x, mask, probe, seq_total=32)
+    assert torch.allclose(raw - probe.center, got, atol=1e-6)
+
+
+def test_build_bank_refuses_random_queries_by_default(tmp_path):
+    """Random probe directions collapsed the readout space once; never silently."""
+    with pytest.raises(FileNotFoundError, match="query bank"):
+        attn_bank.build_bank(
+            str(tmp_path / "no.safetensors"),
+            (0,),
+            query_bank=tmp_path / "missing.safetensors",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Holdout split — by image, not by pair
+# ---------------------------------------------------------------------------
+
+
+def _write_pairs(tmp_path, n_images: int):
+    import json
+
+    p = tmp_path / "pairs.jsonl"
+    with p.open("w", encoding="utf-8") as f:
+        for i in range(n_images):
+            for reg in ("tags", "tags_alt"):
+                f.write(json.dumps({"id": f"D1/{i}/{reg}", "register": reg}) + "\n")
+    return p
+
+
+def test_no_image_has_pairs_on_both_sides_of_the_split(tmp_path):
+    """A per-pair split leaked ~91% of held-out pairs' sibling registers."""
+    train, held = data.load_pairs(_write_pairs(tmp_path, 200), holdout=50, seed=0)
+    base = lambda rs: {r["id"].rsplit("/", 1)[0] for r in rs}  # noqa: E731
+    assert base(train) & base(held) == set()
+    assert len(train) + len(held) == 400
+
+
+def test_holdout_is_populated_with_near_pairs(tmp_path):
+    """`discrimination_near` needs both registers of an image in the eval slice;
+    the per-pair split left exactly one in a 256-record slice."""
+    _, held = data.load_pairs(_write_pairs(tmp_path, 200), holdout=50, seed=0)
+    by_image = data._group(held)
+    near = sum(
+        {"tags", "tags_alt"} <= {r["register"] for r in g} for g in by_image.values()
+    )
+    assert near == len(by_image) >= 25

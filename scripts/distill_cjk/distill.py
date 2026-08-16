@@ -380,7 +380,34 @@ def load_context(cfg, device, dtype) -> dict:
         seed=cfg.seed,
         device=device,
         dtype=torch.float32,
+        query_bank=cfg.query_bank,
+        allow_random_queries=cfg.allow_random_queries,
     )
+    if probes:
+        # The readout's common offset, fitted once on the frozen teacher outputs:
+        # arm-independent (so the G2 cross-tab stays comparable) and batch-
+        # independent. Without it every readout cosine saturates at ~1 — see
+        # attn_bank.fit_centers.
+        n_center = min(512, len(train_cache))
+        with torch.no_grad():
+            attn_bank.fit_centers(
+                probes,
+                (
+                    (
+                        loss_mod.zero_pads(b["teacher"], b["teacher_mask"]),
+                        b["teacher_mask"],
+                    )
+                    for b in (
+                        train_cache.batch(
+                            list(range(s, min(s + 64, n_center))),
+                            device,
+                            torch.float32,
+                        )
+                        for s in range(0, n_center, 64)
+                    )
+                ),
+                seq_total=SEQ_TOTAL,
+            )
     pool = make_pool(cfg, train_cache)
     return {
         "train_cache": train_cache,

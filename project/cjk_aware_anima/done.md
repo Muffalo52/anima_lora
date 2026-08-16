@@ -52,6 +52,45 @@ Still open in 2a — see [`plan.md`](plan.md#phases--gates): user sign-off on
 `tag_glossary_review.md`, and the `natural` prose register (implemented, not
 run).
 
+## Phase 2b — loop + gates (2026-08-15/16)
+
+Measured verdicts: [`report.md`](report.md).
+
+- [x] `scripts/distill_cjk/` — corpus cache, ext-table ladder, four objectives,
+      G2 driver (`make exp-cjk-cache` → `exp-distill-cjk`).
+- [x] `tests/test_cjk_distill.py` — G1 EN bit-exactness.
+- [x] `scripts/distill_cjk/build_query_bank.py` — real cross-attn probe queries
+      (DiT forwards at 2–3 σ) → `bench/cjk_distill/assets/query_bank.safetensors`.
+      `attn_bank.build_bank` refuses random directions without an explicit flag.
+- [x] `attn_bank.fit_centers` — the readout's common offset, projected out.
+- [x] `load_pairs` splits **by image**, not by pair (no sibling leakage; the
+      near metric is populated).
+- [x] Gates G0b / G1 / G0 / G2 all passed. Settled: `param=global`, `loss=span`.
+
+## Phase 2a — D2 (2026-08-16)
+
+- [x] `datasets/commentary.py` — native-JA danbooru artist commentary via the
+      gelcrawl route (`curl_cffi` + SpoofDPI). 434,800 raw →
+      `assets/commentary_ja.jsonl`: **73,015** unique JA records (5.2 M chars,
+      4,775 unique kanji), 3,347 with a human EN translation. Per-line promo
+      stripping; zh/ko kept in the raw cache for when ja-only scoping lifts.
+- [x] `commentary.py --mt` — the JA→EN teacher side (Hy-MT2-7B, greedy).
+      Names pinned JA→EN off the D5 lexicon (fires on ~13% of records; the 1.8B
+      renders 十時愛梨 "Jūji Aira" and hallucinates 虹ヶ咲 → "Neko no Hikari",
+      which is why the 7B is worth 4× the wall clock). Length-bucketed batching
+      with per-bucket `max_new_tokens` **and** batch size — batch 32 in the
+      ≤128-char bucket OOMs the 7B at a 13 GiB weight budget. Resumable through
+      `mt.py`'s prompt-keyed cache; `--from-cache` harvests a stopped pass on
+      CPU. Partial run: **5,721 of 69,668** translated, 3.6% rejected by the
+      output gate (`untranslated_cjk` / `empty` / `runaway`).
+- [x] `build_pairs.py --commentary` — the D2 `commentary` register (9,068 pairs
+      = 5,721 MT + 3,347 human). Span-less by construction. Measured in
+      [`report.md`](report.md#d2--what-the-commentary-corpus-buys-2026-08-16).
+- [x] `datasets/manga_text.py` — danbooru text-detection corpus, piloted and
+      **rejected as corpus material** (register duplicates D4; OCR noise arrives
+      MT-laundered and undetectable). Kept for geometry: mask validation and
+      Phase 4. See [`datasets/README.md`](datasets/README.md).
+
 ## Reusable for Phase 2b onward
 
 | Piece | Where |

@@ -19,6 +19,7 @@ corpus will really visit*.
 | `wikidata_lexicon.py` | Wikidata SPARQL, entity list from our `caption_index.json` | CC0 | `assets/wikidata_lexicon.json` — EN↔JA(↔KO/ZH) proper nouns |
 | `lovehina.py` | [PLippmann/multimodal-manga-translation](https://github.com/PLippmann/multimodal-manga-translation) (COLING 2025, arXiv:2411.02589) | MIT | `assets/lovehina_ja.json` — 3,705 native JA speech-bubble lines |
 | `mt.py` | `tencent/Hy-MT2-1.8B` / `-7B` | Apache-2.0 | library (`MTEngine`) + `--probe` / `--smoke` self-checks |
+| `commentary.py` | Danbooru `artist_commentaries.json` (gelcrawl route) | site ToS | `assets/commentary_ja.jsonl` (73,015 native-JA records) → `--mt` → `commentary_pairs*.jsonl` (D2 pairs) |
 | `tag_glossary.py` | Danbooru wiki dump + the two sources above + MT | WTFPL (dump) | `assets/tag_glossary_ja.json`, `assets/tag_glossary_review.md` |
 | `build_pairs.py` | the glossary | — | `post_image_dataset/cjk_distill/{pairs.jsonl,coverage.json,spotcheck.md}` |
 
@@ -96,10 +97,37 @@ flag rather than ship as noise.
 
 ## Network note
 
-`danbooru.donmai.us` is unreachable from this machine (connection reset — a
-network-level block, not the sandbox), so the wiki arrives via the HF mirror
-and **D2 (artist commentary) cannot be pulled directly**. Any D2 route has to
-go through an HF-hosted metadata dump.
+A plain request to `danbooru.donmai.us` from this machine is reset at the
+network level, which is why the wiki arrives via the HF mirror. That is **not**
+a hard block: the gelcrawl route (`curl_cffi` Chrome impersonation through
+SpoofDPI on `127.0.0.1:8080`, gelcrawl's `.env` credentials) reaches the API
+fine, and `commentary.py` uses it for D2. No HF metadata dump is needed.
+
+## `commentary.py` — D2, native JA at volume
+
+Two halves. The **crawl** runs under gelcrawl's interpreter (that is where
+`curl_cffi` lives) and appends every page to `assets/.commentary/raw.jsonl`, so
+a kill costs one page. The **`--mt` pass** is GPU work under this repo's
+interpreter and goes through the daemon; `--from-cache` rebuilds the pair file
+from whatever a stopped pass already translated, with no model load at all.
+
+Both halves write JSONL — a `{"stats": …}` header line, then one record per
+line (`write_records` / `read_records`). At 73k records a single-line JSON blob
+is unopenable and unstreamable.
+
+Two things the MT pass does that a plain "translate every row" would not:
+**names are pinned JA→EN** from the Wikidata lexicon (D5's argument backwards —
+if 黄泉 comes back "Yomi" the teacher embedding lands on an entity the model
+does not know), and **batches are length-bucketed**, because a batch runs until
+every sequence in it finishes and 68% of records are ≤ 64 chars. Bucket batch
+size scales down with length: batch 32 in the ≤128-char bucket OOMs the 7B.
+
+Model choice was measured, not assumed — 64 records, 1.8B vs 7B. The 7B is
+~4× the wall clock and wins on exactly the axis that matters, entity names
+(十時愛梨 "Jūji Aira" → **"Toji Airi"**; 虹ヶ咲 "Neko no Hikari" → **"Nijigasaki"**;
+澪ちゃん "Sori-chan" → **"Mio-chan"**). Note this is the *opposite* direction from
+the tag-glossary finding above: JA→EN prose is a translation task, where model
+size pays; EN→JA tag idiom is a knowledge lookup, where it does not.
 
 ## `wikidata_lexicon.py` — proper nouns
 
@@ -171,3 +199,55 @@ seed. Only annotation JSON is fetched; the pages live in Manga109-s, which
 forbids redistribution and needs a separate application. That matters only if
 Phase 4 (OCR + glyph rendering) ever wants images — the text-only distillation
 does not.
+
+## `manga_text.py` — the danbooru text-detection corpus. **Measured: not corpus material**
+
+Source: a local 8.4 GB text-*detection* set — 73,725 danbooru images (post ids
+as filenames), `test-00000-of-00001.parquet` (images + merged axis-aligned
+boxes) plus `polys_test.json` (COCO, **one segmentation polygon per text
+line**: 602,127 `text` + 16,446 `hard_neg`). The polygon file's image ids are a
+subset of the parquet's; the 1,417 missing are exactly the zero-annotation
+images. No transcriptions anywhere — the labels are geometry only, so any text
+has to be OCR'd out.
+
+The pilot (`--sample 1000`, 60 evenly-spaced row groups; the parquet is sorted
+by post id so a clustered draw samples one era of the site) crops each polygon
+with orientation-preserving deskew — manga-ocr reads vertical Japanese
+natively, and taking `minAreaRect`'s angle verbatim would transpose a bubble
+column into a horizontal strip — reads it with manga-ocr, and translates the
+dialogue with Hy-MT2 JA→EN. Measured on 986 text regions + 114 `hard_neg`
+controls (`assets/manga_text_pilot/report.md`):
+
+| question | measured |
+|---|---|
+| register | `line` 34.5%, `short` 11.8% → 46.2% nominally translatable; `sfx` 21.5%, punctuation-only 21.0%, latin/digit 10.3% |
+| confidence gate | exists but overlaps: at logprob > −0.05 it keeps **35% of lines** and still admits 4.4% of `hard_neg` and 9.4% of SFX |
+| end-to-end yield | 986 regions → 340 lines → **119 gated lines = 12%** |
+| MT | not the bottleneck, and that is the problem — it launders OCR noise into fluent English (`ブスターSEMIT`→"Bustar SEMIT", `人を作る前に、セック`→"Before creating people, Sek", `鎌蛋`→"Sickle egg") |
+| tag vocabulary in-image | **3.0%** of regions contain a glossary surface; 3/986 are a whole-region tag word |
+
+**Verdict: do not add to the mix.** Two independent reasons, either sufficient:
+
+1. **Register.** Clean reads are speech fragments ("What's going on here?",
+   "Uh...", "Like a set?"), i.e. exactly D4's register — and JESC ships 2.8 M
+   human-aligned pairs of it with no OCR and no MT. Paying an OCR pass to
+   manufacture a noisier version of a free corpus is backwards.
+2. **Undetectable corruption.** MT is fluent on garbage input, so a bad read
+   arrives as a confident, plausible EN teacher target. Nothing downstream
+   flags it, which is the one failure mode a distillation corpus cannot absorb.
+
+Yield could be raised — crop size predicts usability strongly (min side ≥ 64 px
+→ 65.8% usable vs 18.6% in [16,32)), so a size prefilter is the obvious lever —
+but yield was never the deciding term; register is, and a prefilter does not
+move it.
+
+What the dataset *is* good for is the geometry, which needs no OCR at all:
+**text-mask validation** (the MIT detector behind `make mask`, whose
+`MIT_TEXT_THRESHOLD` is unmeasured, and whose masks Phase 2 depends on staying
+ON), and **Phase 4 glyph rendering**, where per-line polygons on domain-matched
+images are the asset nothing else supplies. The tag-hit path also shows the
+flat-match trap a third time: unguarded substring matching fired `たな` (shelf)
+inside `やがったなこのやろ` and two-mora katakana given names (`カイ` = irida
+(pokemon), `アイ` = hoshino ai) inside plain dialogue — hence `_substring_safe`,
+which trusts kanji at length 2 and demands 4 characters of everything else.
+`--recount` re-cuts every bucket from `pilot.jsonl` without a second GPU pass.

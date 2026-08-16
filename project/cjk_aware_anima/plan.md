@@ -4,10 +4,12 @@
 [`done.md`](done.md) (what is measured and built) ·
 [`report.md`](report.md) (Phase 2b measured verdicts).*
 
-Status: Phase 2a (corpus) built and measured; **Phase 2b built and run** —
-gates G0/G0b/G1 passed, G2 partial (see [`report.md`](report.md)). 2c onward
-is unstarted. Scope is **Japanese only**; zh/ko are "rerun the same pipeline
-with a different corpus" once ja passes.
+Status: Phase 2a (corpus) built and measured; **Phase 2b built, run and
+passed** — G0/G0b/G1/G2 all green (see [`report.md`](report.md); G2 needed
+three instrumentation fixes first). Settled design: `param=global`,
+`loss=span`. 2c is unstarted and **corpus-bound** — D2 is now unblocked and
+delivers 73,015 native-JA records. Scope is **Japanese only**; zh/ko are
+"rerun the same pipeline with a different corpus" once ja passes.
 
 ## Phase 2 — distillation design
 
@@ -49,16 +51,24 @@ of Phase 2c:
   first rationale was wrong: pads are **zeroed** after the adapter
   (`inference/text.py:229`), so they carry no Qwen signal — `ja_native`'s 0.02
   is 3 informative positions plus a norm-ratio penalty.
-- **L_attn (primary)** — the DiT's cross-attn applies **no RoPE to the
+**Settled by the G2 re-run: `L_span` is the objective** (`param=global`). The
+list below is kept because the metric space still matters — `recovery_attn` is
+the headline metric even though `L_attn` is not the objective.
+
+- **L_attn (was primary; now the metric space)** — the DiT's cross-attn applies **no RoPE to the
   context** (`models.py:385`), so it consumes the output permutation-
   invariantly, while the `512 − N` zero pads are unmasked sink mass whose
   weight depends on N: the object is a *set plus a length*. Match
   `Attn(Q_probe, K(out), V(out))` for a fixed probe-query bank: K/V read
   straight out of the DiT safetensors, sink folded into the softmax
-  denominator analytically. **The queries must be real cached image-token
-  queries** (a few DiT forwards at 2–3 σ) — substituting random directions
-  degenerates the readout to a near-mean over the sequence and makes both the
-  loss and the metric nearly vacuous, measured in [`report.md`](report.md).
+  denominator analytically. Two things it needs, both learned the hard way and
+  measured in [`report.md`](report.md): **real cached image-token queries**
+  (built by `scripts/distill_cjk/build_query_bank.py` from DiT forwards at 2–3
+  σ; random directions are now refused outright), and **a centered readout** —
+  the raw readout carries a common offset as large as the vectors themselves, so
+  an uncentered cosine reads 0.997 between *unrelated* prompts. Note the earlier
+  "random queries attend almost uniformly" diagnosis was wrong: attention is
+  sharp (3–9 effective tokens of ~99, 80–87% of the mass on the sink).
 - **L_span** — D1 captions are *composed* tag-by-tag, so EN↔JA alignment is
   free and exact; supervises each ext row from its own tag instead of a
   sequence average, and is the only loss that can carry a per-wording trust
@@ -94,7 +104,7 @@ LoveHina) are in [`done.md`](done.md). Still available to widen the corpus:
 
 | ID | Source | Direction | Domain fit | Est. size | Notes |
 |---|---|---|---|---|---|
-| D2 | Danbooru/pixiv artist commentary (native JA on the same images) | JA→EN via local LLM | exact, native phrasing | 10⁴–10⁵ | **BLOCKED**: `danbooru.donmai.us` unreachable from this machine (network-level). Any route must go through an HF-hosted dump. Risk 3 wants it at ≥ ~20% of the mix. |
+| D2 | Danbooru/pixiv artist commentary (native JA on the same images) | JA→EN via local LLM | exact, native phrasing | **73,015 built, 9,068 paired** | **IN THE MIX 2026-08-16** — `danbooru.donmai.us` is reachable through the gelcrawl route (`curl_cffi` + SpoofDPI), so no HF dump is needed. `datasets/commentary.py` → 434,800 raw → `assets/commentary_ja.jsonl` (73,015 unique JA records, 3,347 with a *human* EN translation), then `--mt` (Hy-MT2-7B greedy, JA→EN, names pinned off the D5 lexicon) → `commentary_pairs*.jsonl`; `build_pairs.py` emits the `commentary` register. **First slice measured — see [`report.md`](report.md#d2--what-the-commentary-corpus-buys-2026-08-16): coverage 3,002 → 6,394 ext rows, but D2 is inert under the settled `loss=span` (prose carries no spans) and only pays off through a sequence-level term, in its own register.** The MT pass is 5,721/69,668 done; it resumes from its cache. |
 | D3 | STAIR Captions (~820k JA on COCO, aligned to EN COCO captions); YJ Captions (~131k) | pre-aligned | caption-domain, photographic | ~1 M | Real parallel captions, zero MT — the right source for sentence register (particles, verb endings). **Check licenses before mixing** (STAIR is CC BY 4.0 last checked; verify). |
 | D4 | JESC (~2.8 M subtitle pairs) | pre-aligned | casual dialogue | subsample | Matches the speech-bubble / quoted-text register. Subsample; don't let it dominate. |
 
@@ -152,7 +162,14 @@ encoder mapping rather than shipping noise rows (a JSON edit).
     embedding returns stock rows bitwise before *and* after the ext params
     move. **PASSED** (pytest).
   - **G2** — loss × parameterization cross-tab, every arm scored on every
-    metric so no arm wins on its own objective.
+    metric so no arm wins on its own objective. **PASSED** (2026-08-16, after
+    three instrumentation fixes — real query bank, centered readout,
+    split-by-image). Verdict: **`param=global`, `loss=span`**; `flat`
+    disqualified for collapse (far 0.111→0.304, near 0.411→0.910); per-row
+    residuals add 0.001 while removing the shared global map costs 0.051. The
+    cross-tab is what decides it — `span` scores 0.123 on attn's own term
+    against attn's best 0.082, while `attn` scores 0.334 on span's term against
+    span's best 0.120.
   - **G3 / G4** — teacher ceiling per register (is 0.6 even the right 2c
     number?); corpus health: token-count ratio, occurrence-weighted provenance.
   Headline metric is **recovery**, not raw cosine — `(cos(student,en) −
@@ -169,7 +186,12 @@ encoder mapping rather than shipping noise rows (a JSON edit).
   only evidence that wording, and downstream the individual glyphs an OCR
   caption carries, reaches conditioning at all. Exactly 1.0 would mean
   per-character identity is invisible, i.e. the failure this whole line exists
-  to prevent. Measured: zero-shot sits at far 0.10 / near 0.71.
+  to prevent. Measured: zero-shot sits at far **0.111** / near **0.411** over 72
+  near pairs. (The near half was previously quoted as 0.71 — that was a
+  *single* pair, because the holdout was split per pair rather than per image
+  and an image's two registers almost never landed on the same side. Fixed; see
+  [`report.md`](report.md). The same bug leaked ~91% of held-out pairs'
+  siblings into training, so pre-2026-08-16 held-out numbers all read high.)
 - **Phase 2c — train + eval.** Acceptance harness is **the existing bench
   unchanged**: `run_bench.py --ext --languages ja` pointed at the distilled
   sidecar. Gates:

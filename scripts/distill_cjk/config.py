@@ -138,6 +138,19 @@ def build_argparser() -> argparse.ArgumentParser:
         help="DiT blocks sampled for the probe bank (early/mid/late of 28)",
     )
     p.add_argument("--attn_queries", type=int, default=64, help="probe queries/block")
+    p.add_argument(
+        "--query_bank",
+        type=Path,
+        default=None,
+        help="real cross-attn queries (default: bench/cjk_distill/assets/"
+        "query_bank.safetensors, built by scripts/distill_cjk/build_query_bank.py)",
+    )
+    p.add_argument(
+        "--allow_random_queries",
+        action="store_true",
+        help="probe with random directions instead — reproduces the withdrawn "
+        "G2 run only; the readout space is near-blind to wording (report.md)",
+    )
 
     # ---- loop -------------------------------------------------------------
     p.add_argument("--mode", default="train", choices=MODES)
@@ -179,6 +192,8 @@ class CJKDistillConfig:
     trust: str = "provenance"
     attn_blocks: tuple[int, ...] = ()
     attn_queries: int = 64
+    query_bank: Path | None = None
+    allow_random_queries: bool = False
 
     mode: str = "train"
     steps: int = 2000
@@ -247,6 +262,8 @@ def resolve_config(args: argparse.Namespace) -> CJKDistillConfig:
         trust=args.trust,
         attn_blocks=blocks,
         attn_queries=int(args.attn_queries),
+        query_bank=Path(args.query_bank) if args.query_bank else None,
+        allow_random_queries=bool(args.allow_random_queries),
         mode=args.mode,
         steps=int(args.steps),
         batch_size=int(args.batch_size),
