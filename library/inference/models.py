@@ -393,10 +393,18 @@ def load_dit_model(
     else:
         lora_weights_list = None
 
+    from library.runtime.backend import resolve_attention_mode
+
+    attn_mode = resolve_attention_mode(args.attn_mode, torch)
+    if attn_mode != args.attn_mode:
+        logger.warning(
+            "ROCm detected: using PyTorch SDPA instead of CUDA Flash Attention"
+        )
+
     model = anima_utils.load_anima_model(
         device,
         args.dit,
-        args.attn_mode,
+        attn_mode,
         loading_device,
         dit_weight_dtype,
         lora_weights_list=lora_weights_list,
