@@ -1,57 +1,18 @@
-# Register-token adapter — DSR-style register tokens + trained self-attn QKV
-# surface on a FROZEN Anima DiT. Promoted from bench/headroom/ into a first-class
-# method: `train.py --method register` (network at networks/methods/register.py).
-#
-# Mechanism (docs/proposal/headroom_register_tokens.md, Phase-2 sweep):
-#   - K non-decoded register tokens concatenated on the self-attn sequence at
-#     block insert_block (DSR's "starting block"), carried through the remaining
-#     blocks, stripped before unpatchify (rope-exempt).
-#   - a trained QKV surface on the mid blocks — full-rank ΔW (qkv_mode=unfrozen,
-#     the "max reachability" arm) or low-rank LoRA (qkv_mode=lora).
-#
-# Defaults are the proposal's K36-b8-QKV sweet-spot arm. arm=B (LEARNABLE
-# registers) is the only shippable arm; arm=A (fixed-zero) is a lesion/control,
-# and num_registers=0 is the honest LoRA-only drift control (arm L). Never ship
-# arm A.
-#
-# Uses base.toml's default LoRA dataset blueprint (standard training data) — no
-# inline blueprint needed. Kept-live at inference (register tokens can't merge
-# into DiT weights); see the ComfyUI node custom_nodes/comfyui-anima-register/.
-
 network_module = "networks.methods.register"
 
-# Register-adapter knobs (parsed by create_network in register.py).
 network_args = [
-    "num_registers=36",       # DSR Tab. 9: K=1 hurts (6.16), 4→5.47, 36→5.33 best, 100→5.58
-    "arm=B",                  # B = learnable registers (shippable). A = lesion.
-    "qkv_mode=lora",          # full-rank ΔW on qkv_proj (max reachability). or "lora".
-    "insert_block=8",         # DSR "starting block" — registers ENTER the seq here.
-                              # Tab. 9 (28-block DiT-XL, K=36): 0→5.54, 8→5.33 best,
-                              # 16→5.49, 24→5.68 (baseline 5.89). Non-monotonic.
-    "target_blocks=8-18",     # where the QKV surface TRAINS (mid blocks) — a
-                              # separate knob from insert_block.
-    "register_lr_scale=100",  # registers get 100× the base lr (see below)
+    "num_registers=36",
+    "arm=B",
+    "qkv_mode=lora",
+    "insert_block=8",
+    "target_blocks=8-18",
+    "register_lr_scale=100",
     "init_std=0.02",
 ]
 
-# LoRA rank/alpha — only consumed when qkv_mode=lora, where they work exactly
-# like lora.toml (delta scaled by alpha/rank; alpha > dim boosts it). IGNORED
-# for qkv_mode=unfrozen: the full-rank ΔW has no down/up factorization, so
-# there is no rank and no alpha/rank scale — its magnitude is simply learned
-# (zero-init, grows with training). The equivalent "make it stronger" levers
-# for unfrozen are learning_rate (train-time) and the node's strength /
-# --network_mul (inference-time, scales ΔW and registers together).
-# lora-mode extra: add "down_init=weight_svd" to network_args to seed the shared
-# lora_down with the top-r right-singular directions of each block's frozen qkv
-# weight (OrthoInit-style warm start — init only, basis stays trainable; up is
-# zero-init either way so step 0 stays a no-op). NB --network_args on the CLI
-# replaces the whole list — enable it here, not via ARGS.
 network_dim = 16
 network_alpha = 90
 
-# Base (QKV-surface) lr; the register embeddings train at lr × register_lr_scale
-# (1e-4 × 100 = 1e-2) — they must grow ~14–24× the median patch norm to become
-# sinks, which a shared LoRA-scale lr rarely reaches (proposal §metrics).
 learning_rate = 5e-5
 
 max_train_epochs = 4
@@ -61,10 +22,6 @@ checkpointing_epochs = 4
 caption_dropout_rate = 0.1
 cache_llm_adapter_outputs = true
 
-# The mid-stack register-token pre-hooks are unaudited against the block-swap
-# offloader, so train.py hard-fails on extra_seq_tokens>0 + blocks_to_swap>0.
-# Pin 0 here (method wins over preset) so low-VRAM presets don't trip it —
-# use block compile for memory instead.
 blocks_to_swap = 0
 
 output_name = "anima_register"

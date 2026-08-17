@@ -1,5 +1,3 @@
-# Shared infrastructure settings — rarely change between experiments.
-
 pretrained_model_name_or_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 qwen3 = "models/text_encoders/qwen_3_06b_base.safetensors"
 vae = "models/vae/qwen_image_vae.safetensors"
@@ -7,44 +5,17 @@ vae = "models/vae/qwen_image_vae.safetensors"
 output_dir = "output/ckpt"
 output_name = "anima_lora"
 logging_dir = "output/logs"
-# Arbitrary note embedded verbatim in the checkpoint metadata (ss_training_comment).
-# Overridable per-preset/method/CLI and surfaced as a GUI field; leave empty for none.
 training_comment = ""
 log_with = "tensorboard"
 
 network_module = "networks.lora_anima"
 network_train_unet_only = true
 
-# ── Dataset paths (shared preprocess ↔ training contract) ──────────────────
-# Top-level scalars so any preset / method can override (the merge chain is
-# base.toml → presets.toml[<preset>] → methods/<method>.toml). 
-# NOTE: preprocess-only knobs (source_image_dir, drop_lowres_images,
-# min_pixels) now live in configs/preprocess.toml
-
 resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir = "post_image_dataset/lora"
 
-# fnmatch glob applied to each image's path relative to its subset's image_dir.
-# `*` (or unset) trains on everything. Use `|` to OR-combine patterns:
-#   `char_a/*`           → one subfolder
-#   `char_a/*|char_b/*`  → two subfolders
-#   `*portrait*`         → any path containing "portrait"
-# Same blueprint applies to validation enumeration.
-# path_pattern = "*"
-
-# Data scope — how much of the cached dataset a run trains on.
-# `sample_ratio` is a global per-subset override (1.0 = full dataset; the
-# CLI [half]/[quarter]/[tenth] presets set the same key). `artists_shard`
-# restricts training to one round-robin shard of the artist subdirectories,
-# format "k_N" (e.g. "1_4" = shard 1 of 4); "" = off. Mutually exclusive
-# with an explicit path_pattern.
 sample_ratio = 1.0
 artists_shard = ""
-
-# Multi-scale constant-token tiers (`target_res`) live in configs/preprocess.toml.
-# It's a preprocess knob that training mirrors, and — unlike this file — it is
-# preserved across `make update` (base.toml rides the code-file path and is
-# overwritten so new infra keys ship). Set your resolution tiers there.
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"
@@ -66,10 +37,6 @@ masked_loss = true
 torch_compile = true
 attn_mode = "flash"
 compile_dynamic_seq = true
-# Partitioner recompute cap — restores the pre-2026-06-10 no-grad-ckpt VRAM
-# footprint after the custom-autograd removal (which had implicitly pinned the
-# saved-for-backward set). 0.85 ≈ old peak at identical step time. Auto-skipped
-# (logged) when gradient_checkpointing=true — incompatible and redundant there.
 activation_memory_budget = 0.99
 log_every_n_steps=2
 dataloader_pin_memory = true
@@ -77,37 +44,13 @@ persistent_data_loader_workers= true
 use_cmmd = false
 channel_scaling_alpha = 0.5
 gradient_accumulation_steps=1
-# Adapt the per-block adaln_up_{branch} modulation projectors too. They sit in
-# the network's _DEFAULT_EXCLUDE; this rescues them via include_patterns (an
-# exclude-override, not a whitelist — the default attn+MLP set is untouched).
-# Matches diffusion-pipe (the Anima author's trainer), which targets every
-# Linear under Block. adaln_rank sets their rank (in-dim is 256, so r32 already
-# keeps ~98% of the ΔW energy); their alpha is DERIVED from the network's
-# rank/alpha by the √r law (network_alpha·√(adaln_rank/network_dim)) so α/√r
-# matches the attn+MLP modules whatever the method picks — set adaln_alpha to
-# override. Inert on the frozen-DiT methods (soft_tokens / easycontrol).
 train_adaln = true
 adaln_rank = 16
 
-# σ-demoted training — see docs/optimizations/sigma_lowres.md. Off by default;
-# flip THIS ONE BOOLEAN (or pass --sigma_lowres) to run the shipped **combo**
-# recipe spelled out in the keys below — the stacked router, unscheduled:
-#   768 if 0.65 < σ < 0.95;  elif σ > 0.5 → 896 (+yarnsig);  else native
-# Measured at E16 scale: −18.3% wall, inside the seed lottery on both corpora.
-# PREREQUISITE: both routes' sibling latents must exist on disk — set
-# `sigma_demote = "1024:896,1024:768"` in configs/preprocess.toml and run
-# `make preprocess` (or `make preprocess-demote`) first, else the deep route
-# silently falls through to the primary one (warn-once per rule).
-# Every key below is inert while sigma_lowres = false.
 sigma_lowres = false
-# Primary rule: 1024→896 on the σ>0.5 half-line. These two are already the
-# argparse defaults — spelled out so the whole active recipe reads in one place.
 sigma_lowres_route = "1024:896"
 sigma_lowres_threshold = 0.5
 sigma_lowres_span = "late:0.75"
-# Secondary rule, PRIORITY over the primary: 1024→768 inside its certified
-# WINDOW. Both bounds are mandatory (an unbounded rule 2 would shadow rule 1 at
-# every σ and silence yarnsig — train.py refuses that at setup, before model load).
 sigma_lowres_route2 = "1024:768"
 sigma_lowres_threshold2 = 0.65
 sigma_lowres_threshold2_max = 0.95
@@ -119,27 +62,13 @@ use_repa = false
 [[datasets]]
 batch_size = 1
 
-# validation_split = 0.025
 validation_split_num = 0
 validation_seed = 42
 
-# Kohya-style folder repeats: when true, images under a subfolder named
-# {n}_... (e.g. image_dataset/5_mychar/) are repeated n times per epoch
-# instead of num_repeats; 0_... drops the folder from training. Folder names
-# survive preprocessing (resize/caches mirror the source tree), so this
-# applies to the resized tree too. Training pool only. Kept at the dataset
-# level (subset-ascendable) so the GUI's [[datasets]] override can flip it.
 repeat_by_folder_name = false
 
   [[datasets.subsets]]
-  # Templates resolve against top-level path keys (source_image_dir,
-  # resized_image_dir, lora_cache_dir) at load time — see
-  # library.config.io.load_dataset_config_from_base.
   image_dir = '{resized_image_dir}'
   cache_dir = '{lora_cache_dir}'
   num_repeats = 1
-  # Walk subfolders under image_dir. Resized output and caches mirror the
-  # source subdir layout, but image stems must still be unique across the
-  # entire tree — the trainer enforces this and the matching preprocess
-  # scripts pass --recursive automatically.
   recursive = true
