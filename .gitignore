@@ -35,7 +35,8 @@ output_temp/
 results
 logs
 _logs/
-.claude
+.claude/*
+!.claude/skills/
 .env
 .anima-update-backups
 node.zip
