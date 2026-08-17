@@ -136,6 +136,10 @@ def cmd_soup(extra):
     (per-ingredient LRs, e.g. ``"1e-5,2e-5,4e-5"``, cycled) or
     ``LR_INTERVAL`` (``"1e-5:4e-5"``, geometric over NUM_SOUP points),
     ``RANK`` (default network_dim), ``PRESET``.
+    ``ARGS`` normally reaches the fine-tunes only; ``--sigma_lowres*`` is the
+    exception — it is a whole-pipeline data-routing knob, so it is replayed onto
+    the uncond run too and folded into that checkpoint's name (a sigma soup
+    can't reuse an init trained without it).
     Submitted as ONE daemon command job — the pipeline runs train.py
     subprocesses directly (nested daemon submission would deadlock the serial
     queue).

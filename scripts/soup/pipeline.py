@@ -38,7 +38,9 @@ explicit ``--name``).
 Runs ``train.py`` as direct subprocesses (single daemon command job — never
 submit nested daemon jobs from here; that deadlocks the serial queue).
 Unknown CLI args are forwarded to the fine-tune runs (that's how
-``make soup ARGS="--network_dim 32"`` reaches Phase 2).
+``make soup ARGS="--network_dim 32"`` reaches Phase 2). The ``--sigma_lowres*``
+family is the one exception: it is a whole-pipeline data-routing knob, so it is
+*also* replayed onto Phase 1 and folded into the uncond checkpoint name.
 """
 
 from __future__ import annotations
@@ -60,6 +62,23 @@ UNCOND_SEED = 1000  # fixed: the uncond init is a shared, reusable artifact
 
 
 _DEFAULT_CONFIG = ROOT / "configs" / "soup" / "soup.toml"
+
+# The σ-demote routing surface (library/config/cli_args.py). These change what
+# the uncond weights become, so they are both forwarded to Phase 1 and folded
+# into its checkpoint name — see sigma_settings() / sigma_argv() / uncond_name().
+_SIGMA_FLOAT_KEYS = (
+    "sigma_lowres_threshold",
+    "sigma_lowres_threshold_max",
+    "sigma_lowres_threshold2",
+    "sigma_lowres_threshold2_max",
+)
+_SIGMA_STR_KEYS = (
+    "sigma_lowres_route",
+    "sigma_lowres_route2",
+    "sigma_lowres_span",
+    "sigma_lowres_span2",
+)
+_YARNSIG_DEFAULT = "1,4,0.35,2"  # train.py's --sigma_lowres_yarnsig const
 
 
 def _resolve_config(argv: list[str]) -> Path:
@@ -245,11 +264,94 @@ def resolve_lrs(num: int, pool: str | None, interval: str | None) -> list[float]
     return None
 
 
-def uncond_name(pool: str, ratio: float, epochs: int) -> str:
-    """Deterministic uncond checkpoint name — same pool+dose → same artifact."""
+def sigma_overrides(extra: list[str]) -> dict:
+    """The ``--sigma_lowres*`` flags present in ARGS, as a dict.
+
+    Absent flags are *omitted* rather than defaulted (``argparse.SUPPRESS``), so
+    the result overlays the method config without clobbering it with argparse
+    defaults. Needed because ARGS reaches only the fine-tunes — Phase 1 has to
+    be handed the same routing explicitly (:func:`sigma_argv`)."""
+    # allow_abbrev=False: ARGS is full of flags we don't model, and prefix
+    # matching would let one of them be claimed as a sigma flag.
+    ap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    sup = argparse.SUPPRESS
+    ap.add_argument("--sigma_lowres", action="store_true", default=sup)
+    ap.add_argument(
+        "--sigma_lowres_yarnsig", nargs="?", const=_YARNSIG_DEFAULT, default=sup
+    )
+    for k in _SIGMA_FLOAT_KEYS:
+        ap.add_argument(f"--{k}", type=float, default=sup)
+    for k in _SIGMA_STR_KEYS:
+        ap.add_argument(f"--{k}", default=sup)
+    known, _ = ap.parse_known_args(extra)
+    return vars(known)
+
+
+def sigma_settings(merged: dict, overrides: dict | None = None) -> dict:
+    """The σ-demote routing the uncond run will actually train under: the merged
+    method config overlaid with :func:`sigma_overrides`. ``{}`` when
+    ``sigma_lowres`` is off — so a soup without it keeps the pre-existing uncond
+    names untouched.
+
+    Values that are ``None``/``""`` are dropped from both sources: an empty
+    string is how a span is switched off, and train.py reads that identically to
+    an absent key, so the two must not fork the name digest."""
+    overrides = overrides or {}
+    cfg: dict = {}
+    for k in ("sigma_lowres", "sigma_lowres_yarnsig", *_SIGMA_STR_KEYS):
+        v = overrides[k] if k in overrides else merged.get(k)
+        if v is None or v == "":
+            continue
+        cfg[k] = v
+    for k in _SIGMA_FLOAT_KEYS:
+        v = overrides[k] if k in overrides else merged.get(k)
+        if v is None or v == "":
+            continue
+        cfg[k] = float(v)  # a TOML int and a CLI float must digest the same
+    if not cfg.get("sigma_lowres"):
+        return {}
+    # train.py turns yarnsig on at its operating point whenever --sigma_lowres is
+    # set, so normalize that implicit default in — an explicit config copy of the
+    # same value must not fork the name.
+    cfg.setdefault("sigma_lowres_yarnsig", _YARNSIG_DEFAULT)
+    return cfg
+
+
+def sigma_argv(cfg: dict, merged: dict | None = None) -> list[str]:
+    """``cfg`` rendered as train.py flags for the Phase-1 uncond run. Passing
+    them explicitly (even when they only restate the method config) also makes
+    the uncond snapshot self-describing.
+
+    Phase 1 merges the same method config, so a key ARGS switched **off** has to
+    be cleared explicitly — dropping the flag would leave the config's value
+    live (the ``--artists_shard ""`` trick, same reason)."""
+    if not cfg:
+        return []
+    argv = ["--sigma_lowres"]
+    for k in sorted(cfg):
+        if k != "sigma_lowres":
+            argv += [f"--{k}", f"{cfg[k]}"]
+    for k in sorted((*_SIGMA_STR_KEYS, "sigma_lowres_yarnsig")):
+        if k not in cfg and (merged or {}).get(k):
+            argv += [f"--{k}", ""]
+    return argv
+
+
+def uncond_name(pool: str, ratio: float, epochs: int, sigma: dict | None = None) -> str:
+    """Deterministic uncond checkpoint name — same pool+dose → same artifact.
+
+    ``sigma`` is the σ-demote routing the uncond run trains under (from
+    :func:`sigma_settings`). It changes what the uncond weights *become*, so a
+    non-empty one is folded in as an ``_sl<digest>`` tag: a sigma_lowres soup
+    then can't silently reuse an init trained without it, nor vice versa. Empty
+    / ``None`` (the default, sigma_lowres off) → the name is unchanged."""
     digest = hashlib.sha1(pool.encode()).hexdigest()[:8]
     ratio_tag = f"{ratio:g}".replace(".", "p")
-    return f"anima_uncond_{digest}_r{ratio_tag}_e{epochs}"
+    name = f"anima_uncond_{digest}_r{ratio_tag}_e{epochs}"
+    if sigma:
+        payload = ";".join(f"{k}={sigma[k]}" for k in sorted(sigma))
+        name += "_sl" + hashlib.sha1(payload.encode()).hexdigest()[:6]
+    return name
 
 
 def resolve_uncond_init(ref: str) -> Path:
@@ -408,12 +510,24 @@ def main() -> None:
             "(the pipeline sets a per-ingredient LR). Drop one."
         )
 
+    # The merged method config, resolved once: the σ-demote routing Phase 1 must
+    # replay (ARGS only reaches Phase 2) and the Phase-3 SVD rank both read it.
+    from library.config.io import load_method_preset  # torch-free, ~0.1s
+
+    merged = load_method_preset(
+        args.method, args.preset, methods_subdir=methods_subdir or "methods"
+    )
+    sigma = sigma_settings(merged, sigma_overrides(ft_extra))
+    sigma_flags = sigma_argv(sigma, merged)
+
     ckpt_dir = ROOT / "output" / "ckpt"
     name = args.name or (
         slug_for_shard(shard) if shard else slug_for_pattern(args.path_pattern)
     )
     pool = pool_glob(args.pool_path_pattern, args.path_pattern)
     print(f"[soup] fine-tune pattern {args.path_pattern!r} -> slug {name!r}")
+    if sigma:
+        print(f"[soup] sigma_lowres ON for both phases: {' '.join(sigma_flags)}")
     # Both phases get the expanded glob, so any artists_shard living in the
     # method config must be switched OFF — train.py refuses to see both.
     no_shard = ["--artists_shard", ""]
@@ -430,7 +544,7 @@ def main() -> None:
             )
         print(f"[soup] phase 1: using pinned uncond init {uncond_path}")
     else:
-        uncond = uncond_name(pool, args.uncond_ratio, args.uncond_epochs)
+        uncond = uncond_name(pool, args.uncond_ratio, args.uncond_epochs, sigma)
         uncond_path = ckpt_dir / f"{uncond}.safetensors"
         if uncond_path.exists():
             print(f"[soup] phase 1: reusing existing uncond init {uncond_path}")
@@ -443,6 +557,7 @@ def main() -> None:
                     methods_subdir=methods_subdir,
                     extra=[
                         *no_shard,
+                        *sigma_flags,
                         "--path_pattern",
                         pool,
                         "--caption_dropout_rate",
@@ -496,16 +611,7 @@ def main() -> None:
         )
 
     # Phase 3 — ΔW soup, SVD-truncated back to the single-adapter rank.
-    if args.rank is not None:
-        rank = args.rank
-    else:
-        from library.config.io import load_method_preset
-
-        rank = int(
-            load_method_preset(
-                args.method, args.preset, methods_subdir=methods_subdir or "methods"
-            ).get("network_dim", 16)
-        )
+    rank = args.rank if args.rank is not None else int(merged.get("network_dim", 16))
     soup_path = ckpt_dir / f"anima_soup_{name}.safetensors"
     print(f"[soup] phase 3: rank-{rank} SVD soup of {len(ingredients)} -> {soup_path}")
     if args.dry_run:
