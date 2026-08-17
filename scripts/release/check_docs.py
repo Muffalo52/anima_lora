@@ -121,10 +121,15 @@ Issue = namedtuple("Issue", "level path line kind token message")
 def _git(*args: str) -> str:
     # ``core.quotepath=false`` keeps non-ASCII paths (translated guidebooks)
     # as raw UTF-8, not C-style escapes — else they're unopenable + skipped.
+    # Decoding is pinned to UTF-8 for the same reason: `text=True` alone uses the
+    # locale encoding, so on a non-UTF-8 Windows box (cp949, cp932 …) those very
+    # paths raise UnicodeDecodeError inside the reader thread — which surfaces
+    # only as a `None` stdout here, i.e. an AttributeError far from the cause.
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), "-c", "core.quotepath=false", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     ).stdout
 
@@ -201,6 +206,13 @@ def _check_path(tok: str, top: set[str], base: Path | None = None) -> str | None
     """
     tok = tok.strip().rstrip(".")
     if not tok or tok.startswith(("http", "..", "/", "~", "mailto")):
+        return None
+    # ``_archive/`` is retired material: docs cite it as provenance ("the design
+    # lives at _archive/proposals/x.md"), and the archive is pruned on its own
+    # schedule. A dangling archive citation is history, not drift — never an
+    # ERROR. Archived docs are already excluded as *sources* (`doc_files`); this
+    # is the same call applied to them as *targets*.
+    if tok.startswith("_archive/"):
         return None
     if "/" not in tok and "." not in tok:
         return None
