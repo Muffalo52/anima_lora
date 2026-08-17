@@ -71,6 +71,32 @@ STRINGS: dict[str, str] = {
         "直到首个 @artist 标记之前的标签 (含该标记) 永不丢弃。"
         "当随机变体数 ≤ 0 时忽略。"
     ),
+    "preprocess_caption_autotag_box": "自动打标",
+    "preprocess_caption_autotag": "使用 Anima Tagger 自动打标",
+    "preprocess_caption_autotag_tip": (
+        "对数据集运行 Anima Tagger 并写出 .txt 标注。该步骤在缩放之后"
+        "最先运行 —— 因为下面「标注改写」中的每一步都会编辑这一阶段刚刚"
+        "生成的标注。这是 GPU 步骤 —— 会给数据集额外跑一遍打标器，检查点"
+        "会在首次运行时自动下载。若想在写入前先审阅标注，请先运行 "
+        "`make caption-autotag` 生成试运行报告。"
+    ),
+    "preprocess_caption_autotag_mode": "模式",
+    "preprocess_caption_autotag_mode_missing": "仅无标注的图像",
+    "preprocess_caption_autotag_mode_merge": "合并到现有标注",
+    "preprocess_caption_autotag_mode_overwrite": "覆盖全部标注",
+    "preprocess_caption_autotag_mode_tip": (
+        "仅无标注的图像: 只为没有 .txt sidecar 的图像打标，完全不改动现有"
+        "标注 —— 安全默认值。\n"
+        "合并到现有标注: 为全部图像打标，但只追加标注中缺失的标签；位置子句"
+        "及其标签会被保留。\n"
+        "覆盖全部标注: 用打标器的输出替换每一条标注。这会丢弃手写标注。"
+    ),
+    "preprocess_caption_autotag_min_confidence": "置信度阈值",
+    "preprocess_caption_autotag_min_confidence_tip": (
+        "在打标器自身的每标签阈值之上额外施加的概率下限 —— 低于此值的标签会被"
+        "丢弃。0 (默认) 保持打标器的校准判断不变；调高该值会减少标签数量、"
+        "使结果更保守。评级始终会被输出，不受此值影响。"
+    ),
     "preprocess_caption_editing": "标注改写",
     "preprocess_caption_position_clauses": "位置子句 (多人物)",
     "preprocess_caption_position_clauses_tip": (

@@ -72,6 +72,36 @@ STRINGS: dict[str, str] = {
         "最初の @artist マーカー以前のタグはドロップされません。"
         "シャッフルバリアント ≤ 0 の場合は無視されます。"
     ),
+    "preprocess_caption_autotag_box": "自動タグ付け",
+    "preprocess_caption_autotag": "Anima Tagger で自動タグ付け",
+    "preprocess_caption_autotag_tip": (
+        "データセット全体に Anima Tagger を実行し、.txt キャプションを書き出します。"
+        "リサイズ直後、最初に実行されます — 下の「キャプション編集」の各ステップは、"
+        "このステージが直前に作成したかもしれないキャプションを編集するためです。"
+        "GPU ステージです — タガーのパスがデータセットに対して1回追加され、"
+        "チェックポイントは初回実行時に自動でダウンロードされます。書き込む前に"
+        "キャプションを確認したい場合は、まず `make caption-autotag` でドライラン "
+        "レポートを出してください。"
+    ),
+    "preprocess_caption_autotag_mode": "モード",
+    "preprocess_caption_autotag_mode_missing": "キャプションのない画像のみ",
+    "preprocess_caption_autotag_mode_merge": "既存キャプションにマージ",
+    "preprocess_caption_autotag_mode_overwrite": "全キャプションを上書き",
+    "preprocess_caption_autotag_mode_tip": (
+        "キャプションのない画像のみ: .txt サイドカーがない画像だけをタグ付けし、"
+        "既存のキャプションには一切手を加えません — 安全なデフォルトです。\n"
+        "既存キャプションにマージ: 全画像をタグ付けしますが、キャプションに"
+        "ないタグのみを追加します。位置節とそのタグは保持されます。\n"
+        "全キャプションを上書き: すべてのキャプションをタガーの出力で置き換えます。"
+        "手書きのキャプションは失われます。"
+    ),
+    "preprocess_caption_autotag_min_confidence": "信頼度しきい値",
+    "preprocess_caption_autotag_min_confidence_tip": (
+        "タガー自体のタグごとのしきい値に加えて適用される、追加の確率下限です — "
+        "これを下回るタグは破棄されます。0 (デフォルト) はタガーの較正済みの"
+        "判断をそのまま使います。値を上げるとタグ数は減り、より安全になります。"
+        "レーティングはこの値に関わらず常に出力されます。"
+    ),
     "preprocess_caption_editing": "キャプション編集",
     "preprocess_caption_position_clauses": "位置節の生成 (複数被写体)",
     "preprocess_caption_position_clauses_tip": (

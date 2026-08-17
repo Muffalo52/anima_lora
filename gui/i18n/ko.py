@@ -69,6 +69,35 @@ STRINGS: dict[str, str] = {
         "첫 번째 @artist 마커까지의 태그는 절대 드롭되지 않습니다. "
         "셔플 변형 수가 0 이하이면 무시됩니다."
     ),
+    "preprocess_caption_autotag_box": "자동 태깅",
+    "preprocess_caption_autotag": "Anima Tagger로 자동 태깅",
+    "preprocess_caption_autotag_tip": (
+        "데이터셋 전체에 Anima Tagger를 돌려 .txt 캡션을 생성합니다. 리사이즈 "
+        "직후 가장 먼저 실행됩니다 — 아래 '캡션 편집'의 모든 단계는 이 단계가 "
+        "방금 만들었을 수도 있는 캡션을 편집하기 때문입니다. GPU 단계입니다 — "
+        "태거 패스가 한 번 더 돌아가며, 체크포인트는 처음 실행할 때 자동으로 "
+        "내려받습니다. 쓰기 전에 캡션을 검토하려면 먼저 "
+        "`make caption-autotag`으로 드라이런 리포트를 뽑으세요."
+    ),
+    "preprocess_caption_autotag_mode": "모드",
+    "preprocess_caption_autotag_mode_missing": "캡션 없는 이미지만",
+    "preprocess_caption_autotag_mode_merge": "기존 캡션에 병합",
+    "preprocess_caption_autotag_mode_overwrite": "전체 덮어쓰기",
+    "preprocess_caption_autotag_mode_tip": (
+        "캡션 없는 이미지만: .txt 사이드카가 없는 이미지만 태깅하고 기존 "
+        "캡션은 전혀 건드리지 않습니다 — 안전한 기본값입니다.\n"
+        "기존 캡션에 병합: 전부 태깅하되 캡션에 없는 태그만 덧붙입니다. "
+        "위치 절과 그 안의 태그는 그대로 보존됩니다.\n"
+        "전체 덮어쓰기: 모든 캡션을 태거 출력으로 교체합니다. 손으로 쓴 "
+        "캡션이 사라집니다."
+    ),
+    "preprocess_caption_autotag_min_confidence": "신뢰도 임계값",
+    "preprocess_caption_autotag_min_confidence_tip": (
+        "태거 자체의 태그별 임계값 위에 추가로 적용되는 확률 하한입니다 — "
+        "이 값보다 낮은 태그는 버려집니다. 0(기본값)이면 태거의 보정된 판단을 "
+        "그대로 씁니다. 값을 올리면 태그 수는 줄고 더 안전해집니다. "
+        "레이팅은 이 값과 무관하게 항상 출력됩니다."
+    ),
     "preprocess_caption_editing": "캡션 편집",
     "preprocess_caption_position_clauses": "위치 절 생성 (다중 인물)",
     "preprocess_caption_position_clauses_tip": (
