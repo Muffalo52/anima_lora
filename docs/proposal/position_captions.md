@@ -1,8 +1,14 @@
 # Position-aware captions — natural caption enhance → smart caption rewrite
 
-Status: **PROPOSAL — Phase 0 (feasibility probes) DONE, both green.** Probes +
-result envelopes live in `bench/position_captions/` (runs `20260817-1122
--autocaption`, `20260817-1123-binding`). No production code written yet.
+Status: **Phase 0 DONE (both probes green) — Phase 1 (v1) IMPLEMENTED and
+shipped as `make caption-position`.** Probes + result envelopes live in
+`bench/position_captions/` (runs `20260817-1122-autocaption`,
+`20260817-1123-binding`). v1 code: `library/captioning/position_clauses.py`
+(clause grammar), `library/preprocess/position_captions.py` (pipeline),
+`scripts/preprocess/position_captions.py` (CLI), tests in
+`tests/test_position_captions.py`. Dry-run is the default; **nothing has been
+applied to the caption master yet** — that is the remaining Phase 1 gate
+(spot-check the dry-run report, then `--apply`).
 
 ## TL;DR
 
@@ -82,32 +88,79 @@ girls-count tag > 1; skip any caption that already contains `On the `):
    multiple-views sheets are often 2×2, and pure x-ordering interleaves rows.
 3. **Crop + blank**: padded bbox crop (6%), non-instance pixels blanked to
    white using the instance mask (the probe-B contamination fix).
-4. **Tag**: Anima Tagger per crop. Clause tags = character name (only if kept
-   with high confidence — probe B says names are weak), hair-color group
-   winner (fall back to top kept hair tag — the group is `softmax_when_solo`
-   and stays silent on multi-person crops), eye color, hair-shape tags,
-   outfit tags. Cap ~8 tags/clause.
+4. **Tag**: Anima Tagger per crop. Clause tags, in emission order: character
+   name (must clear `--name_confidence` **and** appear in the flat bag, unless
+   `--allow_unlisted_names` — probe B scored names 4/7, so an unlisted name is
+   most likely a crop artifact), then the exclusive-group winners
+   (`hair_color`, `eye_color`, `hair_length`, `hairstyle` — these are
+   `softmax_when_solo`, and a single-subject crop is exactly the condition
+   under which they fire), then everything else ranked, preferring tags the
+   caption already curated. Cap 8 tags/clause (`--max_clause_tags`).
+
+   Which tags are *eligible* comes from the tagger's own `groups.yaml`
+   (`SUBJECT_GROUPS`), not substring heuristics: a tag in a per-subject group
+   (hair / clothing / expression / pose / …) binds; a tag in a scene group
+   (lighting, background, framing, medium, `interaction`,
+   `character_relationship`) never does. Copyright / artist / metadata /
+   count / rating tags are excluded outright. Ungrouped tags — where the
+   curated compounds like `pink jacket` live — are admitted only when they are
+   both **in the flat bag** and **attributable** (kept on exactly one crop).
+   At most one member of an exclusive group per clause, so a crop that keeps
+   two hair colors can't emit `green hair, …, aqua hair` for one subject.
+
+   **A clause carries only what tells its subject apart.** Any tag *every*
+   crop keeps is suppressed (`--keep_shared_tags` disables). On a `1girl,
+   multiple views` outfit sheet all four views are the same character with the
+   same hair and eyes; repeating `hatsune miku, aqua hair, twintails` four
+   times binds nothing and crowds out the maid / bunny / bikini that actually
+   distinguishes them. Those shared attributes are already in the flat bag —
+   v1 is additive and never removes anything — so nothing is lost. When
+   suppression empties every clause the image is skipped
+   (`skip:no-discriminative-tags`): the subjects are genuinely
+   indistinguishable to the tagger and there is nothing to ground.
 5. **Append**: `<flat caption>. On the left, <tags>. On the right, <tags>.`
-   Written to the caption master (`image_dataset/*.txt`) and mirrored to
-   `post_image_dataset/resized/*.txt` the same way existing caption tooling
-   does.
+   Written to the caption master (`image_dataset/*.txt`); `make
+   preprocess-captions` mirrors it into `post_image_dataset/resized/*.txt` the
+   same way existing caption tooling does.
 
 Gate on **detected** count ≥ 2. If detection and the girls-count tag disagree
 after the retry pass (probe-B: 2/13), *skip and log* — never write clauses we
-can't ground.
+can't ground (`--no_strict_count` overrides). A `multiple views` caption
+deliberately has **no** expected count: the girls-count tags how many
+characters are drawn, while each view is its own bindable subject, so gating
+`1girl, multiple views` on the count tag would skip every outfit sheet.
 
 **Ops sequencing (both are silent-failure traps):** caption edits do NOT
-invalidate TE caches — the run must end with an explicit `make preprocess-te`;
-and `*.variants.txt` tag-dropout sidecars OVERRIDE the CLI rate, so variants
-must be regenerated after the rewrite (decision needed on clause dropout
-semantics — see open questions).
+invalidate TE caches — an `--apply` run must be followed by an explicit `make
+preprocess-te` (the script prints this); and `*.variants.txt` tag-dropout
+sidecars OVERRIDE the CLI rate, so variants must be regenerated after the
+rewrite. `preprocess-te` chains `preprocess-captions` and does both.
 
-**Code layout** (per the layering contract): orchestration in
-`library/preprocess/position_captions.py`, thin argparse shell
-`scripts/preprocess/position_captions.py`, `make caption-position` target,
-daemon-routed (GPU: SAM3 + tagger). `--dry-run` is the default: emit a review
-artifact (proposed clause per image + crops) without writing any caption;
-`--apply` writes.
+**Clause-shredding fix (shipped alongside v1).** The convention delimits
+clauses with `.` and tags with `,`, so the caption's *comma* split glues the
+header onto the previous tag (`"white socks. On the left"`). Every consumer
+keying off `tag.startswith("On the ")` — `anima_smart_shuffle_caption`'s
+section logic, the identity-randomize guard — therefore saw **no sections at
+all**, and the shuffled variants scattered clause attributes across the whole
+caption and reassigned them to the wrong subject. Verified on the 12
+hand-written ground-truth captions before the fix. `library.captioning.
+position_clauses` is now the single clause grammar; `generate_caption_variants`
+parses through it and treats **each clause as an atomic unit** (kept or dropped
+whole at `clause_dropout_rate`, defaulting to `tag_dropout_rate`, shuffled
+inside), and `correct_caption` splits clauses off before bucket-reordering the
+flat bag. Without this, v1's clauses would have been shredded in 3 of the 4
+default caption variants.
+
+**Code layout** (per the layering contract): clause grammar in
+`library/captioning/position_clauses.py` (torch-free, shared by the variant
+generator / order-correction / pipeline), orchestration in
+`library/preprocess/position_captions.py` (models injected as `detect_fn` /
+`tag_fn`, so it imports neither SAM3 nor the tagger and unit-tests with stubs),
+thin argparse shell `scripts/preprocess/position_captions.py`, `make
+caption-position` target, daemon-routed (GPU: SAM3 + tagger). Dry run is the
+default: `report.json` (proposed clause + per-instance boxes/scores/tags per
+image, plus a token-budget column with `--qwen3`) and, with `--crops`, the
+exact mask-blanked pixels the tagger saw; `--apply` writes.
 
 ## Feature 2 — smart caption rewrite (v2)
 
@@ -130,11 +183,21 @@ A/B (Phase 3), never as a default until the A/B clears.
 ## Phases
 
 - **Phase 0 — probes: DONE** (numbers above).
-- **Phase 1 — v1 implementation + dry-run sweep**: build the pipeline, run
-  `--dry-run` over all ~600 candidates, spot-check ~30 proposed clauses
-  (weighted toward grids, overlapping pairs, N≥4). Exit: clause proposals
-  look right at ≥90% on the spot-check; count-disagreement skip rate
-  reported.
+- **Phase 1 — v1 implementation + dry-run sweep: IMPLEMENTED, sweep run,
+  spot-check pending.** Pipeline built + tested (40 unit tests); the
+  clause-shredding fix landed alongside. Remaining exit criterion: spot-check
+  ~30 proposed clauses from `post_image_dataset/captions/position/report.json`
+  (weighted toward grids, overlapping pairs, N≥4) against the exported crops —
+  clause proposals right at ≥90%, count-disagreement skip rate reported. **No
+  `--apply` yet.**
+
+  Run it:
+
+  ```
+  make caption-position ARGS="--crops --qwen3 models/text_encoders/qwen_3_06b_base.safetensors"
+  make caption-position ARGS="--apply"   # after the spot-check
+  make preprocess-te                     # REQUIRED after --apply
+  ```
 - **Phase 2 — apply + train A/B**: `--apply`, regenerate variants + TE
   caches, train the standard LoRA recipe on a multi-girl-dense slice, twin
   control on unmodified captions (same seed — mind the paired-ΔW chaos
@@ -144,17 +207,37 @@ A/B (Phase 3), never as a default until the A/B clears.
   single-girl renders.
 - **Phase 3 — v2 behind `--rewrite`**: same A/B protocol, v2 vs v1 corpus.
 
-## Open questions
+## Open questions — resolved in v1
 
-1. **TE token budget**: appended clauses lengthen captions; verify the long
-   tail stays inside the text-encoder `max_length` (the padding invariant
-   means overflow truncates silently — count tokens in the dry-run report).
-2. **Clause dropout semantics** in `variants.txt`: drop the whole clause as a
-   unit (recommended — a positionless attribute fragment is exactly the
-   ambiguity we're removing), or never drop clauses?
-3. **Character names in clauses**: include only above a confidence floor, or
-   leave names to the flat bag entirely (probe B: 4/7)?
-4. **Boys/POV**: prompt is `girl` only, matching the hand-written convention.
-   Extend to `person` for the rare on-screen-boy image, or leave out of v1?
-5. **Vertical layouts**: row-clustering covers grids; tall single-column
-   stacks (rare) would need `top/bottom` vocabulary — punt until seen.
+1. **TE token budget** — *instrumented*. `--qwen3 <tokenizer>` adds a token
+   count per proposal; the report's `summary.max_tokens` /
+   `over_token_budget` flag anything past 512 (the `qwen3_max_token_length` /
+   `t5_max_token_length` default), which the padding invariant would truncate
+   silently. Read it off the dry-run report before applying.
+2. **Clause dropout semantics** — *whole clause, as recommended*. A clause is
+   kept or dropped as a unit at `clause_dropout_rate` (defaults to
+   `tag_dropout_rate`), tags shuffled inside, header never randomized. Per-tag
+   dropout inside a clause would leave a half-described position.
+3. **Character names in clauses** — *both floors, conjunctively*. A name needs
+   `--name_confidence` (0.5) **and** membership in the flat bag; one identity
+   per subject. `--allow_unlisted_names` relaxes the second. In practice the
+   discriminative rule also drops the name on single-character `multiple
+   views` sheets, where it is the same in every clause anyway.
+4. **Boys/POV** — *left out of v1, but not hardcoded*: `--prompt` defaults to
+   `girl`, matching the hand-written convention. Pass `--prompt person` to
+   sweep the rare on-screen-boy images separately.
+5. **Vertical layouts** — *covered*. Rows are clustered before ordering, so a
+   grid gets `top left / top right / bottom left / bottom right` and a
+   single-subject row gets the bare row word (`On the top, …`). Up to 3 rows
+   (`top/middle/bottom`); beyond that it degrades to plain left→right.
+
+## Remaining open questions (Phase 2+)
+
+1. **Does hair *length* survive cropping?** `long hair` vs `medium hair` on
+   two views of the same character is crop-scale dependent, and `hair_length`
+   is in the priority group list. The discriminative rule masks most of it
+   (shared → suppressed), but a scale artifact that differs between views will
+   bind. Worth a look in the spot-check.
+2. **v2 (`--rewrite`) bag-removal tolerance** — unchanged from below: probe A
+   validated clause *comprehension*, not bag-*removal*, so it stays
+   phase-gated on the Phase 3 A/B.
