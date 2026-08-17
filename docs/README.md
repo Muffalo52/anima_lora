@@ -48,6 +48,7 @@ Wired and runnable, but not part of the default stack — may break or change.
 | [experimental/directedit_editing_v3.md](experimental/directedit_editing_v3.md) | DirectEdit (v3) — flow-inversion image editing; what's actually wired and runnable |
 | [experimental/anima_tagger.md](experimental/anima_tagger.md) | Anima Tagger — multi-label tagger emitting Anima-format tag strings (DirectEdit ψ_src source) |
 | [experimental/vr_loss.md](experimental/vr_loss.md) | Variance-reduced FM loss — AsymFlow §5.2 control-variate correction at the loss level |
+| [experimental/position_captions.md](experimental/position_captions.md) | Position-aware captions — SAM3 + tagger append `On the left, …` clauses to multi-subject captions |
 
 ## Structure
 

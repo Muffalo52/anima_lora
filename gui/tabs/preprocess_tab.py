@@ -118,6 +118,7 @@ DEFAULT_CAPTION_CORRECT_ORDER = False
 DEFAULT_CAPTION_INSERT_NO_ARTIST = False
 DEFAULT_CAPTION_TRIGGER_WORD = ""
 DEFAULT_CAPTION_TRIGGER_AT_FRONT = False
+DEFAULT_CAPTION_POSITION_CLAUSES = False
 DEFAULT_SAM_PROMPTS = ("speech bubble", "text bubble")
 DEFAULT_SAM_THRESHOLD = 0.5
 DEFAULT_SAM_DILATE = 5
@@ -144,6 +145,7 @@ _GUI_PREPROCESS_KEYS = {
     "caption_insert_no_artist",
     "caption_trigger_word",
     "caption_trigger_at_front",
+    "caption_position_clauses",
     "run_sam_mask",
     "run_mit_mask",
     "mask_path_pattern",
@@ -671,6 +673,16 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.dropout_edit,
         )
 
+        text_box.setLayout(text_form)
+        form_layout.addWidget(text_box)
+
+        # Caption rewriting — the knobs that edit the caption *text* before it is
+        # encoded, split out of the text-caching box (which owns the variant /
+        # dropout knobs). Order follows the pipeline: position clauses rewrite the
+        # caption master first, then correction reorders + slots the trigger word.
+        caption_box = QGroupBox(t("preprocess_caption_editing"))
+        caption_form = QFormLayout()
+
         self.caption_correct_order_chk = QCheckBox(
             t("preprocess_caption_correct_order")
         )
@@ -678,7 +690,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_correct_order_tip")
         )
         self.caption_correct_order_chk.setChecked(DEFAULT_CAPTION_CORRECT_ORDER)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_correct_order",
                 t("preprocess_caption_correct_order"),
@@ -693,7 +705,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_insert_no_artist_tip")
         )
         self.caption_insert_no_artist_chk.setChecked(DEFAULT_CAPTION_INSERT_NO_ARTIST)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_insert_no_artist",
                 t("preprocess_caption_insert_no_artist"),
@@ -706,7 +718,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self.caption_trigger_word_edit.setToolTip(
             t("preprocess_caption_trigger_word_tip")
         )
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_trigger_word",
                 t("preprocess_caption_trigger_word"),
@@ -721,15 +733,34 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_trigger_at_front_tip")
         )
         self.caption_trigger_at_front_chk.setChecked(DEFAULT_CAPTION_TRIGGER_AT_FRONT)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_trigger_at_front",
                 t("preprocess_caption_trigger_at_front"),
             ),
             self.caption_trigger_at_front_chk,
         )
-        text_box.setLayout(text_form)
-        form_layout.addWidget(text_box)
+
+        # Position clauses. Unlike its neighbours this is a GPU stage (SAM3 +
+        # the tagger) that rewrites the caption master in place, so it is off by
+        # default and the tooltip says both.
+        self.caption_position_clauses_chk = QCheckBox(
+            t("preprocess_caption_position_clauses")
+        )
+        self.caption_position_clauses_chk.setToolTip(
+            t("preprocess_caption_position_clauses_tip")
+        )
+        self.caption_position_clauses_chk.setChecked(DEFAULT_CAPTION_POSITION_CLAUSES)
+        caption_form.addRow(
+            self._field_label(
+                "caption_position_clauses",
+                t("preprocess_caption_position_clauses"),
+            ),
+            self.caption_position_clauses_chk,
+        )
+
+        caption_box.setLayout(caption_form)
+        form_layout.addWidget(caption_box)
 
         sam_box = QGroupBox(t("preprocess_masking_sam"))
         sam_outer = QVBoxLayout()
@@ -938,6 +969,9 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         caption_trigger_at_front = meta.get(
             "caption_trigger_at_front", DEFAULT_CAPTION_TRIGGER_AT_FRONT
         )
+        caption_position_clauses = meta.get(
+            "caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES
+        )
         run_sam_mask = meta.get(
             "run_sam_mask",
             settings.get("run_sam_mask", DEFAULT_RUN_SAM_MASK),
@@ -981,6 +1015,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.caption_insert_no_artist_chk.setChecked(bool(caption_insert_no_artist))
             self.caption_trigger_word_edit.setText(str(caption_trigger_word or ""))
             self.caption_trigger_at_front_chk.setChecked(bool(caption_trigger_at_front))
+            self.caption_position_clauses_chk.setChecked(bool(caption_position_clauses))
             self.run_sam_mask_chk.setChecked(bool(run_sam_mask))
             self.mask_path_pattern_edit.setText(str(mask_path_pattern or "*"))
             self._set_rule_cards(mask_rules)
@@ -1090,6 +1125,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.caption_insert_no_artist_chk,
             self.caption_trigger_word_edit,
             self.caption_trigger_at_front_chk,
+            self.caption_position_clauses_chk,
             self.run_sam_mask_chk,
             self.mask_path_pattern_edit,
             self.run_mit_mask_chk,
@@ -1379,6 +1415,11 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "CAPTION_TRIGGER_AT_FRONT": (
                 "1" if self.caption_trigger_at_front_chk.isChecked() else "0"
             ),
+            # Gates the SAM3 + tagger stage tasks.py chains before the caption /
+            # TE steps (it rewrites the caption master those two then read).
+            "CAPTION_POSITION_CLAUSES": (
+                "1" if self.caption_position_clauses_chk.isChecked() else "0"
+            ),
             "PREPROCESS_PATH_PATTERN": (
                 self.preprocess_path_pattern_edit.text().strip()
                 or DEFAULT_PREPROCESS_PATH_PATTERN
@@ -1400,6 +1441,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "caption_insert_no_artist": self.caption_insert_no_artist_chk.isChecked(),
             "caption_trigger_word": self.caption_trigger_word_edit.text().strip(),
             "caption_trigger_at_front": self.caption_trigger_at_front_chk.isChecked(),
+            "caption_position_clauses": self.caption_position_clauses_chk.isChecked(),
         }
 
     def preprocess_config_snapshot(self) -> dict[str, object]:
@@ -1600,6 +1642,12 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             meta.pop("caption_trigger_at_front", None)
         else:
             meta["caption_trigger_at_front"] = trigger_at_front
+
+        position_clauses = self.caption_position_clauses_chk.isChecked()
+        if position_clauses == DEFAULT_CAPTION_POSITION_CLAUSES:
+            meta.pop("caption_position_clauses", None)
+        else:
+            meta["caption_position_clauses"] = position_clauses
 
         if include_mask:
             mask_path_pattern = (

@@ -6,9 +6,13 @@ shipped as `make caption-position`.** Probes + result envelopes live in
 `20260817-1123-binding`). v1 code: `library/captioning/position_clauses.py`
 (clause grammar), `library/preprocess/position_captions.py` (pipeline),
 `scripts/preprocess/position_captions.py` (CLI), tests in
-`tests/test_position_captions.py`. Dry-run is the default; **nothing has been
-applied to the caption master yet** — that is the remaining Phase 1 gate
-(spot-check the dry-run report, then `--apply`).
+`tests/test_position_captions.py`. Dry-run is the default on the CLI;
+**nothing has been applied to the caption master yet** — that is the remaining
+Phase 1 gate (spot-check the dry-run report, then `--apply`). Since then the
+pass has also been wired as an opt-in preprocess stage
+(`caption_position_clauses`, GUI Preprocessing tab → 캡션 편집 box, off by
+default) which applies inline; ops contract in
+[`docs/experimental/position_captions.md`](../experimental/position_captions.md).
 
 ## TL;DR
 
