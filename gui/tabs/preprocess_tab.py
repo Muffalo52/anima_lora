@@ -770,7 +770,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         # Caption rewriting — the knobs that edit the caption *text* before it is
         # encoded, split out of the text-caching box (which owns the variant /
         # dropout knobs). Order follows the pipeline: position clauses rewrite the
-        # caption master first, then correction reorders + slots the trigger word.
+        # resized caption first, then correction reorders the bag around them and
+        # slots the trigger word.
         caption_box = QGroupBox(t("preprocess_caption_editing"))
         caption_form = QFormLayout()
 
