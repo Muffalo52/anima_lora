@@ -272,9 +272,10 @@ def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
         ),
         # Not a `correct_captions.py` flag — it gates a separate stage that runs
         # BEFORE the caption/TE steps (see `cmd_preprocess`). It rides in this
-        # dict because it is the same family of caption-master rewrites and the
-        # GUI groups them together; `_caption_correction_enabled` /
-        # `_caption_correction_args` deliberately ignore it.
+        # dict because it is the same family of caption rewrites and the GUI
+        # groups them together; `_caption_correction_enabled` /
+        # `_caption_correction_args` deliberately ignore it. Unlike `autotag`
+        # this one writes the DERIVED caption (`resized/`), not the master.
         "position_clauses": _boolish(
             os.environ.get("CAPTION_POSITION_CLAUSES"),
             _boolish(overrides.get("caption_position_clauses"), False),
@@ -865,11 +866,15 @@ def cmd_preprocess_captions(extra, caption_config: dict[str, object] | None = No
     caption and the shuffle/dropout/randomize sidecars ride alongside, so the
     user can see the train-time variants directly in ``resized/``.
 
-    The caption-MASTER stages (autotag, position clauses) run first when their
-    config knob is on: this step *mirrors* the master, so a rewrite that landed
-    after it would be invisible to the sidecars — and to the TE caches encoded
-    from them. In the full ``preprocess`` chain they already ran (earlier, in
-    their GPU-ordered slots) and the guard makes these calls no-ops.
+    The caption-rewrite stages (autotag, position clauses) run first when their
+    config knob is on. Autotag writes the master, which this step mirrors, so a
+    tag that landed after it would be invisible to the sidecars — and to the TE
+    caches encoded from them. Position clauses write ``resized/`` directly and
+    must land *before* the mirror for the same reason: the mirror is what
+    re-corrects the flat bag and regenerates the sidecars around them (it
+    re-attaches clauses it finds, so they survive). In the full ``preprocess``
+    chain both already ran (earlier, in their GPU-ordered slots) and the guard
+    makes these calls no-ops.
     """
     if caption_config is None:
         caption_config, extra = _caption_correction_config(extra)
@@ -878,7 +883,11 @@ def cmd_preprocess_captions(extra, caption_config: dict[str, object] | None = No
     correct = _caption_correction_enabled(caption_config)
     shuffle, dropout, randomize = _variant_settings()
     n_variants = int(_float_or_zero(shuffle))
-    if not correct and n_variants <= 0:
+    # Position clauses keep the mirror alive even with correction and variants
+    # both off: they only rewrite the multi-subject captions in ``resized/``, and
+    # the TE step then reads that tree — so every *other* image needs its master
+    # caption mirrored there or it would encode as empty.
+    if not correct and n_variants <= 0 and not caption_config.get("position_clauses"):
         print("  [preprocess] caption correction disabled")
         return
     # correct_captions.py loads the Danbooru tag KB unconditionally (bucket
@@ -918,7 +927,7 @@ def cmd_preprocess_captions(extra, caption_config: dict[str, object] | None = No
 def cmd_preprocess_te(extra, caption_config: dict[str, object] | None = None):
     if caption_config is None:
         caption_config, extra = _caption_correction_config(extra)
-    # Master rewrites before anything reads the master. `cmd_preprocess_captions`
+    # Caption rewrites before anything reads the captions. `cmd_preprocess_captions`
     # runs them too, but the no-correction + no-variants path below skips that
     # step entirely and encodes the source captions directly.
     _run_caption_autotag_stage(caption_config)
@@ -930,7 +939,16 @@ def cmd_preprocess_te(extra, caption_config: dict[str, object] | None = None):
     # the TE step reads ``resized/`` (already the curated set, so min_pixels=0)
     # and encodes the sidecars verbatim. Only the pure no-correction +
     # no-variants case still reads the source captions with a match filter.
-    needs_caption_step = _caption_correction_enabled(caption_config) or n_variants > 0
+    #
+    # Position clauses force it too: they are written into ``resized/`` and never
+    # into the master, so encoding the master directly would silently train the
+    # pre-clause caption. The mirror also runs *after* the stage above, which is
+    # what re-attaches the clauses onto the corrected bag.
+    needs_caption_step = (
+        _caption_correction_enabled(caption_config)
+        or n_variants > 0
+        or bool(caption_config.get("position_clauses"))
+    )
     if needs_caption_step:
         _, extra = _resolve_lowres_filter(extra)
         extra = _drop_option_with_value(extra, {"--min_pixels"})
@@ -1058,7 +1076,11 @@ def cmd_caption_index(extra):
 
 
 def _caption_master_argv(script: str, extra) -> list[str]:
-    """Child argv (no interpreter) for a caption-MASTER rewrite pass.
+    """Child argv (no interpreter) for a caption-rewrite pass.
+
+    Both passes take the same ``--src`` (caption master) / ``--dst`` (resized)
+    pair; they differ in which side they *write* — autotag the master, position
+    clauses the derived caption under ``--dst``.
 
     Resolves the subset scope once (explicit flag in ``extra`` > env > config)
     and drops it from the tail so an explicitly-passed ``--path_pattern`` is
@@ -1093,10 +1115,10 @@ def _caption_autotag_argv(extra) -> list[str]:
     return _caption_master_argv("scripts/preprocess/autotag_captions.py", extra)
 
 
-# Caption-MASTER rewrite stages (autotag, position clauses) mutate
-# ``image_dataset/*.txt``, and every entry point that reads the master needs them
-# to have happened first — `preprocess` (in its own early, GPU-ordered slots),
-# `preprocess-te`, and `preprocess-captions` run on its own. So each of those
+# Caption-rewrite stages (autotag → ``image_dataset/*.txt``, position clauses →
+# ``resized/*.txt``), and every entry point that reads or mirrors a caption needs
+# them to have happened first — `preprocess` (in its own early, GPU-ordered
+# slots), `preprocess-te`, and `preprocess-captions` run on its own. So each of those
 # calls the stage, and this key on the shared caption-config dict records that it
 # already ran in this chain: `cmd_preprocess` threads ONE dict through
 # `cmd_preprocess_te` → `cmd_preprocess_captions`, so the later calls no-op while
@@ -1148,7 +1170,7 @@ def _run_caption_position_stage(config: dict[str, object]) -> None:
     """
     if not config.get("position_clauses") or _stage_already_ran(config, "position"):
         return
-    print("  [preprocess] position clauses: SAM3 + tagger → caption master")
+    print("  [preprocess] position clauses: SAM3 + tagger → resized captions")
     run([PY, *_caption_position_argv([*_stage_path_pattern_args(config), "--apply"])])
 
 
@@ -1176,10 +1198,12 @@ def cmd_caption_position(extra):
     """Append position-aware clauses to multi-subject captions (GPU, daemon-routed).
 
     SAM3 ``girl`` instances → reading order → mask-blanked crops → Anima Tagger →
-    ``… On the left, <tags>. On the right, <tags>.`` appended to the caption
-    master. Dry-run by default; ``ARGS="--apply"`` writes, and must be followed
-    by ``make preprocess-te`` (caption edits do NOT invalidate the TE caches, and
-    the ``.variants.txt`` sidecars override the CLI dropout rate).
+    ``… On the left, <tags>. On the right, <tags>.`` written into the **derived**
+    caption (``post_image_dataset/resized/<rel>.txt``); the hand-written master
+    under ``image_dataset/`` is never touched. Dry-run by default;
+    ``ARGS="--apply"`` writes, and must be followed by ``make preprocess-te`` to
+    re-encode (the caption pass re-attaches the clauses onto the corrected bag
+    and regenerates the ``.variants.txt`` sidecars the TE step encodes).
 
     Routed through the daemon like every other agent-launched GPU job — it holds
     SAM3 + the tagger resident for the whole sweep and would otherwise
@@ -1222,10 +1246,11 @@ def cmd_preprocess(extra):
     downstream = _pop_resize_only_args(extra)
     _, vae_extra = _resolve_lowres_filter(downstream)
     cmd_preprocess_vae(vae_extra)
-    # Position clauses rewrite the caption MASTER, so the stage has to land
-    # before the caption/TE steps read it (they write the variant sidecars and
-    # encode). Pinned here rather than left to `cmd_preprocess_te` so the GPU
-    # order stays VAE → SAM3/tagger; the guard keeps it from running twice.
+    # Position clauses rewrite the DERIVED caption in `resized/`, so the stage has
+    # to land before the caption/TE steps (the caption step re-corrects the bag
+    # around the clauses and writes the variant sidecars; TE encodes them).
+    # Pinned here rather than left to `cmd_preprocess_te` so the GPU order stays
+    # VAE → SAM3/tagger; the guard keeps it from running twice.
     _run_caption_position_stage(caption_config)
     cmd_preprocess_te(downstream, caption_config=caption_config)
     # Caption index as a free by-product — consumed by the IP-Adapter pair sampler,
