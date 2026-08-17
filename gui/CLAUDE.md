@@ -33,6 +33,7 @@ A thin **front-end over the existing pipeline** — it edits TOML configs and su
 - **Daemon outlives the GUI.** Closing the window does not stop training; jobs live in the daemon. The GUI is a pure observer of on-disk job files.
 - **Process kill must walk the tree.** Training is a grandchild of any directly-spawned `QProcess`, so `QProcess.kill()` alone leaks it — use `process.py::kill_process_tree` (psutil). Daemon jobs are stopped via `daemon.stop_job()`.
 - **`gui_settings.json`** holds UI state (language, 6h update-check cache, preprocess knobs) — separate from `configs/` so it survives a config reset.
+- **Install app-wide event filters LAST.** `app.installEventFilter(self)` routes *every* Qt event through Python, including the ChildAdded/Polish/LayoutRequest storm of building the widget tree. `MainWindow` installed its context-menu filter at the top of `__init__` and paid ~82k Python round-trips (~0.7s of a 2.05s launch) for events it drops — it now installs after `setCentralWidget`, since ContextMenu/ToolTip can't fire before the window is shown. Same rule for any new filter: if it only handles interaction events, install it once the tree exists. Guarded by `tests/test_gui_launch_speed.py` (which also records the remaining launch costs).
 
 ## Common changes
 
