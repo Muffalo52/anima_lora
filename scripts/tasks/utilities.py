@@ -63,18 +63,15 @@ def cmd_comfy_batch(extra):
 def cmd_distill_prep(extra):
     """Pre-stage artifacts for ``make distill-mod``.
 
-    Phase 1: emits ``post_image_dataset/_anima_uncond_te.safetensors``
-    (T5("") cross-attn baseline) — consumed as the student's unconditional
-    text input, replacing the zeroed-crossattn shortcut. ``make preprocess-te``
-    already produces this for free; this Phase 1 block is the explicit
-    re-stager (useful with ``--overwrite`` after a model swap).
+    Phase 1: emits ``post_image_dataset/_anima_uncond_te.safetensors`` (T5("")
+    cross-attn baseline), the student's unconditional text input. Useful with
+    ``--overwrite`` after a model swap (``make preprocess-te`` already
+    produces it for free otherwise).
 
     Phase 2: emits teacher-synthesized clean latents under
-    ``post_image_dataset/distill_mod_synth/`` (same NPZ layout as
-    ``cache_latents.py``). Train with
+    ``post_image_dataset/distill_mod_synth/``. Train with
     ``make distill-mod ARGS='--synth_data_dir post_image_dataset/distill_mod_synth'``
-    to fit on the teacher's manifold (paper-faithful; removes real-vs-teacher
-    gap that floors val loss).
+    to fit on the teacher's manifold instead of the real-image gap.
 
     Skip flags forwarded via ``extra``: ``--skip_uncond``, ``--skip_synth``,
     ``--max_samples N``, etc.
@@ -116,13 +113,12 @@ def cmd_distill_mod(extra):
 def cmd_test_unit(extra):
     """Run smoke/unit tests, split for speed.
 
-    The ``slow`` suites (daemon job queue) are sleep/subprocess-bound: ~55s
-    serial but ~4x faster under xdist since their waits overlap. The fast unit
-    tests are the reverse — xdist's per-worker startup exceeds their ~20s
-    runtime — so we run the fast set serially and the slow set with ``-n auto``.
-    Net: ~73s → ~33s, no coverage change. Falls back to a single serial run
-    when xdist is missing (``pip install pytest-xdist`` / the ``dev`` extra) or
-    the caller passes their own args (``ARGS=…``), which take full control.
+    The ``slow`` suites (daemon job queue) are sleep/subprocess-bound and run
+    faster under xdist since their waits overlap; the fast unit tests run
+    faster serially (xdist's per-worker startup dominates their short
+    runtime). Falls back to a single serial run when xdist is missing
+    (``pip install pytest-xdist`` / the ``dev`` extra) or the caller passes
+    their own args (``ARGS=…``), which take full control.
     """
     import importlib.util
 

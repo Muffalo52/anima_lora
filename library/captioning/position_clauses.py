@@ -1,19 +1,16 @@
 """Positional caption clauses — parse / compose / position vocabulary.
 
-The dataset's hand-written convention for binding attributes to subjects is a
-run of trailing clauses appended to the flat tag bag::
+The dataset's hand-written convention binds attributes to subjects via trailing
+clauses appended to the flat tag bag::
 
     safe, 3girls, akita neru, ..., white socks. On the left, akita neru,
     yellow eyes. On the middle, hatsune miku, twintails. On the right,
     kasane teto.
 
-Structurally that is ``<flat tags>`` followed by one ``. On the <position>,
-<tags>`` segment per subject, terminated by a period. The **period** is the
-clause delimiter; commas separate tags *within* a segment. That distinction is
-the whole reason this module exists: a naive ``caption.split(",")`` glues the
-clause header onto the previous tag (``"white socks. On the left"``) and every
-downstream consumer that keys off ``tag.startswith("On the ")`` then silently
-fails to see any section at all — shredding the clauses under shuffle.
+GOTCHA: the **period** is the clause delimiter; commas separate tags *within* a
+segment. A naive ``caption.split(",")`` glues the header onto the previous tag
+(``"white socks. On the left"``), silently shredding every clause a downstream
+``tag.startswith("On the ")`` check relies on.
 
 Pure stdlib by design (no torch, no model): the caption-variant generator, the
 order-correction pass, and the auto-caption pipeline all parse clauses through
@@ -113,15 +110,13 @@ def _split_tags(segment: str) -> list[str]:
 def is_clause_header(tag: str) -> bool:
     """True for a bare clause header token (``"On the left"``).
 
-    Used by consumers that already hold a comma-split token list — e.g. a
-    caption written in the *comma* form (``…, white socks, On the left, …``),
-    which :func:`parse_caption` also accepts.
+    Used by consumers already holding a comma-split token list (the comma-form
+    caption, which :func:`parse_caption` also accepts).
 
-    Deliberately case-SENSITIVE, unlike ``_CLAUSE_SPLIT_RE``. With no period to
-    delimit it, a bare lowercase ``on the beach`` in the middle of a tag bag is
-    a scene tag, not a clause header — only the capitalized canonical form is
-    unambiguous enough to promote. The period-delimited form has the delimiter
-    to go on, so :func:`parse_caption` accepts either case *there*.
+    GOTCHA: deliberately case-SENSITIVE, unlike ``_CLAUSE_SPLIT_RE`` — with no
+    period to delimit it, a lowercase ``on the beach`` mid-bag is a scene tag,
+    not a header. The period-delimited form has the delimiter to go on, so
+    :func:`parse_caption` accepts either case there.
     """
     return tag.startswith(CLAUSE_PREFIXES)
 
@@ -149,15 +144,12 @@ def parse_caption(caption: str) -> ParsedCaption:
         parts = _split_tags(segment)
         if not parts:
             continue
-        # Every segment past the first starts at a clause header by construction
-        # of the split, so trust the position rather than re-testing the text —
-        # the split regex is case-insensitive, and a hand-written
-        # ``safe. on the left, red hair.`` used to fail the capitalized
-        # ``is_clause_header`` here and yield ZERO clauses while
-        # ``has_clauses`` said yes: the position pass then skipped the caption
-        # as already annotated and the correction/variant passes shuffled the
-        # lowercase header around as an ordinary flat tag. Within a segment only
-        # the comma form can introduce a header, and that one stays strict.
+        # GOTCHA: trust segment position, not ``is_clause_header``, for whether a
+        # segment starts a clause — that check is case-sensitive, so a
+        # hand-written ``safe. on the left, red hair.`` used to parse as ZERO
+        # clauses while ``has_clauses`` said yes, silently dropping the clause
+        # into the flat bag. Within a segment only the comma form introduces a
+        # header, and that stays strict.
         for j, part in enumerate(parts):
             header = (i > 0 and j == 0) or (
                 is_clause_header(part) and (j == 0 or i == 0)
@@ -189,16 +181,13 @@ def parse_caption(caption: str) -> ParsedCaption:
 def flatten_caption(caption: str) -> str:
     """Merge every clause's tags back into the flat bag, dropping the clauses.
 
-    The inverse of the v2 rewrite, and the reason that rewrite is safe to apply
-    in place: v2 *moves* a bound tag out of the bag rather than deleting it, so
-    every tag is still in the caption — just inside a clause. Flattening
-    recovers a clause-free caption (bag order first, then each clause left→right,
-    duplicates dropped), which is both the undo for an ``--apply`` run and the
-    control arm for a clause A/B.
+    The inverse of the v2 rewrite (which *moves* a tag rather than deleting it,
+    so every tag is recoverable from the text alone). Bag order first, then each
+    clause left-to-right, duplicates dropped.
 
-    Order is *not* guaranteed byte-identical to the pre-rewrite caption — a moved
-    tag comes back at the end rather than its original slot — but the tag *set*
-    is exactly restored, and the order-correction pass re-buckets it anyway.
+    NOTE: order is not guaranteed byte-identical to the pre-rewrite caption (a
+    moved tag returns at the end, not its original slot), but the tag *set* is
+    exactly restored.
     """
     parsed = parse_caption(caption)
     seen: set[str] = set()

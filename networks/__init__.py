@@ -3,22 +3,12 @@
 Replaces the flag-cascade in ``networks.lora_anima.create_network`` with a
 declarative map. Each entry pairs an adapter variant name with the module
 class it instantiates and a ``save_variant`` label consumed by
-``networks.lora_save``.
+``networks.lora_save``. See networks/CLAUDE.md §three-axis routing surface
+for the full precedence table this module implements.
 
-Flag precedence (evaluated top to bottom, first match wins):
-
-    use_chimera_hydra                    → chimera_hydra
-    use_moe_style="independent_A"        → stacked_experts_global_fei
-    use_moe_style="shared_A" + use_ortho → ortho_hydra
-    use_moe_style="shared_A"             → hydra
-    use_ortho_init                       → ortho_init
-    use_ortho                            → ortho
-    (none)                               → lora
-
-The legacy ``use_hydra`` / ``use_sigma_router`` / ``use_fei_router``
-kwargs were retired in plan2 task #6 — see ``LoRANetworkCfg.from_kwargs``
-for the rejection message. ``use_dora`` was retired alongside the
-``lora_deprecated`` module; DoRA is no longer trained, saved, or loaded.
+The legacy ``use_hydra``/``use_sigma_router``/``use_fei_router`` kwargs were
+retired in plan2 task #6 (see ``LoRANetworkCfg.from_kwargs`` for the rejection
+message); ``use_dora`` was retired alongside the ``lora_deprecated`` module.
 """
 
 from __future__ import annotations
@@ -43,16 +33,13 @@ class NetworkSpec:
     """Descriptor for one adapter variant.
 
     Attributes:
-        name: Stable identifier stamped on the network and written to
-            metadata as ``ss_network_spec``. Also the key into
-            ``NETWORK_REGISTRY``.
-        module_class: Concrete ``LoRAModule`` subclass the network will
-            instantiate per target module.
-        save_variant: Label keyed into ``networks.lora_save.SAVE_HANDLERS``
-            — selects the serialization pipeline for this variant.
-        post_init: Optional hook run after the network is built; receives
-            ``(network, kwargs)``. Used for variant-specific attribute
-            attachment (e.g. hydra balance loss weight).
+        name: Stable identifier stamped on the network as ``ss_network_spec``
+            and the key into ``NETWORK_REGISTRY``.
+        module_class: Concrete ``LoRAModule`` subclass to instantiate per
+            target module.
+        save_variant: Key into ``networks.lora_save.SAVE_HANDLERS``.
+        post_init: Optional hook run after the network is built, receiving
+            ``(network, kwargs)`` — for variant-specific attribute attachment.
     """
 
     name: str
@@ -62,17 +49,11 @@ class NetworkSpec:
 
 
 # Single source of truth = the reads themselves. The LoRA-family TOML allowlist
-# is *derived* by scanning what these consumer modules actually read via
-# ``kwargs.get("literal")``; it passes those keys through the config-schema
-# validator and tells ``train.py`` which keys to copy off ``args`` into
-# ``net_kwargs``. So adding a new knob is **one edit** — write the
-# ``kwargs.get("foo")`` read at its consumer and it auto-registers here. No
-# separate frozenset entry to keep in sync (the old H1 triple-registration
-# gotcha — see docs/findings/entanglement_audit_high_severity.md §H1).
-#
-# Per-knob documentation lives at the read sites (the ``LoRANetworkCfg``
-# dataclass fields and the ``factory.py`` reads are richly commented) rather than
-# being duplicated here.
+# is *derived* by scanning what these consumer modules read via
+# ``kwargs.get("literal")``, so adding a new knob is one edit — write the
+# ``kwargs.get("foo")`` read at its consumer and it auto-registers here (no
+# separate frozenset entry to keep in sync; see
+# docs/findings/entanglement_audit_high_severity.md §H1).
 _KWARG_CONSUMER_MODULES = (
     "lora_anima/config.py",  # LoRANetworkCfg.from_kwargs
     "lora_anima/factory.py",  # REPA / loraplus / channel_scaling / custom_down
@@ -91,10 +72,8 @@ def _derive_network_kwargs() -> frozenset[str]:
 
     AST-scans the consumer modules so the allowlist can never silently drift
     from the reads. Recognizes the ``kwargs.get("literal"[, default])`` form
-    only — a consumer that reads a forwarded knob some other way (a helper
-    wrapper, ``kwargs["k"]`` indexing) must use ``kwargs.get`` or it won't be
-    picked up. The ``must_have`` registry tests pin the load-bearing keys as a
-    backstop against a scan that breaks.
+    only — a consumer reading a forwarded knob another way (``kwargs["k"]``
+    indexing, a helper wrapper) won't be picked up.
     """
     import ast
     from pathlib import Path
@@ -132,17 +111,16 @@ def _post_init_hydra(network: Any, kwargs: Mapping[str, Any]) -> None:
     # first; flipped to `target` by LoRANetwork.step_balance_loss_warmup.
     network._balance_loss_weight = 0.0 if warmup_ratio > 0.0 else target
     network._use_hydra = True
-    # Mirror cfg.fera_fecl_weight to network.fecl_weight (where _fera_fecl_loss
-    # reads it); fall back to the kwarg when no cfg is present (unit tests).
+    # Mirror cfg.fera_fecl_weight to network.fecl_weight; fall back to the
+    # kwarg when no cfg is present (unit tests).
     cfg_weight = getattr(getattr(network, "cfg", None), "fera_fecl_weight", None)
     if cfg_weight is not None:
         network.fecl_weight = float(cfg_weight)
     else:
         network.fecl_weight = float(kwargs.get("fera_fecl_weight", 0.0) or 0.0)
 
-    # ChimeraHydra: stamp the chimera flag + per-pool balance weights for
-    # ``get_balance_loss``; falls back to the shared ``balance_loss_weight``
-    # (OrthoHydra default) when per-pool weights are unset.
+    # ChimeraHydra: stamp the chimera flag + per-pool balance weights, falling
+    # back to the shared balance_loss_weight when per-pool weights are unset.
     cfg = getattr(network, "cfg", None)
     if cfg is not None and getattr(cfg, "use_chimera_hydra", False):
         network._use_chimera_hydra = True
@@ -192,11 +170,9 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         post_init=_post_init_hydra,
     ),
     # ChimeraHydra: dual-pool additive routing on the OrthoHydra Cayley
-    # parameterization (docs/proposal/chimera_hydra.md). Save distills the Cayley
-    # params to the Hydra-MoE layout in a ``*_chimera.safetensors`` sibling; load
-    # goes through ``HydraLoRAModule`` with ``num_experts_content > 0``, so the
-    # Cayley class is training-only (resume loses the orthogonal parameterization,
-    # matching the OrthoHydra → Hydra trade-off).
+    # parameterization. Save distills the Cayley params to the Hydra-MoE layout
+    # in a *_chimera.safetensors sibling; the Cayley class is training-only
+    # (resume loses the orthogonal parameterization, matching OrthoHydra).
     "chimera_hydra": NetworkSpec(
         name="chimera_hydra",
         module_class=ChimeraHydraLoRAModule,
@@ -205,15 +181,14 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
     ),
     # Step-expert: shared down-proj + K step-indexed up-heads, hard-selected by
     # diffusion step (no router). Turbo DP-DMD student only; kept-live at
-    # inference (K heads can't fold into one DiT weight), so save is bespoke
-    # (TurboDMDNetwork.save_student, not save_network_weights). Selected via step_expert_K.
+    # inference (K heads can't fold into one DiT weight), so save is bespoke.
     "step_expert": NetworkSpec(
         name="step_expert",
         module_class=StepExpertLoRAModule,
         save_variant="step_expert",
     ),
     # FeRA paper-faithful: independent-A stacked experts, single network-level
-    # router fed by FEI(z_t). Selected via ``use_moe_style="independent_A"``.
+    # router fed by FEI(z_t). Selected via use_moe_style="independent_A".
     "stacked_experts_global_fei": NetworkSpec(
         name="stacked_experts_global_fei",
         module_class=StackedExpertsLoRAModule,
@@ -227,9 +202,8 @@ def all_network_kwargs() -> Tuple[str, ...]:
     """Return the LoRA-family TOML allowlist (``NETWORK_KWARGS``), sorted.
 
     Single source of truth for train.py — populates the argparse schema and
-    the TOML → ``net_kwargs`` forwarding list, so adding a key to
-    ``NETWORK_KWARGS`` automatically makes it visible to training without
-    touching train.py.
+    the TOML -> net_kwargs forwarding list, so adding a key to NETWORK_KWARGS
+    automatically makes it visible to training without touching train.py.
     """
     return tuple(sorted(NETWORK_KWARGS))
 
@@ -246,20 +220,12 @@ def _parse_bool_flag(kwargs: Mapping[str, Any], key: str) -> bool:
 def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
     """Resolve which NetworkSpec to instantiate from create_network kwargs.
 
-    Precedence is deterministic and documented in the module docstring.
-    Raises on mutually-exclusive combinations.
-
-    Honors the ``use_moe_style`` axis (plan2.md §three-axis-config):
-    ``"independent_A"`` routes to ``stacked_experts_global_fei`` (FeRA);
-    ``"shared_A"`` plus ``use_ortho`` routes to ``ortho_hydra``; bare
-    ``"shared_A"`` routes to ``hydra``. The legacy ``use_hydra`` kwarg was
-    retired in plan2 task #6 — ``LoRANetworkCfg.from_kwargs`` raises if a
-    TOML still carries it.
-
-    ``use_chimera_hydra=True`` short-circuits to the chimera variant. The
-    chimera config requires ``use_moe_style="shared_A"`` semantics under
-    the hood (OrthoHydra parameterization), but uses K_c + K_f instead of
-    a single ``num_experts`` — the user only sets the chimera flag.
+    Precedence (first match wins): use_chimera_hydra -> chimera_hydra;
+    use_moe_style="independent_A" -> stacked_experts_global_fei (FeRA);
+    use_moe_style="shared_A" (+use_ortho) -> ortho_hydra, else hydra;
+    use_ortho_init -> ortho_init; use_ortho -> ortho; else lora. Raises on
+    mutually-exclusive combinations. The legacy use_hydra kwarg was retired
+    in plan2 task #6 — LoRANetworkCfg.from_kwargs raises if a TOML carries it.
     """
     use_ortho = _parse_bool_flag(kwargs, "use_ortho")
     use_ortho_init = _parse_bool_flag(kwargs, "use_ortho_init")
@@ -271,12 +237,11 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
             "basis (no cap). Pick one."
         )
     if use_chimera:
-        # OrthoInit composes with chimera (use_ortho_init swaps each pool's
-        # frozen Cayley basis for trainable SVD-seeded bases via cfg.use_ortho_init);
-        # same spec either way — distills to the same *_chimera.safetensors layout.
+        # OrthoInit composes with chimera (swaps each pool's frozen Cayley
+        # basis for trainable SVD-seeded bases); same spec either way.
         return NETWORK_REGISTRY["chimera_hydra"]
 
-    # Step-expert short-circuits when step_expert_K > 1; K==1 collapses to plain LoRA.
+    # Step-expert short-circuits when step_expert_K > 1; K==1 collapses to plain LoRA
     raw_step_K = kwargs.get("step_expert_K")
     if raw_step_K is not None and int(raw_step_K) > 1:
         return NETWORK_REGISTRY["step_expert"]

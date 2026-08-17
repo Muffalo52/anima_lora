@@ -73,11 +73,6 @@ def run_loop(ctx: RunContext, cfg):
     plain algorithm; only ``data_iter`` and ``fdistill_bins`` are mutated
     (epoch re-iter / f-distill EMA), and neither is read after the loop.
     """
-    # Bind the fields the loop body touches more than once to short locals; the
-    # single-use ones (model, dataloader, dyn_n_min, uncond_base, softrank_min_pool,
-    # console_steps, tau_profiles, val_*, start_step) are read straight off ctx at
-    # their one use site below. data_iter / fdistill_bins are locals because the
-    # loop reassigns them (epoch re-iter / f-distill EMA).
     turbo = ctx.turbo
     device = ctx.device
     dtype = ctx.dtype
@@ -104,9 +99,9 @@ def run_loop(ctx: RunContext, cfg):
         total=cfg.iterations,
     )
 
-    # Full-run lifecycle for the progress.jsonl sink (issue #1): run_scope
-    # maps a clean return / KeyboardInterrupt / crash onto the matching
-    # run_end status, so a reader can tell 'done' from 'died'.
+    # Full-run lifecycle for the progress.jsonl sink: run_scope maps a clean
+    # return / KeyboardInterrupt / crash onto the matching run_end status, so a
+    # reader can tell 'done' from 'died'.
     step = ctx.start_step - 1  # sentinel: valid final_step() if the loop is empty
     with run_scope(progress_sink, final_step=lambda: step + 1):
         for step in progress:
@@ -188,15 +183,12 @@ def run_loop(ctx: RunContext, cfg):
                 x = x - (s0 - s0_next) * v_first
                 div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
 
-                # --- soft-rank caption-discrimination auxiliary (Phase 1) ---------
+                # --- soft-rank caption-discrimination auxiliary -------------------
                 # k extra no_grad student forwards at the SAME step-0 (ε, t=1, head 0),
-                # only crossattn_emb swapped for a pooled sample's caption (the
-                # `shuffled` negatives where Phase 0 measured the worst damage). The
-                # matched caption should explain the diversity anchor v_target better
-                # than the mismatched ones; soft-rank its position and push it to 0.
-                # Grad flows through v_first ONLY (negatives detached under no_grad) —
-                # "make the matched caption explain the anchor better", and the term
-                # stays bounded (no negative-push). It rides the step-0 backward below.
+                # only crossattn_emb swapped for a pooled sample's caption. Soft-rank
+                # the matched caption's position against these negatives and push it
+                # to 0 — grad flows through v_first ONLY (negatives detached), so the
+                # term stays bounded and rides the step-0 backward below.
                 if softrank_on:
                     if step % cfg.softrank_every_n == 0 and softrank_pool.ready(
                         ctx.softrank_min_pool
@@ -217,11 +209,11 @@ def run_loop(ctx: RunContext, cfg):
                     softrank_pool.add(crossattn_emb)
 
                 if split_bwd:
-                    # Load-bearing stop-grad: the DMD reverse-KL from steps 1..N-1 must
-                    # NOT flow into the diversity mapping (their Fig 5). Backward the
-                    # diversity term now, then re-leaf for a fresh DMD-chain root. The
-                    # soft-rank term joins THIS backward (both ride v_first's step-0
-                    # graph), so the DMD graph separation is untouched.
+                    # Load-bearing stop-grad: the DMD reverse-KL (steps 1..N-1) must NOT
+                    # flow into the diversity mapping (Fig 5). Backward the diversity
+                    # term now, then re-leaf for a fresh DMD-chain root. Soft-rank joins
+                    # this backward (rides v_first's step-0 graph), so the DMD graph
+                    # separation stays intact.
                     (
                         cfg.div_weight * div_loss_t
                         + cfg.softrank_weight * softrank_loss
@@ -349,24 +341,23 @@ def run_loop(ctx: RunContext, cfg):
             v_fake_cond_dm = dmd.v_fake_cond_dm
             eps_dm = dmd.eps_dm
 
-            # --- L_CDM off-trajectory loss (CDM §3.3; docs/proposal/cdm.md Phase 1) ---
+            # --- L_CDM off-trajectory loss ---
             # Encapsulated in steps.cdm_off_trajectory_loss (extrapolate → one grad
-            # forward → real-vs-fake surrogate → in-branch backward with the view
-            # restored to student, + metrics.add_cdm). ORDER MATTERS: it MUST run
-            # BEFORE the GAN gen forward — that forward's checkpointed recompute
-            # happens at backward under the then-current view, so the CDM branch
-            # must stay the last view flip before it
+            # forward → real-vs-fake surrogate → in-branch backward, view restored to
+            # student, + metrics.add_cdm). ORDER MATTERS: it MUST run BEFORE the GAN
+            # gen forward — that forward's checkpointed recompute happens at backward
+            # under the then-current view, so CDM must be the last view flip before it
             # (project_turbo_view_ckpt_recompute_hazard).
             if cdm_on and cdm_src is not None:
                 cdm_off_trajectory_loss(
                     ctx, cfg, cdm_src, crossattn_emb, c_null, latents, mask, B
                 )
 
-            # --- GAN generator term + f-distill reweighting (ideas 1 & 2) ---
+            # --- GAN generator term + f-distill reweighting ---
             # No-op when the GAN is off or the delay/warmup ramp still holds the
-            # generator-side λ at 0 (disc keeps training below); otherwise
-            # returns the gen loss, the (possibly f-distill-reweighted)
-            # grad_signal, and the updated EMA bins.
+            # generator-side λ at 0 (disc keeps training below); otherwise returns
+            # the gen loss, the (possibly f-distill-reweighted) grad_signal, and
+            # the updated EMA bins.
             gan_w = gan_effective_weight(cfg, step)
             gan_gen_loss, grad_signal, fdistill_bins = gan_generator_term(
                 ctx,

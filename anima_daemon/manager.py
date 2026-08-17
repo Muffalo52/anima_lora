@@ -1,14 +1,12 @@
 """The job manager: FIFO serial queue + worker thread + state table.
 
-One worker thread drains a ``queue.Queue`` of job ids. Per job it builds the
-same ``accelerate launch … train.py`` command the CLI builds, spawns it
-detached (so a console ctrl-C can't reach it), points ``--progress_jsonl`` at
-the job dir, then monitors by polling ``(pid, create_time)`` liveness — never
-by awaiting a subprocess transport (sidesteps Windows ProactorEventLoop
-subprocess bugs). On boot it reconciles ``jobs/`` so it can re-attach a
-still-alive orphan or mark a dead one ``orphaned``.
-
-Serial by design (single local GPU): exactly one job runs at a time.
+One worker thread drains a ``queue.Queue`` of job ids, spawns each detached
+(so a console ctrl-C can't reach it), and monitors by polling
+``(pid, create_time)`` liveness rather than awaiting a subprocess transport
+(sidesteps Windows ProactorEventLoop bugs). On boot it reconciles ``jobs/`` to
+re-attach a still-alive orphan or mark a dead one ``orphaned``. Serial by
+design (single local GPU): exactly one job runs at a time. See
+``anima_daemon/README.md`` for the job lifecycle.
 """
 
 from __future__ import annotations
@@ -45,21 +43,20 @@ logger = logging.getLogger("anima.daemon")
 _POLL_INTERVAL = 1.0  # seconds between liveness checks
 _SENTINEL = "__stop__"
 
-# Stall watchdog, CPU-activity arm (see _stall_reason / _tree_cpu_advancing).
-# Once a job's output has frozen past its budget we sample its process tree's
-# CPU time: a *quiet but computing* job (an embed/eval loop between prints) keeps
-# burning cycles, while a wedged one (stalled socket, deadlock) burns none. Only
-# a frozen-and-idle job is killed — until `budget × _STALL_CPU_GRACE` of silence,
-# after which we kill regardless, so a busy-spinning deadlock can't park the
-# queue forever. job_id → (wall, cpu_seconds, verdict).
+# Stall watchdog CPU-activity cross-check (see _stall_reason /
+# _tree_cpu_advancing): past the output-freeze budget, only kill a job whose
+# process tree has also gone CPU-idle (a quiet-but-computing embed/eval loop
+# survives) — up to `budget × _STALL_CPU_GRACE`, after which it's killed
+# regardless so a busy-spinning deadlock can't park the queue forever.
+# job_id → (wall, cpu_seconds, verdict).
 _CPU_SAMPLES: dict[str, tuple[float, float, bool]] = {}
 _CPU_SAMPLE_MIN_GAP = 5.0  # seconds between samples (a short gap measures noise)
 _CPU_BUSY_FRAC = 0.05  # ≥5% of one core, averaged over the gap → "computing"
 _STALL_CPU_GRACE = 8.0  # hard ceiling multiplier on the configured budget
 
-# Signal → user-actionable hint, for a process that died without writing a
-# run_end event. POSIX ``Popen.poll()`` reports a signal death as a negative
-# number; a shell/launcher layer (``accelerate launch``) relays it as 128+N.
+# Signal -> user-actionable hint for a process that died without a run_end
+# event. POSIX Popen.poll() reports a signal death as a negative number;
+# accelerate launch relays it as 128+N instead.
 _SIGNAL_HINTS = {
     9: "killed (SIGKILL) — almost always out of memory. Lower batch size, "
     "raise blocks_to_swap, or try PRESET=low_vram.",
@@ -95,14 +92,12 @@ class JobManager:
         self._subscribers: set["queue.Queue[dict]"] = set()
         self._stopping = False
         self._kill_on_shutdown = False
-        # Queue run gate: set → worker launches queued jobs as the GPU frees;
-        # cleared → queue paused (dequeued jobs held `queued` until `resume()`,
-        # a running job left alone). Default set so non-opt-in callers run now.
+        # Queue run gate: set -> worker launches queued jobs; cleared -> paused
+        # (dequeued jobs held `queued`, a running job left alone). Default set.
         self._run_gate = threading.Event()
         self._run_gate.set()
-        # Worker liveness: bumped every loop iteration and every monitor poll.
-        # Exposed via /health so a wedged-or-dead worker is observable (the GUI
-        # spinner otherwise looks identical to a healthy long-running job).
+        # Bumped every loop iteration/monitor poll; exposed via /health so a
+        # wedged-or-dead worker is distinguishable from a healthy long run.
         self._worker_heartbeat = time.time()
         self._worker = threading.Thread(
             target=self._run, name="anima-job-worker", daemon=True
@@ -169,22 +164,11 @@ class JobManager:
         captured_env: Optional[dict] = None,
         stall_timeout: Optional[float] = None,
     ) -> Job:
-        """Enqueue a plain ``python <argv>`` task (preprocess / mask).
-
-        Goes through the same serial queue as training so a cache-build and a
-        training run can't fight over the single local GPU. ``label`` is the
-        display name; ``argv`` is passed straight to the venv interpreter (e.g.
-        ``["tasks.py", "preprocess"]``); ``extra_env`` carries the GUI's knobs
-        (``CAPTION_SHUFFLE_VARIANTS``, ``RUN_SAM_MASK``, …).
-
-        ``chain_train`` (``{method, preset, methods_subdir}``) makes this an
-        auto-chain step: on successful completion the daemon enqueues that
-        training job itself (see ``_finalize``), so the chain runs to the end
-        even if the GUI that started it has since closed.
-
-        ``stall_timeout`` overrides the 120 s command-job stall budget for this
-        job (0 disables it) — the supported way to run a legitimately quiet
-        embed/eval loop without a stdout heartbeat (see ``_stall_reason``)."""
+        """Enqueue a plain ``python <argv>`` task (preprocess / mask) on the
+        same serial queue as training, so both can't fight over the GPU.
+        ``chain_train`` auto-enqueues that training spec on success (see
+        ``_finalize``), so a chain survives the GUI closing. ``stall_timeout``
+        overrides the command-job stall budget for this job (see README)."""
         job = Job(
             id=new_job_id(),
             method=label,
@@ -228,17 +212,13 @@ class JobManager:
         job.config_file = str(dst)
 
     def _register_and_queue(self, job: Job, *, start: Optional[bool] = None) -> Job:
-        # ``start`` controls the run gate atomically with enqueue, so there's no
-        # window where a "hold this one" job could slip past the worker:
-        #   False → "add to queue". Hold this job for a later Start Queue ONLY
-        #           when the queue is otherwise idle (so a user can stage several
-        #           jobs before pressing Start). If a job is already running or
-        #           queued, the queue is "playing" — leave the gate alone so this
-        #           job auto-advances behind the current ones (cassette-tape
-        #           behaviour). Pausing a playing queue here was the bug that
-        #           stalled auto-advance the moment the running job finished.
-        #   True  → enqueue, then resume (run now — flushes any held backlog);
-        #   None  → leave the gate as-is (legacy: runs if not currently paused).
+        # `start` controls the run gate atomically with enqueue (no window for
+        # a "hold this one" job to slip past the worker). False only pauses the
+        # gate when the queue is otherwise idle — if a job is already
+        # running/queued, leave the gate alone so this one auto-advances behind
+        # it (pausing here regressed auto-advance once the running job
+        # finished). True resumes (flushing any held backlog); None leaves the
+        # gate as-is.
         if start is False:
             with self._lock:
                 queue_idle = self._queue_is_idle_locked()
@@ -322,15 +302,12 @@ class JobManager:
 
     def pause_job(self, job_id: str) -> Optional[dict]:
         """Freeze a running job's process tree (SIGSTOP), method-agnostically.
-
-        The CUDA context and VRAM stay put; only SM scheduling stops, so resume
-        is instant (no reload/recompile, mid-step optimizer state intact). The
-        queue does NOT advance — the paused job still owns its slot; ``pause`` is
-        "hold my run", not "yield it". Returns ``{job_id, state, error?}``, or
-        ``None`` when no such job (the server maps that to 404). Refuses anything
-        not ``running`` and refuses a multi-GPU ``accelerate launch`` run (a
-        frozen NCCL rank trips the collective heartbeat).
-        """
+        CUDA context/VRAM stay put; only SM scheduling stops. The queue does
+        NOT advance past a paused job — it still owns its slot ("hold my run",
+        not "yield it"). Refuses anything not ``running`` and refuses a
+        multi-GPU ``accelerate launch`` run (a frozen NCCL rank trips the
+        collective heartbeat). Returns ``{job_id, state, error?}``, or
+        ``None`` when no such job (server maps that to 404)."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -364,12 +341,10 @@ class JobManager:
         return {"job_id": job_id, "state": STATE_PAUSED}
 
     def resume_job(self, job_id: str) -> Optional[dict]:
-        """Thaw a paused job's process tree (SIGCONT) → back to ``running``.
-
-        Returns ``{job_id, state, error?}``, or ``None`` for no such job. A
-        no-op error for a job that isn't paused. Wall-clock throughput/ETA
-        inside the run blips across the pause window; accepted, not compensated.
-        """
+        """Thaw a paused job's process tree (SIGCONT) back to ``running``.
+        Returns ``{job_id, state, error?}`` (error if not paused), or
+        ``None`` for no such job. Wall-clock throughput/ETA blips across the
+        pause window; accepted, not compensated."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -414,10 +389,9 @@ class JobManager:
             with self._lock:
                 if self._stopping:
                     break
-            # One bad job must NEVER kill the worker thread: a dead worker leaves
-            # every later job stuck `queued` forever with no error and no
-            # watchdog (the stall watchdog only guards *running* jobs). Catch
-            # everything, fail the offending job loudly, and keep draining.
+            # A dead worker leaves every later job stuck `queued` forever (the
+            # stall watchdog only guards running jobs) — never let one bad job
+            # kill the thread; fail it loudly and keep draining.
             try:
                 self._process_one(job_id)
             except Exception:  # noqa: BLE001
@@ -445,10 +419,8 @@ class JobManager:
         with self._lock:
             if job.state != STATE_QUEUED or job.stop_requested:
                 return
-        # Auto-chained train steps skip the guard: the daemon just ran the
-        # preceding preprocess on this same serial queue, so the only VRAM
-        # in flight is that step's still-releasing allocation, which the
-        # guard would needlessly wait on. Standalone jobs still guard.
+        # Auto-chained train steps skip the guard — the only VRAM in flight is
+        # the just-finished preceding step's still-releasing allocation.
         if not job.from_chain:
             self._gpu_guard(job)
         self._launch_and_monitor(job)
@@ -511,7 +483,7 @@ class JobManager:
             job.pid = popen.pid
             job.create_time = proc.create_time(popen.pid)
             # Record whether this went out under the accelerate launcher, so
-            # pause can refuse a multi-GPU run without re-deriving it (Phase 2a).
+            # pause_job can refuse a multi-GPU run without re-deriving it.
             job.accelerate_launched = "accelerate.commands.accelerate_cli" in cmd
             job.persist()
             self._popens[job.id] = popen
@@ -560,34 +532,11 @@ class JobManager:
 
     @staticmethod
     def _stall_reason(job: Job) -> Optional[str]:
-        """If the running job has produced no output for longer than the
-        configured stall timeout, return an actionable error naming where it
-        wedged; otherwise ``None``.
-
-        Liveness is the most recent mtime of stdout.log *or* progress.jsonl, so
-        both a preprocess job (tqdm-to-stdout, no progress.jsonl) and a training
-        job (progress.jsonl) are covered, and any phase that still flushes the
-        occasional line — including a slow download's tqdm bar — counts as
-        alive. A truly wedged process (stalled socket with no bytes, a
-        symlink-cycle walk, a deadlock) writes nothing, so its files freeze and
-        the watchdog fires. ``TQDM_MININTERVAL`` (10s) keeps even a busy bar
-        well under either budget.
-
-        The budget is per *kind*: a command (preprocess / mask) job is tight
-        (it never legitimately goes quiet for more than a model-load), while a
-        train job is unwatched by default (budget 0 → skipped here) because its
-        silent first-step torch.compile trace would false-positive; it can be
-        opted in via ANIMA_DAEMON_JOB_STALL_TIMEOUT. A submitter that knows its
-        loop goes quiet sets ``stall_timeout`` on the job (0 → unwatched), which
-        wins over both defaults — the supported alternative to hand-rolling a
-        stdout heartbeat in every long-quiet bench script.
-
-        Frozen output alone is not proof of a wedge: an embed/eval loop is quiet
-        *and computing*. So past the budget we also sample the process tree's CPU
-        time and only fire once the tree has gone idle too — up to
-        ``_STALL_CPU_GRACE ×`` the budget, after which we fire regardless so a
-        busy-spinning deadlock can't hold the queue forever.
-        """
+        """If the job has produced no output (stdout.log or progress.jsonl
+        mtime) for longer than its stall budget, return an actionable error
+        naming where it wedged; otherwise ``None`` (see config.py for the
+        per-kind budgets and the CPU cross-check that spares a quiet-but-
+        computing job — details there and in README.md)."""
         timeout = (
             job.stall_timeout
             if getattr(job, "stall_timeout", None) is not None
@@ -629,15 +578,11 @@ class JobManager:
 
     @staticmethod
     def _tree_cpu_advancing(job: Job) -> bool:
-        """True iff the job's process tree has burned CPU since the last sample.
-
-        Two samples ``_CPU_SAMPLE_MIN_GAP`` apart are needed for a meaningful
-        rate, so the first look (and any call inside the gap) reuses the previous
-        verdict — starting optimistic, since a job we've never sampled is more
-        likely mid-compute than wedged. Unreadable CPU times (pid gone, no
-        permission) return False so the watchdog falls back to its historical
-        output-mtime-only behaviour rather than becoming un-fireable.
-        """
+        """True iff the job's process tree has burned CPU since the last
+        sample. Needs two samples ``_CPU_SAMPLE_MIN_GAP`` apart for a
+        meaningful rate; the first look (or one inside the gap) reuses the
+        previous verdict, starting optimistic. Unreadable CPU times (pid gone)
+        return False, falling back to output-mtime-only behavior."""
         cpu = proc.tree_cpu_seconds(getattr(job, "pid", None))
         if cpu is None:
             return False
@@ -656,8 +601,8 @@ class JobManager:
     @staticmethod
     def _last_output_line(job: Job, *, max_bytes: int = 8192) -> Optional[str]:
         """Best-effort last non-empty stdout line (carriage-return aware, so a
-        tqdm bar's latest redraw is returned rather than an empty fragment) —
-        this is the "where did it wedge" hint folded into the stall error."""
+        tqdm bar's latest redraw wins) — the "where did it wedge" hint folded
+        into the stall error."""
         path = job.stdout_path
         if not path:
             return None
@@ -680,9 +625,9 @@ class JobManager:
             return
         ev = tail.last_event(job.progress_path)
         rc = popen.poll() if popen is not None else None
-        # Mirror the OS exit code into the record (Phase 0c) before finalizing,
-        # so the persist inside _finalize captures it and run_gpu can exit with
-        # it. None for an adopted orphan (psutil liveness gives no code).
+        # Mirror the OS exit code into the record before finalizing, so the
+        # persist inside _finalize captures it and run_gpu can exit with it.
+        # None for an adopted orphan (psutil liveness gives no code).
         job.returncode = rc
         if job.stop_requested:
             self._finalize(job, STATE_STOPPED)
@@ -721,8 +666,6 @@ class JobManager:
             if detail:
                 job.status_detail = detail
             job.ckpt_path = tail.last_ckpt_path(job.progress_path)
-            # Phase 1a — follow the bench envelope pointer (if the job wrote one)
-            # and record its abs path + a {label, metrics} digest on the record.
             self._lift_result(job)
             # Auto-chain: a done command job with a chain_train spec enqueues its
             # follow-on train job here (survives the GUI closing). chained_job_id
@@ -745,8 +688,8 @@ class JobManager:
                     extra=ct.get("extra") or [],
                     from_chain=True,
                     # Inherit the originating command's captured env so the
-                    # chained train step runs with the same shell settings
-                    # (Phase 0b) — the submitter is long gone by now.
+                    # chained train step runs with the same shell settings —
+                    # the submitter is long gone by now.
                     captured_env=job.captured_env,
                 )
                 job.chained_job_id = follow.id
@@ -759,16 +702,10 @@ class JobManager:
         self._broadcast({"ev": "ended", "job_id": job.id, "state": state})
 
     def _lift_result(self, job: Job) -> None:
-        """Follow a bench envelope pointer (Phase 1a) into the job record.
-
-        A GPU job whose script called ``bench/_common.write_result`` under a
-        daemon spawn dropped ``<job_dir>/result_path.json`` → ``{"path": <abs
-        result.json>}``. Read it, then read the envelope for its ``label`` /
-        ``metrics`` digest. Best-effort and schema-blind: the envelope contract is
-        bench-owned (we lift ``label``/``metrics`` opaquely, never validate them),
-        and a missing/corrupt pointer is the common no-envelope case — leave the
-        fields None. Absolute paths only, so a ledger can index them as-is.
-        """
+        """Follow a bench envelope pointer into the job record (see README
+        "Where did my run land"). Best-effort and schema-blind — a missing or
+        corrupt pointer is the common no-envelope case, leaving the fields
+        None; ``label``/``metrics`` are lifted opaquely, never validated."""
         import json
         from pathlib import Path
 
@@ -801,35 +738,23 @@ class JobManager:
         """Before launching, make sure the GPU is actually free.
 
         Busy/free is decided from **total VRAM in use**, not the process list:
-        on Windows WDDM every desktop app (dwm, explorer, browser, …) shows up
-        as a "compute" process, so gating on process presence stalled the queue
-        on a dozen innocent renderers every launch. A real training run holds
-        GBs; an idle desktop holds <1 GB — so `used/total < busy_frac` reliably
-        means "go". The threshold is deliberately loose (default 0.85): the only
-        thing the guard *must* catch is VRAM leaked by our own dead jobs, and
-        that is reaped by pid below regardless of the fraction; the fraction only
-        guesses whether some *other* process owns the card, so a partially-loaded
-        ComfyUI / browser shouldn't trip it. Process enumeration is kept only to
-        reap VRAM leaked by our *own* dead jobs, matched by **(pid, create_time)**
-        — a bare pid match is not enough: PIDs get recycled (aggressively so on
-        Windows), and a stale job record whose number now belongs to a stranger
-        would otherwise make us kill that stranger. Issue #83: a 3-day-old job's
-        pid had been reused by ``dwm.exe``, which the guard then tried to reap.
-        If we can't probe memory at all we assume free rather than
-        deadlock the queue. Tunable via ANIMA_DAEMON_GPU_{BUSY_FRAC,RETRIES,DELAY}.
+        on Windows WDDM every desktop app shows up as a "compute" process, so
+        gating on presence stalled the queue on innocent renderers. Process
+        enumeration is kept only to reap VRAM leaked by our *own* dead jobs,
+        matched by **(pid, create_time)** — a bare pid match isn't enough,
+        since PIDs get recycled and a stale job record could make us kill a
+        stranger (issue #83: a 3-day-old job's pid was reused by ``dwm.exe``).
+        If we can't probe memory at all we assume free rather than deadlock
+        the queue. Tunable via ANIMA_DAEMON_GPU_{BUSY_FRAC,RETRIES,DELAY}.
         """
-        # A resident inference server (scripts/inference_server.py) holds a warm
-        # DiT on the card. Politely ask it to free VRAM before we launch — it
-        # stays alive and reloads on its next request. Best-effort; if none is
-        # running this is a couple of cheap stat() calls.
+        # Ask a resident inference server to free VRAM before we launch — it
+        # stays alive and reloads on its next request. Best-effort.
         self._evict_resident_inference()
 
         for attempt in range(retries):
-            # Reap leftovers from our own (now-terminal/dead) jobs. Safe even
-            # when gpu_pids() is polluted: a holder acts only if it matches a
-            # known job on (pid, create_time) — i.e. it really is the process we
-            # spawned, still alive. A recycled pid fails the create_time check
-            # and is left alone (issue #83).
+            # Reap leftovers from our own dead jobs only — a holder acts only
+            # if it matches a known job on (pid, create_time), so a recycled
+            # pid (issue #83) is left alone even if gpu_pids() is polluted.
             holders = gpu.gpu_pids() or set()
             with self._lock:
                 known = {
@@ -888,11 +813,10 @@ class JobManager:
     def _evict_resident_inference(self) -> None:
         """Ask a resident inference server (if any) to free VRAM before launch.
 
-        Discovery mirrors scripts/inference_server.py's pidfiles (in-repo +
-        per-user mirror + $ANIMA_INFERENCE_PIDFILE). Done inline (no import) so
-        the daemon stays decoupled from the inference server; every failure is
-        swallowed — coexistence is a courtesy, and the server's own idle-TTL
-        eventually frees the card anyway.
+        Discovery mirrors scripts/inference_server.py's pidfiles. Done inline
+        (no import) so the daemon stays decoupled; every failure is swallowed
+        — coexistence is a courtesy, and the server's own idle-TTL eventually
+        frees the card anyway.
         """
         import json
         import urllib.request
@@ -941,29 +865,23 @@ class JobManager:
         # only the latest line, and training has its own progress.jsonl.
         env.setdefault("TQDM_MININTERVAL", "10")
 
-        # Layer the submitter's captured env (Phase 0b) over the daemon's boot
-        # env, so a job runs with the shell's CUDA_VISIBLE_DEVICES / ANIMA_DIT /
-        # HF_TOKEN rather than week-old daemon values. Applied via update (not
-        # setdefault): the caller's explicit value must win over an inherited
-        # one. A command job's extra_env is applied AFTER this, so it stays the
-        # highest-priority layer (daemon-env ← captured_env ← extra_env).
+        # Layer the submitter's captured env over the daemon's boot env (see
+        # README) via update, not setdefault, so the caller's value wins over
+        # an inherited one. A command job's extra_env applies after this, so
+        # it stays the highest-priority layer.
         env.update(job.captured_env or {})
 
-        # Phase 1a — result envelope lift. Advertise the job's identity + dir so a
-        # bench script running inside it can drop a `result_path.json` pointer
-        # (bench/_common.write_result reads these). Absent → the script runs as a
-        # plain inline invocation and writes no pointer (zero coupling). Set for
-        # every kind so any GPU job that happens to emit an envelope is lifted.
+        # Result envelope lift: advertise the job's identity + dir so a bench
+        # script can drop a `result_path.json` pointer (bench/_common.write_result
+        # reads these). Absent -> no pointer written, zero coupling.
         env["ANIMA_DAEMON_JOB_ID"] = job.id
         env["ANIMA_DAEMON_JOB_DIR"] = str(job.dir)
 
-        # Command jobs (preprocess / mask): a plain task invocation under
-        # pythonw.exe (windowless). A uv-venv python.exe re-execs the real
-        # interpreter and CREATE_NO_WINDOW doesn't survive that, so it pops a
-        # console whose close kills the job with STATUS_CONTROL_C_EXIT
-        # (0xC000013A); pythonw never allocates one (stdout still lands via
-        # spawn_detached's file redirect). No --progress_jsonl — these emit tqdm
-        # to stdout and finalize on exit code (no run_end event).
+        # Command jobs run under pythonw.exe (windowless): a uv-venv python.exe
+        # re-execs the real interpreter and CREATE_NO_WINDOW doesn't survive
+        # that, so it pops a console whose close kills the job
+        # (STATUS_CONTROL_C_EXIT); pythonw never allocates one. No
+        # --progress_jsonl — these finalize on exit code, no run_end event.
         if job.kind == "command":
             env.update(job.extra_env or {})
             return [venv_python(windowless=True), *job.argv], env
@@ -1009,11 +927,9 @@ class JobManager:
         return cmd, env
 
     def _reconcile(self) -> None:
-        # Prune BEFORE load_all: a pruned job never enters the in-memory table,
-        # so no later persist() can recreate the dir we just removed. Boot is the
-        # only safe moment for exactly that reason, and it's free (one pass over
-        # dirs we're about to walk anyway). Best-effort — a retention sweep must
-        # never be what stops the daemon from coming up.
+        # Prune BEFORE load_all: a pruned job must never enter the in-memory
+        # table, or a later persist() would recreate the dir we just removed.
+        # Best-effort — a retention sweep must never block the daemon booting.
         try:
             pruned = prune_jobs()
             if pruned["pruned"]:
@@ -1033,9 +949,8 @@ class JobManager:
             if job.state in ACTIVE_STATES:
                 if proc.is_alive(job.pid, job.create_time):
                     # A paused job's tree is still SIGSTOP'd on disk (the freeze
-                    # outlives the daemon) — re-adopt it in whatever state it was
-                    # left; the monitor loop skips the stall watchdog while it's
-                    # `paused` and a later resume thaws it.
+                    # outlives the daemon) — re-adopt it as-is; the monitor loop
+                    # skips the stall watchdog while `paused`.
                     logger.info(
                         "reconcile: re-attaching live %s job %s", job.state, job.id
                     )
@@ -1053,20 +968,17 @@ class JobManager:
                 self._queue.put(job.id)
 
     def _current_running_locked(self) -> Optional[Job]:
-        # The job occupying the worker/GPU slot — running or frozen. A paused job
-        # still owns its VRAM and blocks the queue, so `stop`/`shutdown`/health's
-        # active_job must all see it.
+        # The job occupying the worker/GPU slot — running or frozen. A paused
+        # job still owns its VRAM, so stop/shutdown/health must all see it.
         for job in self._jobs.values():
             if job.state in ACTIVE_STATES:
                 return job
         return None
 
     def _queue_is_idle_locked(self) -> bool:
-        """True when no job is running or waiting to run — the worker is parked
-        on an empty queue. Used to decide whether an ``add to queue`` submission
-        should hold the gate (idle → stage it) or leave the gate alone (a job is
-        already playing → let the new one auto-advance behind it). The
-        just-submitted job is not in ``_jobs`` yet when this is consulted."""
+        """True when no job is running or waiting to run. Used by
+        ``_register_and_queue`` to decide whether ``start=False`` should hold
+        the gate. The just-submitted job is not yet in ``_jobs`` here."""
         return not any(
             job.state == STATE_QUEUED or job.state in ACTIVE_STATES
             for job in self._jobs.values()

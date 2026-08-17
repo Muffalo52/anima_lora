@@ -24,11 +24,9 @@ class OrthoLoRAModule(BaseLoRAModule):
         out = x @ Q_eff^T @ diag(λ) @ P_eff^T
         where Q_eff = cayley(S_q) @ Q_basis, P_eff = P_basis @ cayley(S_p)
 
-    Zero-init S_p, S_q, λ → ΔW=0 at step 0. Frozen *full-dim* bases (not
-    PSOFT's principal-subspace restriction): expressiveness is limited to
-    rotations within the initial basis span — the tradeoff under benchmark.
-
-    Ref: PSOFT (Wu et al., ICLR 2026).
+    Zero-init S_p, S_q, λ → ΔW=0 at step 0. Frozen full-dim bases (not
+    PSOFT's principal-subspace restriction) cap expressiveness to rotations
+    within the initial basis span. Ref: PSOFT (Wu et al., ICLR 2026).
     """
 
     def __init__(
@@ -75,15 +73,13 @@ class OrthoLoRAModule(BaseLoRAModule):
         # ΔW = 0 at init (standard LoRA convention).
         self.lambda_layer = torch.nn.Parameter(torch.zeros(1, lora_dim))
 
-        # Absorb into Q_basis so the frozen path carries the rebalance.
-        # Run while the buffer is still fp32 so the in-place ``weight.mul_``
-        # happens at fp32 precision; downcast immediately after.
+        # Absorb into Q_basis while still fp32 (in-place weight.mul_ at fp32
+        # precision), then downcast.
         self._register_channel_scale(self.Q_basis, channel_scale)
 
-        # Frozen bases → bf16. The activation chain (lx, out) inherits this
-        # dtype via ``dtype = self.P_basis.dtype`` below, halving the
-        # saved-for-backward budget. Cayley solve stays fp32 in ``forward``
-        # (orthogonality invariant: ``R^T R = I`` ~1e-7 in fp32 vs ~1e-2 in bf16).
+        # Frozen bases → bf16, halving the saved-for-backward budget. Cayley
+        # solve stays fp32 (orthogonality invariant: R^T R = I ~1e-7 in fp32
+        # vs ~1e-2 in bf16).
         self.P_basis = self.P_basis.to(torch.bfloat16)
         self.Q_basis = self.Q_basis.to(torch.bfloat16)
 
@@ -115,9 +111,8 @@ class OrthoLoRAModule(BaseLoRAModule):
         work = self.P_basis.dtype  # bf16 — bases live here, chain follows
 
         # Stack S_q + S_p into one (2, r, r) solve — halves LU/TRSM launches.
-        # Cayley island stays fp32; we cast R only at the boundary into the
-        # basis matmuls so orthogonality is preserved while downstream
-        # activations stay bf16.
+        # Cayley solve stays fp32; cast R only at the boundary into the basis
+        # matmuls so orthogonality is preserved while activations stay bf16.
         skew = torch.stack([self.S_q, self.S_p])
         A = skew - skew.transpose(-2, -1)
         R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
@@ -155,16 +150,10 @@ class OrthoLoRAModule(BaseLoRAModule):
     ) -> None:
         """OrthoLoRA → standard LoRA: Cayley + frozen SVD → ``lora_down``/``lora_up``.
 
-        Mutates ``state_dict`` in place.
-
-        Discriminator: ``.S_p`` keys with ``dim == 2``. The OrthoHydra path
-        owns the 3-D ``.S_p`` shape and must run before this method, otherwise
-        the 2-D handler would mis-reduce 3-D tensors. Sets are tracked by
-        prefix so each module's keys are converted atomically.
-
-        Sqrt-splits ``λ`` between the two factors so the on-disk product
-        ``ΔW = P_eff @ diag(λ) @ Q_eff`` is preserved bit-exactly under
-        the ``(lora_down, lora_up)`` factorization.
+        Mutates ``state_dict`` in place. Discriminator: ``.S_p`` keys with
+        ``dim == 2`` — OrthoHydra's 3-D ``.S_p`` must run before this method or
+        the 2-D handler mis-reduces 3-D tensors. Sqrt-splits λ between the two
+        factors so ``ΔW = P_eff @ diag(λ) @ Q_eff`` is preserved bit-exactly.
         """
         prefixes = set()
         for key in state_dict.keys():
@@ -212,24 +201,20 @@ class OrthoLoRAModule(BaseLoRAModule):
 class OrthoInitLoRAModule(BaseLoRAModule):
     """OrthoInit: top-r SVD of W₀ as *initialization only* — trainable, uncapped.
 
-    OrthoLoRA freezes the top-r SVD basis and only Cayley-rotates *within* it,
-    so ``colspace(ΔW) ⊆ top-r(W₀)`` for the whole run — the rotation can never
-    leave the principal subspace, which is what makes T-LoRA+ortho / chimera-
-    ortho feel weak. OrthoInit keeps the same three-factor ``P diag(λ) Q`` shape
-    but makes ``P_init`` / ``Q_init`` **trainable Parameters** seeded from the
-    SVD (no frozen buffer, no Cayley). ΔW can then reach *any* rank-r subspace
-    (full LoRA expressivity) while still getting the W₀-aligned warm start.
+    OrthoLoRA freezes the top-r SVD basis and only Cayley-rotates within it,
+    so ``colspace(ΔW) ⊆ top-r(W₀)`` for the whole run — the fix for
+    "T-LoRA+ortho / chimera-ortho feels weak". OrthoInit keeps the same
+    three-factor ``P diag(λ) Q`` shape but makes ``P_init`` / ``Q_init``
+    trainable Parameters seeded from the SVD (no frozen buffer, no Cayley), so
+    ΔW can reach any rank-r subspace while keeping the W₀-aligned warm start.
 
         out = x @ Q_init^T @ diag(λ) @ P_init^T
 
-    λ zero-init keeps ΔW=0 at step 0. Because ∂L/∂P, ∂L/∂Q ∝ λ, the magnitudes
-    fit first along the principal directions, then the bases rotate off-subspace
-    as the loss demands — SVD as a *starting point*, not a cage.
+    λ zero-init keeps ΔW=0 at step 0; since ∂L/∂P, ∂L/∂Q ∝ λ, magnitudes fit
+    along principal directions first, then bases rotate off-subspace as needed.
 
-    Saved as standard LoRA (sqrt-split λ into ``lora_down`` / ``lora_up``), so the
-    on-disk format, merge path, and inference loader are identical to a distilled
-    OrthoLoRA. The ``lambda_layer`` + ``_timestep_mask`` factor is preserved at
-    train time so T-LoRA's per-rank schedule still gates the singular values.
+    Saved as standard LoRA (sqrt-split λ into lora_down/lora_up), so on-disk
+    format, merge, and inference are identical to a distilled OrthoLoRA.
     """
 
     def __init__(
@@ -265,9 +250,8 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         Q_init = V[:, :lora_dim].T.clone().contiguous()  # (r, in)
         del U, _S_vals, V, W
 
-        # Trainable factors. fp32 master (Adam state precision); cast to the
-        # activation dtype at the matmul boundary in forward — same convention
-        # as ``lambda_layer``. No Cayley, no frozen P_basis/Q_basis buffers.
+        # Trainable factors, fp32 master (Adam state precision); cast to the
+        # activation dtype at the matmul boundary. No Cayley, no frozen buffers.
         self.P_init = torch.nn.Parameter(P_init.cpu())
         self.Q_init = torch.nn.Parameter(Q_init.cpu())
         # ΔW = 0 at init; also gates ∂L/∂P, ∂L/∂Q off until λ ramps.
@@ -278,17 +262,15 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         self._register_channel_scale(self.Q_init.data, channel_scale)
 
     # Forward is the shared BaseLoRAModule scaffold; this class supplies the
-    # trainable SVD-seeded down / up GEMMs and folds ``lambda_layer`` into the
-    # T-LoRA gate. The fp32-master → ``work`` cast dance + dtype-policy rationale
-    # (mirrors the lora.py 8c2005c fix) live in the base scaffold.
+    # trainable SVD-seeded down/up GEMMs and folds lambda_layer into the
+    # T-LoRA gate.
 
     def _down(self, x_lora, work):
         return torch.nn.functional.linear(x_lora, self.Q_init.to(work))
 
     def _gate(self, lx, work):
-        # λ (fp32 master Parameter) + the T-LoRA mask gate the rank latent. lx
-        # is (B, L, r) here — tiny — so the fp32 promotion is negligible and the
-        # base scaffold casts back to ``work`` before the up GEMM.
+        # lx is (B, L, r) — tiny — so the fp32 promotion here is negligible;
+        # the base scaffold casts back to work before the up GEMM.
         return lx * self.lambda_layer.float() * self._timestep_mask
 
     def _up(self, lx, work):
@@ -312,9 +294,8 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         """OrthoInit → standard LoRA: ``P_init`` / ``Q_init`` / λ → down/up.
 
         Mutates ``state_dict`` in place. Discriminator: ``.P_init`` keys (no
-        other variant uses that name). Sqrt-splits λ between the two factors so
-        the on-disk product ``ΔW = P_init @ diag(λ) @ Q_init`` is preserved
-        bit-exactly under the ``(lora_down, lora_up)`` factorization.
+        other variant uses that name). Sqrt-splits λ so ``ΔW = P_init @
+        diag(λ) @ Q_init`` is preserved bit-exactly.
         """
         prefixes = set()
         for key in state_dict.keys():
@@ -357,20 +338,19 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
 
     Shared Q_basis + trainable S_q (down). Up takes the top E*r singular
     vectors and partitions them into E disjoint slices of r columns; expert e
-    owns ``P_bases[e]: (out, r)``, rotated by per-expert Cayley R_p[e].
-    Because SVD columns are orthonormal, ``P_bases[i]^T P_bases[j] = 0`` for
-    i≠j — experts are structurally orthogonal in output space.
+    owns ``P_bases[e]: (out, r)``, rotated by per-expert Cayley R_p[e]. SVD
+    columns are orthonormal, so ``P_bases[i]^T P_bases[j] = 0`` for i≠j —
+    experts are structurally orthogonal in output space.
 
-    Disjoint slices (not shared P + per-expert R_p): with a shared basis,
-    ``P_eff[i]^T P_eff[j] = R_p[i]^T R_p[j]`` is orthogonal and never zero, so
-    every expert lives in the same rank-r span and the router gets near-
-    identical ``score_e`` (MoE cold-start deadlock; bench 2026-04-21).
+    Disjoint slices instead of shared-P + per-expert R_p: a shared basis makes
+    ``P_eff[i]^T P_eff[j] = R_p[i]^T R_p[j]`` orthogonal-but-nonzero, so every
+    expert lives in the same rank-r span and the router gets near-identical
+    ``score_e`` — an MoE cold-start deadlock confirmed by bench (2026-04-21).
     Disjoint subspaces make ``score_e`` genuinely different from step 0.
 
     Fallback when ``min(out, in) < E*r``: ``P_bases`` replicates the top-r
-    slice E times (warning logged). All experts start identical — narrow-
-    layer OrthoHydra relies entirely on the per-expert ``S_p`` rotations
-    diverging during training; if the router collapses they never will.
+    slice E times (warning logged) — experts start identical and rely
+    entirely on per-expert S_p divergence during training.
     """
 
     def __init__(
@@ -445,14 +425,14 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
         self._disjoint_basis = disjoint
 
         self.S_q = torch.nn.Parameter(torch.zeros(lora_dim, lora_dim))
-        # Per-expert P rotations. With disjoint P_bases zero-init still yields
-        # E distinct P_eff slices; in the narrow-layer fallback all experts
-        # start identical and must diverge through training-time updates.
+        # Per-expert P rotations. Zero-init still yields E distinct P_eff
+        # slices with disjoint P_bases; narrow-layer fallback experts start
+        # identical and must diverge through training.
         self.S_p = torch.nn.Parameter(torch.zeros(num_experts, lora_dim, lora_dim))
-        # λ zero-init keeps ΔW=0 at step 0 but gates the router gradient off
-        # until λ ramps. Under centered_gate the gate residual (g_e - 1/E)
-        # already preserves ΔW=0 at init, so λ can start small-nonzero and the
-        # router receives gradient at literal step 0.
+        # λ zero-init keeps ΔW=0 but gates router gradient off until λ ramps.
+        # Under centered_gate the (g_e - 1/E) residual already preserves
+        # ΔW=0, so λ can start small-nonzero and the router gets gradient
+        # at step 0.
         self.lambda_layer = torch.nn.Parameter(
             torch.full((1, lora_dim), float(lambda_init))
         )
@@ -469,11 +449,10 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
             self.router = torch.nn.Linear(router_in_dim, num_experts, bias=True)
             with torch.no_grad():
                 self.router.weight.zero_()
-                # The normal seed is the legacy symmetry-breaker for zero-init
-                # λ (it gives the gate a tiny non-uniform tilt at step 0). Under
-                # centered_gate the symmetry break comes from (P_k - mean)·λ0
-                # instead, and we want the gate *exactly* uniform at init so the
-                # residual vanishes — so leave the router fully zero-init.
+                # Normal seed is the legacy symmetry-breaker for zero-init λ.
+                # Under centered_gate the break comes from (P_k - mean)·λ0
+                # instead, so the gate must stay exactly uniform at init —
+                # leave the router fully zero-init.
                 if not self._centered_gate:
                     torch.nn.init.normal_(self.router.weight[:, :lora_dim], std=0.01)
                 self.router.bias.zero_()
@@ -525,8 +504,7 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
         """RMS-pool post-Q_eff (pre-λ, pre-mask), concat σ/FEI, router, softmax.
 
         Pre-λ pool: λ is zero-init, so post-λ pooling would zero the router
-        input at step 0 and freeze gradient. See HydraLoRAModule._compute_gate
-        for the routing surface; under use_global_router lx is ignored.
+        input at step 0. Under use_global_router lx is ignored.
         """
         if self.use_global_router:
             B = lx.shape[0] if lx.dim() >= 1 else 1
@@ -573,7 +551,6 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
 
         # Stack S_q with S_p into one (E+1, r, r) solve — single LU+TRSM
         # launch covers shared Q rotation and all per-expert P rotations.
-        # Cayley solve stays fp32; boundary cast feeds R into the basis matmuls.
         skew = torch.cat([self.S_q.unsqueeze(0), self.S_p], dim=0)
         A = skew - skew.transpose(-2, -1)
         R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
@@ -628,12 +605,10 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
     def subspace_overlap(self) -> float:
         """Mean normalized cross-expert column-space overlap of ``P_bases``.
 
-        ``‖P_iᵀ P_j‖_F / √r`` averaged over expert pairs i<j: ~0 when the
-        per-expert slices are disjoint (the design invariant), ~1 in the
-        narrow-layer shared-basis fallback. Constant across training — the
-        Cayley ``R_p`` rotations preserve each slice's span, so this is a
-        structural *guardrail* (catches a basis/init regression), not a
-        learning signal. Computed once from the frozen buffer and cached.
+        ``‖P_iᵀ P_j‖_F / √r`` averaged over expert pairs i<j: ~0 when disjoint
+        (the design invariant), ~1 in the narrow-layer fallback. Constant
+        across training (Cayley preserves each slice's span) — a structural
+        guardrail, not a learning signal. Computed once and cached.
         """
         cached = getattr(self, "_subspace_overlap_cached", None)
         if cached is not None:
@@ -662,27 +637,23 @@ class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
         """OrthoHydra → Hydra runtime form (shared down + stacked ups).
 
         Mutates ``state_dict`` in place. Discriminator: ``.S_p`` with
-        ``dim == 3`` AND co-located ``.S_q`` with ``dim == 2``. The 2-D
-        ``S_q`` is the only thing that distinguishes OrthoHydra (shared
-        Q rotation across experts) from StackedExperts-ortho (per-expert
-        ``S_q`` is 3-D), and ``StackedExpertsLoRAModule.distill_save_state_dict``
+        ``dim == 3`` AND co-located ``.S_q`` with ``dim == 2`` (the 2-D S_q
+        is what distinguishes OrthoHydra from StackedExperts-ortho, whose
+        S_q is 3-D) — ``StackedExpertsLoRAModule.distill_save_state_dict``
         must run before this method.
 
-        Outputs: ``.lora_down.weight`` (shared) + ``.lora_up_weight``
-        (stacked ``(E, out, r)`` — the Hydra training runtime layout). The
-        downstream MoE writer in :meth:`HydraLoRAModule.build_moe_state_dict`
-        expands this into per-expert ``.lora_ups.{i}.weight`` keys.
+        Outputs ``.lora_down.weight`` (shared) + ``.lora_up_weight`` (stacked
+        ``(E, out, r)``); :meth:`HydraLoRAModule.build_moe_state_dict` expands
+        this into per-expert keys.
 
-        NOTE (centered_gate parity): the runtime MoE form combines per-expert
-        ups with the raw softmax gate, i.e. ``Σ_e g_e P_e``. A checkpoint
-        trained with ``ortho_centered_gate=True`` actually computed
-        ``Σ_e (g_e - 1/E) P_e = Σ_e g_e P_e - (1/E)Σ_e P_e`` — an extra fixed
-        ``-(1/E)Σ_e P_e`` mean-expert bias (a plain-LoRA branch) that this
-        runtime form does NOT carry. In-training CMMD validation runs the
-        live (centered) module forward and is faithful; deploying the
-        distilled ``_moe`` checkpoint is not, until the router-live node
-        subtracts the mean expert. Treat centered_gate as train/research-only
-        for now. See proposal.md / [[project_crossattn_emb_router_source]].
+        GOTCHA (centered_gate parity): the runtime MoE form combines ups with
+        the raw softmax gate (``Σ_e g_e P_e``), but a checkpoint trained with
+        ``ortho_centered_gate=True`` computed ``Σ_e (g_e - 1/E) P_e`` — an
+        extra ``-(1/E)Σ_e P_e`` mean-expert bias this distilled form does NOT
+        carry. In-training CMMD validation (live centered forward) is
+        faithful; the deployed distilled ``_moe`` checkpoint is not, until the
+        router-live node subtracts the mean expert. Treat centered_gate as
+        train/research-only for now.
         """
         prefixes = set()
         for key in list(state_dict.keys()):

@@ -16,22 +16,19 @@ Checkpoint layout (produced by ``python -m scripts.anima_tagger.cli``):
       groups.yaml              # tag-group taxonomy (optional)
 
 When ``groups.yaml`` is present, prediction is group-aware: ``softmax`` and
-``softmax_when_solo`` (the latter gated on solo + no-escape) groups emit
-exactly one tag per group (argmax over group logits), even when the
-sigmoid threshold would have admitted several. Multi-label groups and
-ungrouped tags fall back to the standard threshold path.
+``softmax_when_solo`` groups emit exactly one tag per group (argmax over
+group logits) instead of the sigmoid threshold. Ungrouped/multi-label tags
+use the standard threshold path.
 
-The head is always dual-encoder (PE-Core + PE-Spatial, hard-routed): PE-Core
-(``--encoder``, default PE-Core-L14-336) drives rating / people-count /
-identity tags; PE-Spatial (``--aux_encoder``, default PE-Spatial-B16-512)
-drives localized tags. Both encoders are loaded lazily on first ``predict``
-call and run per image. Pre-dual / v1 single-encoder checkpoints no longer
-load (``config.json`` must carry ``aux_encoder`` + ``model.d_in_aux``).
+**The head is always dual-encoder (PE-Core + PE-Spatial), hard-routed**:
+PE-Core drives rating/people-count/identity tags, PE-Spatial drives
+localized tags, both loaded lazily and run per image. Pre-dual / v1
+single-encoder checkpoints no longer load (``config.json`` must carry
+``aux_encoder`` + ``model.d_in_aux``).
 
 Captions are emitted in Anima's canonical slot order:
 ``rating, count_tags, characters, copyrights, @artists, generals``, with
-underscores replaced by spaces (matching how Anima's training-time T5 saw
-the data).
+underscores replaced by spaces (matching Anima's training-time T5 input).
 """
 
 from __future__ import annotations
@@ -62,10 +59,9 @@ from library.vision.encoder import (
 
 logger = logging.getLogger(__name__)
 
-# Auto-fetch repo when ckpt_dir is missing required files. Mirrors the ComfyUI
-# loader's auto-download (custom_nodes/comfyui-anima-tagger/nodes.py). The live
-# checkpoint (v3-refit — spatial-head headroom Phase-1) lives under the ``v3/``
-# subfolder; the repo root still holds the legacy v2 files.
+# Auto-fetch repo when ckpt_dir is missing required files (mirrors the ComfyUI
+# loader). Live checkpoint lives under the `v3/` subfolder; repo root still
+# holds legacy v2 files.
 TAGGER_HF_REPO = "sorryhyun/anima-tagger"
 TAGGER_HF_SUBFOLDER = "v3"
 TAGGER_REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
@@ -80,11 +76,9 @@ def ensure_tagger_checkpoint(
 ) -> Path:
     """Fetch the tagger checkpoint into ``ckpt_dir`` if any required file is missing.
 
-    One-time download from ``repo`` (default ``sorryhyun/anima-tagger``); files
-    are flattened into ``ckpt_dir`` regardless of the source layout so the
-    loader's directory contract (``ckpt_dir/config.json`` …) stays uniform.
-    Optional files (thresholds / groups) are best-effort — a 404 just means the
-    published checkpoint doesn't ship that file. Returns the resolved ``Path``.
+    Files are flattened into ``ckpt_dir`` regardless of source layout so the
+    loader's directory contract stays uniform. Optional files (thresholds /
+    groups) are best-effort — a 404 just means the checkpoint doesn't ship it.
     """
     ckpt_dir = Path(ckpt_dir)
     if all((ckpt_dir / f).exists() for f in TAGGER_REQUIRED_FILES):
@@ -135,9 +129,7 @@ _GIRLS_COUNT_RE = re.compile(r"^(\d+)\+?girls?$")
 # when copyright is `original`/meta, the parens content is the artist's name.
 _OC_SUFFIX_RE = re.compile(r"\(([^()]+)\)\s*$")
 
-# Copyrights that mean "no franchise" — `original` plus meta-publisher imprints
-# booru tags alongside it (melonbooks / toranoana / comic kairakuten). All three
-# are in-vocab; exact membership (no regex), vocab is small and stable.
+# Copyrights that mean "no franchise" — `original` plus meta-publisher imprints.
 _META_COPYRIGHTS = frozenset(
     {"original", "melonbooks", "toranoana", "comic kairakuten"}
 )
@@ -164,15 +156,11 @@ TAG_TYPE_NAMES: Dict[int, str] = {
     6: "deprecated",
 }
 
-# Anima's 4-class rating set, in canonical class-index order (least → most
-# restrictive). Same members as ``library.captioning.taxonomy.CAPTION_RATINGS``
-# — that module holds the unordered set + the legacy booru aliases
-# (``general``→``safe``, ``questionable``→``nsfw``); the order lives here
-# because it's the rating head's class index. Do not reorder without rebuilding
-# vocab: ``vocab.json`` snapshots this list and ``dataset.json`` stores indices
-# into it. Existing checkpoints are unaffected — ``AnimaTagger`` reads
-# ``vocab["ratings"]`` from the checkpoint, and ``n_ratings`` comes from the
-# manifest, so a 3-class checkpoint keeps loading and predicting its own labels.
+# Anima's 4-class rating set, in canonical class-index order (least -> most
+# restrictive; see library.captioning.taxonomy.CAPTION_RATINGS for the legacy
+# booru aliases). Do not reorder without rebuilding vocab.json/dataset.json —
+# but existing checkpoints are unaffected since AnimaTagger reads ratings/
+# n_ratings from the checkpoint itself, so a 3-class checkpoint still works.
 RATINGS: Tuple[str, ...] = ("safe", "sensitive", "nsfw", "explicit")
 
 # 8-class people-count bucket from parsed count tags
@@ -210,12 +198,10 @@ def _underscore_to_space(s: str) -> str:
 def _fix_artist_category(category: str, name: str) -> str:
     """Retype legacy mis-categorized "artist" entries shipped in vocab.json.
 
-    Older vocab builds typed any ``@``-prefixed tag as ``artist``, which
-    swept up booru emoticons like ``@_@`` (stored space-form as ``@ @``).
-    The corrected rule (see ``scripts/anima_tagger/vocab.categorize``)
-    requires ``@`` followed by non-whitespace; anything else falls back
-    to ``general``. We patch loaded vocab here so existing checkpoints
-    don't need to be rebuilt — the model's tag-level sigmoid is unchanged.
+    Older vocab builds typed any ``@``-prefixed tag as ``artist``, sweeping
+    up booru emoticons like ``@_@``. The corrected rule requires ``@``
+    followed by non-whitespace; patched here so existing checkpoints don't
+    need rebuilding.
     """
     if category != "artist":
         return category
@@ -258,25 +244,19 @@ class AnimaTagger:
         self.device = torch.device(device)
         self.dtype = dtype
         self.pe_ckpt = Path(pe_ckpt) if pe_ckpt else None
-        # Override for the aux (PE-Spatial) encoder weights path; None → registry
-        # default (PE-Spatial-B16-512 at ``models/pe/PE-Spatial-B16-512.pt``).
+        # None -> registry default (PE-Spatial-B16-512 at models/pe/...).
         self.pe_aux_ckpt = Path(pe_aux_ckpt) if pe_aux_ckpt else None
-        # pe_lora_path / pe_lora_disabled kept for ComfyUI-node call-site compat
-        # but are no-ops — PE-LoRA was removed when the tagger collapsed to the
-        # dual-encoder frozen-trunk architecture.
+        # kept for ComfyUI-node call-site compat but are no-ops now (PE-LoRA
+        # was removed when the tagger collapsed to dual-encoder frozen-trunk).
         del pe_lora_path, pe_lora_disabled
-        # Absolute confidence floor for characters, *above* the per-tag F1
-        # threshold (some F1 thresholds are ~0.05 — chasing F1 there yields false
-        # positives on ambiguous/stylized art). Below floor → fall back to
-        # `original`.
+        # Absolute confidence floor for characters, above the per-tag F1
+        # threshold (some F1 thresholds are ~0.05, too permissive on its own).
         self._character_floor = float(character_floor)
 
         with open(self.ckpt_dir / "config.json", encoding="utf-8") as f:
             cfg_d = json.load(f)
         self.encoder_name: str = cfg_d.get("encoder", "pe")
-        # Aux (PE-Spatial) encoder — mandatory; the head is always dual-encoder.
-        # ``AnimaTaggerConfig.from_dict`` rejects pre-dual/v1 configs (missing
-        # d_in_aux); here we just need to know which encoder to load.
+        # aux (PE-Spatial) encoder is mandatory — the head is always dual-encoder.
         self.aux_encoder_name: Optional[str] = cfg_d.get("aux_encoder")
         self.cfg = AnimaTaggerConfig.from_dict(cfg_d["model"])
         if not self.aux_encoder_name:
@@ -306,13 +286,12 @@ class AnimaTagger:
             for t in vocab["tags"]
         ]
         self.ratings: List[str] = list(vocab["ratings"])
-        # Empty list = legacy/disabled (older vocab.json had no people-count
-        # labels, and those checkpoints also lack the head: n_people_counts == 0).
+        # empty = legacy/disabled checkpoint (no people-count head, n_people_counts == 0)
         self.people_count_labels: List[str] = list(
             vocab.get("people_count_labels") or []
         )
-        # Index of the canonical "original" copyright tag (None if absent); the
-        # uncertainty-fallback in predict() when a character misses _character_floor.
+        # "original" copyright index; the uncertainty-fallback in predict()
+        # when a character misses _character_floor.
         self._original_idx: Optional[int] = next(
             (
                 e.index
@@ -335,14 +314,12 @@ class AnimaTagger:
 
         self.rules = tr.load_rules(self.ckpt_dir / "rules.yaml")
 
-        # Optional groups snapshot, cached per-group so predict() doesn't reparse
-        # names every call. None when the snapshot is missing (older/flat-vocab).
+        # Optional groups snapshot; None when missing (older/flat-vocab).
         groups_path = self.ckpt_dir / "groups.yaml"
         self._groups: Optional[tg.TagGroups] = None
         self._group_lookup: Dict[str, Dict] = {}
-        # "single-subject" detection mirrors the trainer's GroupRouter:
-        # solo/1girl/1boy/1other are single-count, anything else matching the
-        # count regex is multi-count.
+        # solo/1girl/1boy/1other are single-count; anything else matching the
+        # count regex is multi-count (mirrors the trainer's GroupRouter).
         self._single_count_names = {"solo", "1girl", "1boy", "1other"}
         self._multi_count_names: set = set()
         if groups_path.exists():
@@ -354,10 +331,8 @@ class AnimaTagger:
                 tag_idx = [tag_to_idx[t] for t in g.tags if t in tag_to_idx]
                 if not tag_idx:
                     continue
-                # Sentinel groups carry a synthetic "<none:group>" vocab slot:
-                # appended to the candidate list so argmax can pick "none of
-                # these" and the group emits nothing (vs the legacy behavior
-                # of always emitting a winner).
+                # sentinel groups carry a synthetic "<none:group>" slot, appended
+                # so argmax can pick "none of these" and emit nothing.
                 sentinel_local: Optional[int] = None
                 if g.sentinel:
                     s_idx = tag_to_idx.get(tg.sentinel_tag_name(g.name))
@@ -399,8 +374,7 @@ class AnimaTagger:
     def _bundle_aux(self) -> VisionEncoderBundle:
         """Lazy-load the auxiliary (PE-Spatial) encoder."""
         if self._encoder_aux is None:
-            # None lets load_pe_encoder resolve via the registry
-            # (models/pe/PE-Spatial-B16-512.pt, auto-fetched from HF when absent).
+            # None -> registry default, auto-fetched from HF when absent
             self._encoder_aux = load_pe_encoder(
                 self.device,
                 name=self.aux_encoder_name,
@@ -422,11 +396,8 @@ class AnimaTagger:
 
     @torch.no_grad()
     def _encode_image_aux(self, pil_img: Image.Image) -> torch.Tensor:
-        """Image → aux encoder feature, shape per ``cfg.pool_kind_aux``.
-
-        Mirrors :meth:`_encode_image` but for the auxiliary encoder. When
-        the aux side is mean-pool, returns ``[d_enc_aux]``; when map,
-        returns ``[T_a, d_enc_aux]``."""
+        """Image → aux encoder feature, shape per ``cfg.pool_kind_aux``
+        (mirrors :meth:`_encode_image` for the auxiliary encoder)."""
         return self._encode_with(
             pil_img,
             self._bundle_aux(),
@@ -458,20 +429,12 @@ class AnimaTagger:
     def predict(self, pil_img: Image.Image) -> Dict[str, object]:
         """Run one image through the head; return raw + thresholded outputs.
 
-        Returns a dict with:
-
-        * ``rating``: predicted rating string (one of ``self.ratings``)
-        * ``rating_scores``: dict ``{rating: prob}``
-        * ``people_count`` / ``people_count_scores``: argmax label and
-          ``{label: prob}`` distribution from the 8-class people-count head.
-          Both are absent when the loaded checkpoint was trained without
-          the people head (legacy ``cfg.n_people_counts == 0``).
-        * ``scores``: dict ``{tag: prob}`` for *all* in-vocab tags
-        * ``kept``: dict ``{tag: prob}`` for tags emitted as positives.
-          When typed groups are loaded, softmax-group winners are picked
-          by argmax (one per group) instead of by sigmoid threshold.
-        * ``groups``: dict ``{group_name: predicted_tag_or_None}`` — only
-          present when typed groups are loaded.
+        Returns a dict with ``rating`` / ``rating_scores``; ``people_count`` /
+        ``people_count_scores`` (absent on legacy checkpoints without the
+        people head); ``scores`` (all in-vocab tag probs); ``kept`` (emitted
+        positives — softmax-group winners are picked by argmax, not sigmoid
+        threshold, when typed groups are loaded); and ``groups``
+        (``{group_name: predicted_tag_or_None}``, only when groups loaded).
         """
         feat = self._encode_image(pil_img).unsqueeze(0).to(self.device)
         feat_aux = self._encode_image_aux(pil_img).unsqueeze(0).to(self.device)
@@ -485,8 +448,7 @@ class AnimaTagger:
             self.tag_entries[i].name: float(tag_probs_cpu[i])
             for i in range(self.cfg.n_tags)
         }
-        # Sentinel slots ("<none:group>") are internal rejection classes —
-        # they stay visible in ``scores`` but are never emitted as tags.
+        # sentinel slots ("<none:group>") stay in `scores` but are never emitted
         kept = {
             self.tag_entries[i].name: float(tag_probs_cpu[i])
             for i in range(self.cfg.n_tags)
@@ -532,8 +494,7 @@ class AnimaTagger:
                 idx_t = info["tag_idx"]
                 group_logits = tag_logits_row.index_select(0, idx_t)
                 winner_local = int(group_logits.argmax().item())
-                # Drop sigmoid-admitted group tags, re-add the argmax winner with
-                # its sigmoid prob so callers can still inspect a confidence.
+                # drop sigmoid-admitted tags, re-add the argmax winner w/ its sigmoid prob
                 for t in info["tag_names"]:
                     kept.pop(t, None)
                 if winner_local == info.get("sentinel_local"):
@@ -547,10 +508,8 @@ class AnimaTagger:
             out["kept"] = kept
             out["groups"] = group_preds
 
-        # Cap characters to the largest digit-prefixed girls-count in `kept`.
-        # The per-tag sigmoid can admit several borderline characters for what is
-        # one subject; trim to top-N by score (N = parsed count). No girls-count
-        # tag → leave the character set alone.
+        # cap characters to the largest digit-prefixed girls-count in `kept`
+        # (trim borderline sigmoid admits to top-N by score, N = parsed count)
         girl_caps = [
             int(m.group(1)) for name in kept if (m := _GIRLS_COUNT_RE.match(name))
         ]
@@ -568,9 +527,8 @@ class AnimaTagger:
                 kept.pop(name, None)
             out["kept"] = kept
 
-        # Drop characters below `_character_floor` as guesses. If that empties
-        # the character slot AND no copyright is kept, add "original" (raw
-        # sigmoid score) as a slot-filler — booru convention for non-IP work.
+        # drop characters below the floor; if that empties both character and
+        # copyright, add "original" as a slot-filler (booru non-IP convention)
         dropped_any = False
         for e in self.tag_entries:
             if e.category != "character" or e.name not in kept:
@@ -588,8 +546,7 @@ class AnimaTagger:
             if not has_char and not has_copy:
                 kept["original"] = float(tag_probs_cpu[self._original_idx])
 
-        # Cap artist/copyright to top-1 by score — the independent sigmoids can
-        # clear several, but booru convention is one each per work.
+        # cap artist/copyright to top-1 by score (booru convention is one each)
         for cat in ("artist", "copyright"):
             cat_scored = sorted(
                 (
@@ -602,11 +559,9 @@ class AnimaTagger:
             for _, name in cat_scored[1:]:
                 kept.pop(name, None)
 
-        # With `original`/meta copyright (see `_META_COPYRIGHTS`), keep a
-        # character only when its parens-suffix matches the surviving artist
-        # (sans `@`) — the artist's named OC `<name> (<artist>)`. Empirically
-        # 145/148 (98%) of original-co-tagged characters on image_dataset/ fit
-        # this; no-paren or franchise-suffixed names are misfires.
+        # With `original`/meta copyright, keep a character only when its
+        # parens-suffix matches the surviving artist (sans `@`) — the
+        # artist's named OC `<name> (<artist>)`.
         if any(c in kept for c in _META_COPYRIGHTS):
             artist_suffix = next(
                 (
@@ -635,11 +590,9 @@ class AnimaTagger:
     def predict_caption(self, pil_img: Image.Image, min_confidence: float = 0.0) -> str:
         """Image → canonical Anima caption string (rating + slotted tags).
 
-        ``min_confidence`` (0–1) is an extra probability floor applied on top
-        of the per-tag F1 thresholds the model was calibrated with: any kept
-        tag whose sigmoid probability is below it is dropped. 0.0 (default)
-        leaves the model's own threshold decisions untouched. The rating slot
-        is always emitted regardless of this floor.
+        ``min_confidence`` (0-1) is an extra probability floor on top of the
+        per-tag F1 thresholds; 0.0 (default) leaves them untouched. The
+        rating slot is always emitted regardless of this floor.
         """
         out = self.predict(pil_img)
         kept = out["kept"]

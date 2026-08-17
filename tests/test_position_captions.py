@@ -2,24 +2,18 @@
 
 Four invariants worth pinning:
 
-1. **Clause parsing round-trips.** The convention delimits clauses with ``.``
-   and tags with ``,``. A naive ``split(",")`` glues the header onto the
-   preceding tag (``"white socks. On the left"``), which is what used to make
-   every ``On the …``-aware consumer silently see no sections at all.
+1. **Clause parsing round-trips.** ``.`` delimits clauses, ``,`` delimits tags —
+   a naive ``split(",")`` glues the header onto the preceding tag.
 2. **Clauses are atomic under variant generation.** A shuffled variant must
-   never move a clause tag into the flat bag or into a *different* clause —
-   that reassigns an attribute to the wrong subject, the exact ambiguity the
-   feature exists to remove.
+   never move a clause tag into the flat bag or into a *different* clause.
 3. **The pipeline never writes a clause it can't ground.** Count disagreement,
    too few instances, and hallucinated character names all skip.
 4. **The v2 rewrite only removes what it has earned.** A tag leaves the flat bag
-   when exactly one clause claims it, the bag corroborates a per-subject reading
-   (two views of one girl are not two girls), no other crop *kept* it, and the
-   winner clears the runner-up by the attribution margin — measured relative to
-   the winner's own probability, because per-tag thresholds span ~0.05–0.85 and
-   an absolute gap is therefore a different test for every tag. Failing any of
-   those degrades to v1 for that one tag — bound *and* still flat — never to a
-   wrong deletion.
+   only when exactly one clause claims it, the bag corroborates a per-subject
+   reading, no other crop kept it, and the winner clears the runner-up by the
+   attribution margin (relative to the winner's own probability, since per-tag
+   thresholds vary widely). Failing any rule degrades to v1 for that tag —
+   bound *and* still flat — never a wrong deletion.
 """
 
 from __future__ import annotations
@@ -103,11 +97,10 @@ def test_has_clauses_detects_both_forms():
 def test_lowercase_period_form_parses_and_canonicalizes():
     """`has_clauses` and `parse_caption` must agree on a lowercase header.
 
-    The split regex is case-insensitive, so a hand-written ``. on the left,``
-    made ``has_clauses`` true; the header test was not, so ``parse_caption``
-    returned zero clauses. The position pass then skipped the caption as
-    already annotated while correction/variants shuffled the header around as
-    an ordinary flat tag — shredding the clause it was told to leave alone.
+    GOTCHA regression: a hand-written ``. on the left,`` made ``has_clauses``
+    true (case-insensitive split regex) but ``parse_caption`` returned zero
+    clauses (case-sensitive header test) — shredding the clause it was told to
+    leave alone.
     """
     caption = "safe, 2girls. on the left, red eyes. on the right, aqua eyes."
     assert has_clauses(caption)
@@ -425,10 +418,8 @@ def test_v2_moves_each_bound_attribute_out_of_the_flat_bag(pipeline_bits):
 def test_the_cast_list_stays_in_the_flat_bag(pipeline_bits):
     """Hand-written convention: names are bound *and* kept flat.
 
-    Across the 14 ground-truth captions, 19 of 244 clause tags also appear in the
-    bag and every one of them is a character name — no attribute is ever
-    duplicated. The bag is the cast list a prompt uses to summon the characters;
-    the clause says which one is where.
+    The bag is the cast list a prompt uses to summon the characters; the clause
+    says which one is where. No non-name attribute is ever duplicated this way.
     """
     proposal = _two_girls_proposal(pipeline_bits)
     flat = parse_caption(proposal.proposed).flat_tags
@@ -468,14 +459,12 @@ def _views_proposal(pipeline_bits, caption, per_crop, **option_overrides):
 def test_a_single_characters_attributes_never_leave_the_bag(pipeline_bits):
     """The v2 hazard: two views of one girl are not two girls.
 
-    ``blonde hair`` read off the left view only would, if moved, make the caption
-    claim the right view is *not* blonde — of the same character. One hair color
-    in the bag is a property of the character, so it stays flat; the outfit that
-    genuinely differs per view moves.
+    Moving ``blonde hair`` off the left view only would make the caption claim
+    the right view isn't blonde, of the same character — so it stays flat;
+    the outfit that genuinely differs per view still moves.
 
-    Pinned here at ``multi_view_gate=False``, the arm where the tag still enters
-    its clause: this is the *removal* rule, and the gate is the stricter
-    *emission* layer stacked on top of it (see the multi-view tests below).
+    Pinned at ``multi_view_gate=False`` (the *removal* rule) — the gate itself
+    is the stricter *emission* layer stacked on top (see multi-view tests below).
     """
     proposal = _views_proposal(
         pipeline_bits,
@@ -675,9 +664,7 @@ def _two_hair_colors():
 
 def test_a_detected_male_is_inside_the_count_range(pipeline_bits):
     # `expected` counts girls, but the `girl` prompt picks up males
-    # inconsistently — it found the boy in 7 of the 19 first-run mismatches and
-    # missed him in 89 images that passed. Equality can't be right for both;
-    # girls..girls+boys is.
+    # inconsistently, so equality can't be right; girls..girls+boys is.
     from library.preprocess.position_captions import propose_for_image
 
     image, vocabulary, _, Options = pipeline_bits
@@ -721,8 +708,8 @@ def test_a_detected_male_is_inside_the_count_range(pipeline_bits):
 
 def test_retry_fires_when_the_caption_gives_no_count(pipeline_bits):
     # A `multiple views` sheet reports expected=None on purpose. Gating the
-    # low-threshold retry on `if expected` skipped it for that whole population
-    # — 35 of the 81 too-few-instances skips in the first full-corpus run.
+    # low-threshold retry on `if expected` would skip it for that whole
+    # population.
     from library.preprocess.position_captions import propose_for_image
 
     image, vocabulary, _, Options = pipeline_bits
@@ -750,9 +737,8 @@ def test_retry_fires_when_the_caption_gives_no_count(pipeline_bits):
 
 def test_a_nested_subject_survives_dedupe():
     # A real second subject is as nested as a group box — one girl in front of
-    # another, an embrace, a background figure inside a foreground box. Ablated
-    # over the 34 rows that regressed when containment suppression was first
-    # enabled, 32 recover with it off, so the rule must stay opt-in.
+    # another, an embrace, a background figure inside a foreground box — so
+    # the rule must stay opt-in.
     from library.preprocess.position_captions import Detection, dedupe_detections
 
     host = Detection(box=(0, 0, 1000, 500), score=0.9)
@@ -806,11 +792,7 @@ def test_open_ended_crowd_counts_defer_to_detection():
 
 
 def test_comic_panels_defer_the_count_to_detection():
-    """A comic page draws the same girl once per panel — 1girl, 2 subjects.
-
-    22 of the corpus's 26 comic pages that carry no ``multiple views`` tag were
-    failing the prefilter as ``single-subject``.
-    """
+    """A comic page draws the same girl once per panel — 1girl, 2 subjects."""
     from library.preprocess.position_captions import (
         caption_subject_count,
         is_candidate,
@@ -827,9 +809,8 @@ def test_comic_panels_defer_the_count_to_detection():
 def test_koma_count_bounds_a_page_that_has_no_girls_count_check():
     """``Nkoma`` names the panel count, restoring the ceiling the layout waived.
 
-    ``kase_daiki/11645055`` is a 2-panel page with one girl per panel that SAM3
-    returns three boxes for — the bottom girl split into an overlapping pair at
-    IoMin 0.99. Without a ceiling the waived count check lets that through.
+    Without it, a 2-panel page where SAM3 splits one girl into an overlapping
+    pair would sail through the waived count check undetected.
     """
     from library.preprocess.position_captions import caption_panel_ceiling
 
@@ -890,11 +871,8 @@ def test_a_koma_page_at_its_ceiling_proposes(pipeline_bits):
 
 
 def test_page_number_is_not_a_layout_tag():
-    """A scanned art-book page is one illustration with a number in the margin.
-
-    It tags 15 more images than the comic tags do and every one checked was a
-    single subject — a false signal, not a weak one.
-    """
+    """A scanned art-book page is one illustration with a number in the margin —
+    a false signal, not a weak one."""
     from library.preprocess.position_captions import (
         caption_subject_count,
         is_candidate,
@@ -1214,11 +1192,9 @@ def test_the_bag_blind_budget_is_still_reachable(pipeline_bits):
 def test_the_novel_budget_never_costs_a_move(pipeline_bits):
     """Tightening the budget may only remove padding, never a binding.
 
-    This is the invariant the measurement actually supports: on ama_mitsuki the
-    budget cut novel clause tags 515 → 115 while the bound bag tags and all 370
-    moves came out byte-identical. It cannot rescue a crowded-out bag tag either
-    — ``rest`` is already ranked bag-first, so the clause cap is only reached
-    once the bag is spent — so equality in both directions is the contract.
+    It cannot rescue a crowded-out bag tag either — ``rest`` is already ranked
+    bag-first, so the clause cap is only reached once the bag is spent — so
+    equality of the moved set in both directions is the contract.
     """
     budgeted = _crowded_proposal(pipeline_bits)
     bag_blind = _crowded_proposal(pipeline_bits, max_novel_tags=8)
@@ -1232,10 +1208,8 @@ def test_the_novel_budget_never_costs_a_move(pipeline_bits):
 def test_the_bag_gate_covers_every_exclusive_group_not_just_identity(pipeline_bits):
     """Item 2, generalized: an exclusive group holds exactly one value.
 
-    So a crop naming a second one is a contradiction, not extra detail. The
-    hand-picked identity trio left the rest open, and the full-corpus dry run
-    emitted 150 such contradictions — 103 of them ``body_shape``, the bag
-    saying ``flat chest`` while the clause said ``large breasts``.
+    So a crop naming a second one is a contradiction, not extra detail — here
+    the bag says ``flat chest`` while the crop wants to add ``large breasts``.
     """
     from library.preprocess.position_captions import propose_for_image
 

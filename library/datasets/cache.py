@@ -1,10 +1,9 @@
 """General cached-pair train dataset (VAE latents + text encoder outputs).
 
 Loads pre-cached VAE latents + text encoder outputs from disk, grouped by
-latent resolution so that each batch has uniform spatial dimensions (matching
-the bucket-based batching used in LoRA training). Despite the name it is not
-distill-specific — it is the general train-cache reader, used by the distill
-scripts (``scripts/distill_mod/distill.py``, ``scripts/distill_turbo/distill.py``).
+latent resolution so each batch has uniform spatial dims. Despite the name
+it is not distill-specific — used by ``scripts/distill_mod/distill.py`` and
+``scripts/distill_turbo/distill.py``.
 """
 
 from __future__ import annotations
@@ -33,12 +32,11 @@ logger = logging.getLogger(__name__)
 def _cached_collate_impl(batch):
     """Stack a list of per-sample :class:`CachedDataset` dicts into a batch dict.
 
-    Self-describing: which optional features are present is read off the sample
-    dict's keys (``pooled_text`` / ``mask``), so there is no collate-vs-dataset
-    flag to keep in sync — whatever ``__getitem__`` emitted is what gets stacked.
-    ``idx`` stays a Python list (not a tensor); every other present key is
-    ``torch.stack``-ed (the per-resolution :class:`BucketBatchSampler` guarantees
-    uniform spatial dims so the stack works at ``batch_size > 1``).
+    Self-describing: optional keys (``pooled_text`` / ``mask``) are stacked only
+    when present in the sample dict, so there's no collate-vs-dataset flag to
+    keep in sync. ``idx`` stays a Python list; everything else is
+    ``torch.stack``-ed (uniform spatial dims guaranteed by
+    :class:`BucketBatchSampler`).
     """
     keys = batch[0].keys()
     out: dict = {
@@ -54,20 +52,13 @@ def _cached_collate_impl(batch):
 
 
 def make_cached_collate():
-    """Stacking collate for :class:`CachedDataset` batches.
-
-    Returns a batch ``dict`` with keys ``idx`` / ``latents`` / ``crossattn_emb``
-    plus whichever optional keys the dataset emits (``pooled_text`` when
-    ``need_pooled``, ``mask`` when ``mask_dir`` is set). Mirrors the string-keyed
-    batch convention of the main
-    ``train.py`` dataset (only ``latents`` shares a name — the cached reader
-    hands back already-unpacked ``crossattn_emb``/``pooled_text`` rather than the
-    Kohya ``text_encoder_outputs_list`` container).
+    """Stacking collate for :class:`CachedDataset` batches (``idx`` /
+    ``latents`` / ``crossattn_emb`` plus optional ``pooled_text`` / ``mask``).
 
     Bypasses the default ``collate_tensor_fn`` (its ``_new_shared_filename_cpu``
-    makes non-resizable storage on some PyTorch / Python 3.13 builds). Returns a
-    module-level function (not a local closure) so DataLoader workers can pickle
-    it under the Windows / spawn start method.
+    makes non-resizable storage on some PyTorch / Python 3.13 builds). Returns
+    a module-level function, not a closure, so DataLoader workers can pickle
+    it under spawn.
     """
     return _cached_collate_impl
 
@@ -75,21 +66,18 @@ def make_cached_collate():
 class BucketBatchSampler(torch.utils.data.Sampler):
     """Yields batches of sample indices grouped by resolution bucket.
 
-    Every batch contains only same-resolution samples, so the default
-    tensor-stacking collate still works at ``batch_size > 1`` (a plain
-    ``DataLoader(shuffle=True)`` would mix resolutions into one batch and crash
-    the stack). When ``shuffle`` is set, the *order of batches* is reshuffled
-    each time iteration restarts (i.e. once per epoch, since the training loop
-    rebuilds the iterator on ``StopIteration``) — but the largest-token-count
-    bucket's first batch is always pinned to step 0 so ``torch.compile``'s
-    biggest block graph + peak VRAM allocation land up front (fail-fast).
-    ``shuffle=False`` preserves the deterministic largest-first bucket order.
+    Every batch is same-resolution, so a plain tensor-stacking collate still
+    works at ``batch_size > 1`` (mixed resolutions would crash the stack).
+    When ``shuffle``, batch order is reshuffled per epoch, but the
+    largest-token-count bucket's first batch is always pinned to step 0 so
+    torch.compile's biggest graph + peak VRAM land up front (fail-fast instead
+    of a mid-run OOM). ``shuffle=False`` keeps deterministic largest-first order.
     """
 
     def __init__(self, batches, warmup_idxs, *, shuffle=True, seed=0):
         self._batches = batches  # list[list[int]]
-        # Batch indices pinned to the front, largest-token first (one per
-        # token-count family). Accepts a single int / None for back-compat.
+        # Batch indices pinned to the front, largest-token first. Accepts a
+        # single int / None for back-compat.
         if warmup_idxs is None:
             warmup_idxs = []
         elif isinstance(warmup_idxs, int):
@@ -107,8 +95,7 @@ class BucketBatchSampler(torch.utils.data.Sampler):
         if self._shuffle:
             random.Random(self._seed + self._epoch).shuffle(order)
             self._epoch += 1
-            # Insert smallest-first at position 0 so the largest family ends up
-            # at step 0 (worst-case graph + peak allocation first).
+            # Insert smallest-first at 0 so the largest family lands at step 0.
             for idx in reversed(self._warmup_idxs):
                 order.remove(idx)
                 order.insert(0, idx)
@@ -143,23 +130,13 @@ class CachedDataset(torch.utils.data.Dataset):
         assert split in ("train", "val")
         self.data_dir = data_dir
         self.synth_data_dir = synth_data_dir
-        # Each ``__getitem__`` returns a dict; the optional keys below are
-        # included only when their feature is requested, so consumers select
-        # features at construction time instead of decoding tuple positions.
-        #
-        # ``need_pooled``: emit the ``pooled_text`` key (the mod-guidance loop
-        # needs it; SPD/Turbo discard it). Cheap to derive
-        # (``crossattn.amax`` over the already-loaded cross-attn) — the flag is
-        # about an explicit, key-visible contract, not a load saving.
-        self.need_pooled = need_pooled
-        # ``mask_dir``: when set, emit a ``mask`` key — a latent-resolution
-        # foreground mask in [0, 1]. See ``_resolve_mask_path``.
-        self.mask_dir = mask_dir
+        # Optional keys are included in __getitem__'s dict only when requested,
+        # so consumers select features at construction time.
+        self.need_pooled = need_pooled  # emit `pooled_text` (mod-guidance needs it)
+        self.mask_dir = mask_dir  # emit `mask`; see _resolve_mask_path
         cached = discover_cached_pairs(data_dir)
 
-        # Optional stem allow-list: when a keep_list of stems is supplied, drop
-        # every cached pair whose stem isn't in it BEFORE bucketing/split, so the
-        # cut narrows the actual train pool. None → no filter (the default).
+        # Drop every cached pair whose stem isn't in keep_list, BEFORE bucketing.
         if keep_list is not None:
             n_before = len(cached)
             cached = [img for img in cached if img.stem in keep_list]
@@ -168,14 +145,12 @@ class CachedDataset(torch.utils.data.Dataset):
                 f"survive (keep_list has {len(keep_list)} stems)"
             )
 
-        # When --synth_data_dir is set, rewrite each sample's latent path to the
-        # synthetic NPZ for the same stem. Samples without a synthetic
-        # counterpart are dropped — the teacher pool is bounded by what was
-        # generated via `make distill-prep`. TE paths remain in data_dir.
-        # Lookup is stem-keyed (not basename-keyed) because the lora cache uses
-        # WxH pixel dims zero-padded to 4 (e.g. `0896x1152`) while the synth
-        # writer uses HxW latent dims (e.g. `144x112`) — the same logical pair
-        # has different basenames in the two dirs.
+        # --synth_data_dir: rewrite each sample's latent path to the synthetic
+        # NPZ for the same stem (TE paths stay in data_dir); samples without a
+        # synthetic counterpart are dropped. Lookup is stem-keyed (not
+        # basename-keyed) because the lora cache uses WxH pixel dims (e.g.
+        # `0896x1152`) while the synth writer uses HxW latent dims (e.g.
+        # `144x112`) — same logical pair, different basenames.
         n_dropped_no_synth = 0
         if synth_data_dir is not None:
             synth_by_stem: dict[str, str] = {}
@@ -183,7 +158,7 @@ class CachedDataset(torch.utils.data.Dataset):
                 os.path.join(synth_data_dir, "**", f"*{LATENT_CACHE_SUFFIX}"),
                 recursive=True,
             ):
-                # `{stem}_{HxW}_anima.npz` → strip suffix, drop trailing `_HxW`
+                # `{stem}_{HxW}_anima.npz`: strip suffix, drop trailing `_HxW`
                 without_suffix = os.path.basename(path).removesuffix(
                     LATENT_CACHE_SUFFIX
                 )
@@ -197,7 +172,6 @@ class CachedDataset(torch.utils.data.Dataset):
                 if synth_path is None:
                     n_dropped_no_synth += 1
                     continue
-                # Reuse CachedImage shape so the downstream code is unchanged.
                 remapped.append(img._replace(npz_path=synth_path))
             cached = remapped
             if n_dropped_no_synth:
@@ -214,19 +188,12 @@ class CachedDataset(torch.utils.data.Dataset):
             buckets.setdefault(res, []).append((img.npz_path, img.te_path))
 
         # Per-bucket deterministic shuffle, then carve last `validation_split`
-        # off as val so train/val never overlap and remain bucket-grouped.
-        # Apply sample_ratio per-bucket (mirrors the LoRA pipeline's per-subset
-        # subsampling), keeping at least one sample per non-empty bucket so
-        # debug/half presets don't silently drop entire resolutions.
-        # Drop per-bucket remainders for whichever side we're emitting.
+        # off as val (train/val never overlap, stay bucket-grouped). sample_ratio
+        # applies per-bucket, keeping >=1 sample per non-empty bucket.
         #
-        # Emit buckets largest-token-count first. The DataLoader runs
-        # shuffle=False, so iteration order == this bucket order; front-loading
-        # the biggest resolution means torch.compile traces the largest block
-        # graph and allocates peak activations on step 0. With native-shape
-        # buckets (4032 + 4200 token families), the 4200 bucket would otherwise
-        # only get hit once iteration reached it (~step 100), spiking VRAM
-        # mid-run — front-loading turns a mid-run OOM into a fail-fast at start.
+        # Emit buckets largest-token-count first: DataLoader runs shuffle=False,
+        # so this order == iteration order, and front-loading the biggest
+        # resolution turns a mid-run compile/VRAM spike into a fail-fast at start.
         def _tok_count(res: str) -> int:
             a, b = res.split("x")
             return int(a) * int(b)
@@ -234,9 +201,8 @@ class CachedDataset(torch.utils.data.Dataset):
         rng = random.Random(validation_seed)
         self.batch_size = batch_size
         self.samples: list[tuple[str, str]] = []
-        # Same-resolution batches of sample indices, built as samples are
-        # emitted bucket-by-bucket (each bucket's remainder is dropped to a
-        # multiple of batch_size, so a contiguous chunk is always one bucket).
+        # Same-resolution batches, built bucket-by-bucket (remainder dropped to
+        # a multiple of batch_size, so a contiguous chunk is always one bucket).
         self._batches: list[list[int]] = []
         self._batch_tok: list[int] = []
         n_train = n_val = 0
@@ -275,10 +241,8 @@ class CachedDataset(torch.utils.data.Dataset):
             f"({len(buckets)} buckets; pre-drop train={n_train}, val={n_val}{sr_note})"
         )
 
-        # Masked loss coverage check (main process only — DataLoader workers are
-        # forked, so per-fetch counters wouldn't propagate back). A run with
-        # ``mask_dir`` set but no resolvable masks would silently degrade to a
-        # no-op (every mask all-ones), so surface coverage up front.
+        # Masked loss coverage check up front (mask_dir set but 0 masks found
+        # would otherwise silently degrade to a no-op — every mask all-ones).
         if self.mask_dir is not None and self.samples:
             n_found = sum(
                 1 for _, te in self.samples if self._resolve_mask_path(te) is not None
@@ -303,13 +267,10 @@ class CachedDataset(torch.utils.data.Dataset):
         """Build a bucket-grouped batch sampler over this dataset.
 
         Pass to ``DataLoader(batch_sampler=...)`` (not ``batch_size=``). Each
-        batch is one resolution; ``shuffle`` reshuffles batch order per epoch
-        while pinning one batch of every token-count family to the front
-        (largest first) so all torch.compile graphs warm up in the first few
-        steps. See ``BucketBatchSampler`` and [[project_compile_context_vram_climb]].
+        batch is one resolution; pins one batch per token-count family to the
+        front (largest first) so all torch.compile graphs warm up early. See
+        ``BucketBatchSampler``.
         """
-        # One representative batch per distinct token count, largest first —
-        # each token family is a separate compiled block graph.
         first_by_tok: dict[int, int] = {}
         for i in range(len(self._batches)):
             first_by_tok.setdefault(self._batch_tok[i], i)
@@ -319,10 +280,9 @@ class CachedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         latent_path, te_path = self.samples[idx]
         latents, _res, _h, _w = load_cached_latents(latent_path)  # (16, H, W)
-        # Fixed variant=0: distill-mod targets a deterministic teacher mapping,
-        # and the teacher cache keys on (sample_idx, sigma_idx) only — drawing
-        # a random variant per visit would let cache hits return a teacher pred
-        # computed under a different caption than the student is conditioned on.
+        # Fixed variant=0: the teacher cache keys on (sample_idx, sigma_idx) only,
+        # so a random variant per visit would return a teacher pred computed
+        # under a different caption than the student is conditioned on.
         crossattn_emb, pooled_text = load_cached_text_features(te_path, variant=0)
         out: dict = {
             "idx": idx,
@@ -337,11 +297,7 @@ class CachedDataset(torch.utils.data.Dataset):
 
     def _resolve_mask_path(self, te_path: str) -> str | None:
         """Map a TE cache path to its ``{stem}_mask.png``, or None if absent.
-
-        The TE sidecar always lives under ``data_dir`` (even in synth mode,
-        where only the latent path is rewritten), so its dir mirrors the
-        image-dir layout that ``make mask`` reproduces under ``mask_dir``.
-        Prefers the nested path, falls back to a flat layout — matching
+        Prefers the nested path, falls back to flat — matching
         ``dreambooth.py``'s mask resolution.
         """
         stem = os.path.basename(te_path).removesuffix(TE_CACHE_SUFFIX)
@@ -356,12 +312,8 @@ class CachedDataset(torch.utils.data.Dataset):
         return None
 
     def _load_mask(self, te_path: str, h: int, w: int) -> torch.Tensor:
-        """Foreground mask for this sample at latent resolution ``(h, w)``.
-
-        Returns a ``[1, h, w]`` float tensor in ``[0, 1]`` (grayscale PNG /255,
-        area-downsampled to match the latent grid). Falls back to all-ones when
-        no mask file exists, so unmasked samples contribute their full loss.
-        """
+        """Foreground mask at latent resolution ``(h, w)``, ``[1, h, w]`` in
+        ``[0, 1]``. Falls back to all-ones (full loss) when no mask exists."""
         path = self._resolve_mask_path(te_path)
         if path is None:
             return torch.ones(1, h, w, dtype=torch.float32)

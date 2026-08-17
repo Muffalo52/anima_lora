@@ -2,32 +2,22 @@
 """Rewrite multi-subject captions into position clauses (SAM3 + Anima Tagger).
 
 Thin CLI over ``library.preprocess.position_captions``: loads SAM3 and the Anima
-Tagger, drives the detect → order → crop+blank → tag → compose pipeline over the
-resized dataset, and writes a review report.
+Tagger, drives the detect -> order -> crop+blank -> tag -> compose pipeline over
+the resized dataset, and writes a review report.
 
-An attributable tag is **moved** out of the flat bag into its clause, so each
+An attributable tag is MOVED out of the flat bag into its clause, so each
 attribute is asserted exactly once and bound to its subject (v2). ``--no_rewrite``
-restores the additive v1 behaviour for the training A/B; ``--flatten`` is the
+restores the additive v1 behaviour for a training A/B; ``--flatten`` is the
 inverse pass that merges clauses back into the bag.
 
-**The caption master is never written.** Clauses are generated data, so they land
-on the *derived* caption next to the resized image (``--dst``, i.e.
-``post_image_dataset/resized/<rel>.txt``) — the same file the caption-correction
-step writes and the TE step encodes. ``image_dataset/`` keeps the hand-written
-caption and is only the read fallback for an image the caption step has not
-mirrored yet. The correction step re-attaches clauses it finds on a destination
-caption, so a later ``make preprocess-captions`` re-corrects the flat bag instead
-of dropping them.
+The caption master (``image_dataset/``) is never written — clauses land on the
+derived caption next to the resized image (``--dst``, i.e.
+``post_image_dataset/resized/<rel>.txt``), the same file the TE step encodes.
 
-**Dry-run is the default.** Nothing is written to any caption until ``--apply``
-is passed; a dry run emits ``report.json`` (+ the mask-blanked crops with
-``--crops``) so the proposals can be eyeballed first.
-
-An ``--apply`` run bumps the caption's mtime, so the TE caches are correctly
-stale — but nothing re-encodes them until you say so. Follow with
-``make preprocess-te``, which regenerates the ``.variants.txt`` sidecars first
-(those override ``{stem}.txt`` at encode time; the apply pass drops the stale
-ones so an un-regenerated sidecar can never train the pre-clause caption).
+Dry-run is the default: nothing is written until ``--apply`` is passed. An
+``--apply`` run bumps the caption's mtime (so TE caches go correctly stale) and
+drops stale ``.variants.txt`` sidecars — follow it with ``make preprocess-te``
+to actually re-encode.
 
     make caption-position                      # dry run over the whole dataset
     make caption-position ARGS="--apply"       # write the clauses
@@ -301,21 +291,16 @@ def parse_args() -> argparse.Namespace:
 def build_detect_fn(args: argparse.Namespace):
     """SAM3 text-prompt detector returning per-instance boxes + masks.
 
-    Two things this has to get right, both of which the first version didn't:
+    GOTCHA 1: ``Sam3Processor`` carries its own ``confidence_threshold`` and
+    applies it before the caller ever sees the boxes, so filtering the result
+    against a *lower* retry threshold is a no-op unless the processor itself is
+    built at the lowest threshold we might ask for (which it is here — the
+    score gate is then applied on top, in ``detect``/``part_detect``).
 
-    * **SAM3 filters before we do.** ``Sam3Processor`` carries its own
-      ``confidence_threshold`` (default 0.5) and applies it inside
-      ``_forward_grounding`` — boxes below it never reach the caller. Filtering
-      the returned list against a *lower* retry threshold is therefore a no-op:
-      the low-score boxes were already discarded. The processor is built at the
-      lowest threshold we might ask for, and the score gate is applied here.
-    * **Neither escalation may re-encode.** ``detect_subjects`` calls back into
-      this for the low-threshold retry and again per body-part prompt, all on the
-      same image. The image encoding (``set_image``) and every prompt's raw
-      detections are memoised per image, so the retry is a pure re-filter and a
-      part prompt costs only a grounding pass — ``set_text_prompt`` re-grounds
-      against the cached ``backbone_out`` and erases the previous text prompt, so
-      running several over one state is safe.
+    GOTCHA 2: ``detect_subjects`` calls back into this per retry and per
+    body-part prompt on the same image — encoding and raw detections are
+    memoised per image/prompt so a retry is a pure re-filter and a part prompt
+    costs only one grounding pass.
 
     Returns ``(detect, part_detect, model, processor)``. ``part_detect`` takes
     the prompt as an argument; ``detect`` is pinned to ``args.prompt``.
@@ -422,10 +407,8 @@ def main() -> None:
         _run_flatten(args, src, dst, report_dir)
         return
 
-    # SAM3 first, tagger second: the DiT-free pair still costs a few GB each and
-    # detection has to finish before any crop exists to tag. Unlike the probe
-    # they must both stay resident here — the pipeline is per-image, not
-    # two dataset-wide passes, so a proposal never outlives its crop.
+    # SAM3 first, tagger second: both stay resident since the pipeline is
+    # per-image (detect -> crop -> tag), not two dataset-wide passes.
     detect_fn, part_detect_fn, sam_model, sam_processor = build_detect_fn(args)
 
     from library.captioning.anima_tagger import (

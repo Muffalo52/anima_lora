@@ -1,25 +1,22 @@
 """Crash-resume state for the turbo distillation loop.
 
-``save_student`` ships the student LoRA and nothing else — the fake (critic),
-the discriminator, all three optimizers and all three LR schedulers are training
-scaffolding that only ever lived in RAM. A mid-run death (an Xid GPU hang, an
-OOM, a stray SIGINT) therefore cost the whole adversarial state: restarting from
-a step-tagged student checkpoint re-warmed a *cold* critic against an *already
-trained* student and reset the LR cosine back to its peak — the exact regime the
-critic runaway lives in. This module checkpoints the rest of the loop so a
-restart continues the run instead of re-opening it.
+``save_student`` ships only the student LoRA — the critic, discriminator, and
+all three optimizer/scheduler pairs are training scaffolding that only ever
+lived in RAM. A mid-run death loses all of it: restarting from a step-tagged
+checkpoint would re-warm a *cold* critic against an *already trained* student
+and reset the LR cosine to its peak — the exact regime the critic runaway lives
+in. This module checkpoints the rest of the loop so a restart continues the run
+instead of re-opening it.
 
-The bundle is written next to the step-tagged students (``{output_name}/``) under
-a single rolling ``{output_name}_resume.pt`` — overwritten each ``save_every``
-and written atomically (tmp + ``os.replace``), so a crash *during* the write
-leaves the previous bundle intact. Only the latest is kept: it is ~10× the size
-of a student checkpoint (two AdamW moments in fp32 over both LoRA stacks) and a
-trajectory of them is not useful — the step-tagged students already preserve the
-trajectory.
+The bundle is a single rolling ``{output_name}_resume.pt`` next to the
+step-tagged students, overwritten each ``save_every`` and written atomically
+(tmp + ``os.replace``, so a crash mid-write leaves the previous bundle intact).
+Only the latest is kept — it's ~10x a student checkpoint's size (two AdamW
+moments in fp32 over both LoRA stacks), and the step-tagged students already
+preserve the trajectory.
 
-Not restored: the dataloader's position within its epoch. The loop reshuffles
-from the current epoch boundary on resume, which perturbs sample order but not
-the optimizer/critic/schedule state that actually carries the run.
+Not restored: the dataloader's position within its epoch (perturbs sample
+order, not the optimizer/critic/schedule state that actually carries the run).
 """
 
 from __future__ import annotations
@@ -245,15 +242,14 @@ def _check_fingerprint(state: dict[str, Any], cfg) -> None:
 def _restore_scheduler(sched, saved: dict[str, Any]) -> None:
     """Put a freshly-built scheduler at the bundle's step count on the NEW curve.
 
-    ``load_state_dict`` would drag the OLD curve along: ``CosineAnnealingLR``'s
-    ``T_max``/``eta_min``/``base_lrs`` (and ``SequentialLR``'s milestones) are
-    all part of the state dict, so a resume that changes ``iterations`` /
-    ``student_lr`` would silently keep training on the
-    bundle's schedule — and *extending* ``iterations`` steps the restored
-    cosine past its old ``T_max``, where the recursive update drives the LR
-    negative. Replaying ``step()`` on the new instance instead lands the
-    counter at the same position of the schedule the current config describes,
-    which is the contract ``_WARN_FIELDS`` documents.
+    ``load_state_dict`` would drag the OLD curve along (``T_max``/``eta_min``/
+    ``base_lrs``/``SequentialLR`` milestones are all in the state dict) — a
+    resume that changes ``iterations``/``student_lr`` would silently keep
+    training on the bundle's schedule, and *extending* ``iterations`` steps the
+    restored cosine past its old ``T_max``, driving the LR negative. Replaying
+    ``step()`` on the new instance instead lands the counter at the same
+    position on the CURRENT config's curve (the contract ``_WARN_FIELDS``
+    documents).
     """
     import warnings
 

@@ -1,14 +1,10 @@
 """Frozen configuration object for ``LoRANetwork``.
 
-Replaces the 25-arg ``LoRANetwork.__init__`` and the per-kwarg parse pile in
-``factory.create_network`` / ``create_network_from_weights``. Two construction
-sites — ``from_kwargs`` (fresh training; absorbs the str→bool/int/float casts
-that train.py's ``net_kwargs`` produces) and ``from_weights`` (warm-start /
-inference; values come from checkpoint key sniffing).
-
-Frozen by intent: every field here is fixed for the run. Mutable runtime
-state (``multiplier``, LoRA+ ratios, hit counters, σ caches, post-build attrs
-written by ``spec.post_init``) stays as plain attributes on the network.
+Two construction sites: ``from_kwargs`` (fresh training, from train.py's
+stringified ``net_kwargs``) and ``from_weights`` (warm-start / inference,
+from checkpoint key sniffing). Mutable runtime state (multiplier, LoRA+
+ratios, hit counters, σ caches) stays as plain attributes on the network,
+not here.
 """
 
 from __future__ import annotations
@@ -61,9 +57,8 @@ def _as_moe_style(value: Any) -> MoEStyle:
 def _as_router_source(value: Any) -> RouterSource:
     """Parse the ``router_source`` kwarg. Empty / None → ``"none"``.
 
-    ``"crossattn_emb"`` routes the network-level GlobalRouter on the pooled
-    post-LLM-adapter text features the DiT cross-attends to (route_per_layer
-    must be False — there is no per-Linear crossattn signal).
+    ``"crossattn_emb"`` requires ``route_per_layer=False`` — no per-Linear
+    crossattn signal exists.
     """
     if value is None:
         return "none"
@@ -93,12 +88,10 @@ def _as_str_list(value: Any) -> Optional[List[str]]:
 
 
 def _as_float_list(value: Any) -> Optional[List[float]]:
-    """Parse a kwarg that's either a TOML list, python-literal list string, or None.
+    """Parse a kwarg that's a TOML list, python-literal list string, or None.
 
-    TOML arrays come through as native lists; CLI-stringified lists parse via
-    ast.literal_eval. Raises on malformed input rather than silently dropping
-    it, since a wrong σ-bucket boundary list would change band assignments
-    without surfacing an error.
+    Raises on malformed input rather than silently dropping it — a bad
+    σ-bucket boundary list would otherwise change band assignments silently.
     """
     if value is None:
         return None
@@ -119,10 +112,8 @@ def _as_float_list(value: Any) -> Optional[List[float]]:
 def _validate_sigma_bucket_boundaries(
     boundaries: List[float], num_sigma_buckets: int
 ) -> None:
-    """Validate a custom σ-bucket boundary list. Raises ValueError on any
-    violation: wrong length, non-zero start, non-one end, or non-strictly-
-    increasing edges.
-    """
+    """Raise ValueError on wrong length, non-0 start, non-1 end, or
+    non-strictly-increasing edges."""
     if len(boundaries) != num_sigma_buckets + 1:
         raise ValueError(
             "sigma_bucket_boundaries must have length num_sigma_buckets + 1 = "
@@ -164,10 +155,9 @@ def _parse_kv_pairs(kv_pair_str: str, *, is_int: bool) -> Dict[str, Any]:
     return pairs
 
 
-# Default exclude regex appended to user-supplied excludes in `from_kwargs`.
-# Skips embedders / norms / modulation projectors. NB `adaln_up_` is rescued
-# back into the target set by `train_adaln` (on by default in base.toml) via
-# include_patterns, so it is excluded here but adapted on a stock run.
+# Default exclude regex appended to user excludes in `from_kwargs` — skips
+# embedders / norms / modulation projectors. `adaln_up_` is excluded here but
+# rescued back via `train_adaln`'s include_patterns (on by default).
 _DEFAULT_EXCLUDE = (
     r".*(_modulation|_norm|_embedder|final_layer|adaln_fused_down|adaln_up_|"
     r"pooled_text_proj).*"
@@ -176,12 +166,7 @@ _DEFAULT_EXCLUDE = (
 
 @dataclass(frozen=True)
 class LoRANetworkCfg:
-    """Run-fixed configuration for a ``LoRANetwork``.
-
-    Field groupings mirror the comment blocks in ``factory.create_network``:
-    core / targeting / dropouts / regex overrides / T-LoRA / Hydra /
-    σ-router / channel scaling / logging.
-    """
+    """Run-fixed configuration for a ``LoRANetwork``."""
 
     lora_dim: int = 4
     alpha: float = 1.0
@@ -202,9 +187,8 @@ class LoRANetworkCfg:
 
     reg_dims: Optional[Dict[str, int]] = None
     reg_lrs: Optional[Dict[str, float]] = None
-    # Per-pattern alpha override (regex fullmatch on the module path, like
-    # reg_dims). Applies independently of reg_dims — a matched module keeps its
-    # resolved dim and takes this alpha instead of the network alpha.
+    # Per-pattern alpha override (regex fullmatch on module path); independent
+    # of reg_dims — a matched module keeps its resolved dim, takes this alpha.
     reg_alphas: Optional[Dict[str, float]] = None
 
     use_timestep_mask: bool = False
@@ -212,183 +196,141 @@ class LoRANetworkCfg:
     alpha_rank_scale: float = 1.0
 
     num_experts: int = 4
-    # Gaussian perturb std applied to fused per-expert `lora_up_weight` at
-    # init in plain HydraLoRA only (NOT OrthoHydra disjoint or fallback) —
-    # paper baseline knob; production training should leave at 0.0.
+    # Gaussian perturb std for fused per-expert `lora_up_weight` init (plain
+    # HydraLoRA only). Production leaves at 0.0.
     expert_init_std: float = 0.0
     # OrthoHydra centered-gate init: gate recentered to ``g_e - 1/E``, router
-    # fully zero-init, λ starts at ``ortho_lambda_init`` (nonzero). Gives ΔW=0
-    # at init yet nonzero router gradient (disjoint P_e survive mean subtraction).
-    # Off + ``ortho_lambda_init=0.0`` = legacy zero-init-λ (router gated until λ ramps).
+    # zero-init, λ starts at ``ortho_lambda_init``. Gives ΔW=0 at init yet
+    # nonzero router gradient (disjoint P_e survive mean subtraction).
     ortho_centered_gate: bool = False
     ortho_lambda_init: float = 0.0
     router_lr_scale: float = 1.0
-    # Single regex scoping which Linears are routed; matched → Hydra leaves,
-    # else fall back to plain LoRA/OrthoLoRA. σ and FEI routers share this set
-    # (no separate sub-filter). ``None`` = apply MoE everywhere.
+    # Single regex scoping which Linears are routed (Hydra leaves + σ/FEI
+    # share it). None = apply MoE everywhere.
     router_targets: Optional[str] = None
     hydra_router_names: Optional[List[str]] = None
     per_bucket_balance_weight: float = 0.3
     num_sigma_buckets: int = 3
     # Hard expert/timestep partition: split E into num_sigma_buckets interleaved
-    # bands (expert e → band ``e mod num_sigma_buckets``); a σ-in-band-b sample
-    # masks out-of-band logits to -inf before softmax (soft routing within a band).
-    # Composes with the σ-feature router. Requires num_experts % num_sigma_buckets == 0.
+    # bands (expert e → band ``e mod num_sigma_buckets``); out-of-band logits are
+    # masked -inf before softmax. Requires num_experts % num_sigma_buckets == 0.
     specialize_experts_by_sigma_buckets: bool = False
-    # Custom σ-bucket boundaries: length num_sigma_buckets+1, strictly increasing,
-    # 0.0→1.0; None = uniform linspace. Lets you spend more capacity on a σ regime
-    # (e.g. ``[0.0, 0.5, 0.8, 1.0]`` = wide low-σ band) at equal experts/band.
+    # Custom σ-bucket boundaries: length num_sigma_buckets+1, strictly
+    # increasing, 0.0→1.0; None = uniform linspace.
     sigma_bucket_boundaries: Optional[List[float]] = None
 
-    # Three-axis routing config (see plan2.md). ``use_moe_style`` picks the
-    # expert layout — ``False`` (no experts), ``"shared_A"`` (Hydra: one
-    # ``lora_down`` + per-expert ``lora_up``), ``"independent_A"`` (FeRA:
-    # stacked per-expert ``lora_down`` and ``lora_up``). ``route_per_layer``
-    # picks router location: ``True`` (today's Hydra per-Linear default) or
-    # ``False`` (one network-level router, FeRA-style). ``router_source``
-    # picks the gate input: ``"input"`` (per-Linear input vector — only valid
-    # with ``route_per_layer=True``), ``"sigma"`` (sinusoidal σ features),
-    # ``"fei"`` (FEI(z_t) simplex), or ``"none"``.
+    # Three-axis routing config — see networks/CLAUDE.md §Three-axis routing
+    # surface for the full matrix. use_moe_style: expert layout. route_per_layer:
+    # router location. router_source: gate input signal.
     use_moe_style: MoEStyle = False
     route_per_layer: bool = False
     router_source: RouterSource = "none"
 
     # PSOFT-style Cayley/SVD parameterization (per-module bool). Selects
-    # ``ortho`` mode on ``StackedExpertsLoRAModule`` when paired with
-    # ``use_moe_style="independent_A"``; for the non-MoE / shared_A cells the
-    # ``ortho``-ness is already encoded in the chosen module class
-    # (``OrthoLoRA`` / ``OrthoHydra``) and this field is informational.
+    # ``ortho`` mode on ``StackedExpertsLoRAModule`` with independent_A; for
+    # non-MoE/shared_A cells the ortho-ness is already encoded in the module
+    # class (OrthoLoRA/OrthoHydra) and this field is informational.
     use_ortho: bool = False
     ortho_init_std: float = 0.02
     # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
-    # Selects ``OrthoInitLoRAModule`` via ``resolve_network_spec``; mutually
-    # exclusive with ``use_ortho`` (validated in the resolver). Non-MoE only.
+    # Mutually exclusive with use_ortho. Non-MoE only.
     use_ortho_init: bool = False
 
-    # SVD-Down: ``lora_down`` initialization for plain LoRA — ``"kaiming"``
-    # (default) or ``"weight_svd"`` (seed input basis from W0's top-r right
-    # singular vectors, scale-matched). Plain two-factor LoRAModule only;
-    # ignored by ortho/Hydra/Chimera classes. docs/methods/svd-down-lora.md.
+    # SVD-Down: ``lora_down`` init for plain LoRA — "kaiming" or "weight_svd"
+    # (seed from W0's top-r right singular vectors). Plain LoRAModule only.
+    # See docs/methods/svd-down-lora.md.
     down_init: str = "kaiming"
 
-    # σ-conditional router parameters (consumed when ``router_source="sigma"``).
-    # Layer scope is shared with Hydra and FEI via ``router_targets`` above.
+    # σ-conditional router parameters (router_source="sigma"). Layer scope
+    # shared with Hydra/FEI via router_targets above.
     sigma_feature_dim: int = 16
     sigma_router_names: Optional[List[str]] = None
 
-    # FEI-conditional router parameters (consumed when ``router_source="fei"``).
-    # ``fei_feature_dim`` defaults to 2 = the simplex ``(e_low, e_high)`` from
-    # ``library.runtime.fei.compute_fei_2band``. Default
-    # ``fei_sigma_low_div=4.0`` for σ_low scaling — chosen by the
-    # 2026-05-13 dataset sweep on real training latents (highest
-    # std(e_low) at low/mid t). 8.0 remains a Pareto choice. See
-    # ``[[project_fera_probe_2band_decision]]``.
+    # FEI-conditional router parameters (router_source="fei"). fei_feature_dim
+    # defaults to 2 = the (e_low, e_high) simplex from
+    # library.runtime.fei.compute_fei_2band; fei_sigma_low_div=4.0 chosen by
+    # dataset sweep for σ_low scaling.
     fei_feature_dim: int = 2
     fei_sigma_low_div: float = 4.0
     fei_router_names: Optional[List[str]] = None
 
-    # GlobalRouter parameters (consumed when ``route_per_layer=False``).
-    # Two-layer MLP feeding softmax/τ — same shape as FeRA's
-    # ``SoftFrequencyRouter``. Final layer is zero-init so step-0 gates are
-    # uniform; combined with zero-init expert ups this guarantees ΔW=0 at
-    # the first optimizer step.
+    # GlobalRouter parameters (route_per_layer=False). Two-layer MLP feeding
+    # softmax/τ. Final layer is zero-init so step-0 gates are uniform,
+    # guaranteeing ΔW=0 at the first optimizer step.
     router_hidden_dim: int = 64
     router_tau: float = 0.7
 
-    # FECL (Frequency-Energy Consistency Loss) — opt-in FeRA aux loss; 0.0 off
-    # (2-band path collapses to a content-free scalar; bench at 3 bands).
-    # ``library/training/losses.py::_fera_fecl_loss`` reads ``network.fecl_weight``.
+    # FECL (Frequency-Energy Consistency Loss) — opt-in FeRA aux loss; 0.0 off.
+    # library/training/losses.py::_fera_fecl_loss reads network.fecl_weight.
     fera_fecl_weight: float = 0.0
     fera_num_bands: int = 3
 
-    # ChimeraHydra dual-pool additive routing (docs/proposal/chimera_hydra.md):
+    # ChimeraHydra dual-pool additive routing (docs/experimental/chimera-hydra.md):
     # content pool (K_c, per-layer router) + freq pool (K_f, network FreqRouter
-    # on FEI+σ), E = K_c + K_f. Per-pool balance weights tracked separately — a
-    # combined term would let one pool flatten while the other concentrates.
+    # on FEI+σ), E = K_c + K_f. Per-pool balance weights tracked separately so
+    # one pool can't flatten while the other concentrates.
     use_chimera_hydra: bool = False
     num_experts_content: int = 3
     num_experts_freq: int = 3
     balance_w_content: Optional[float] = None  # falls back to balance_loss_weight
     balance_w_freq: Optional[float] = None  # falls back to balance_loss_weight
-    # FreqRouter init magnitude. Non-zero so the freq pool differentiates
-    # immediately as FEI/σ vary across the batch — zero-weight init would
-    # be a fixed point under the additive composition (see proposal §"Init").
+    # FreqRouter init magnitude; non-zero because zero-weight init is a fixed
+    # point under the additive composition.
     freq_router_init_std: float = 0.1
-    # Per-modality LayerNorm on the FreqRouter input. Active only when both
-    # FEI and σ feature blocks are enabled (variance balance is the whole
-    # point — with one modality off LN either no-ops or destroys the 2-D
-    # FEI simplex's magnitude). Parameterless (``elementwise_affine=False``)
-    # so the state_dict format is unchanged; the on/off semantics live in
-    # the ``ss_chimera_freq_router_layer_norm`` metadata stamp.
+    # Per-modality LayerNorm on the FreqRouter input (parameterless). Active
+    # only when both FEI and σ blocks are enabled — with one off, LN either
+    # no-ops or destroys the FEI simplex's magnitude.
     freq_router_layer_norm: bool = True
-    # Freq-pool routing MODE. "learned" (default): FreqRouter MLP over
-    # concat(FEI, σ-features) (paper-faithful). "fei": hardwire
-    # ``π_f = normalize(FEI ** (1/τ))`` — no params/σ-input/freq-balance,
-    # requires num_experts_freq == fei_feature_dim. FEI is already the
-    # load-bearing per-prompt simplex at low σ (σ doesn't discriminate), so
-    # hardwiring keeps 100% of the signal. Stamped to ss_chimera_freq_router_mode.
+    # Freq-pool routing MODE. "learned": FreqRouter MLP over concat(FEI, σ).
+    # "fei": hardwire π_f = normalize(FEI ** (1/τ)) — no params, requires
+    # num_experts_freq == fei_feature_dim.
     freq_router_mode: str = "learned"
-    # Temperature on the hardwired FEI gate (freq_router_mode="fei" only).
-    # τ=1.0 = raw-FEI passthrough; τ<1 sharpens crossover, τ>1 flattens.
-    # Inert under "learned".
+    # Temperature on the hardwired FEI gate (freq_router_mode="fei" only);
+    # inert under "learned".
     freq_router_tau: float = 1.0
-    # Per-pool router LR multipliers (chimera-only), stacked on router_lr_scale:
-    # effective LR = unet_lr × router_lr_scale × <pool>_router_lr_scale. Bumping
-    # ``content`` to 5–10× is a faster lever than balance_w_content when the
-    # content pool stays near-uniform.
+    # Per-pool router LR multipliers (chimera-only), stacked on router_lr_scale.
     content_router_lr_scale: float = 1.0
     freq_router_lr_scale: float = 1.0
-    # ChimeraHydra content router: one network-level ``ContentRouter`` on pooled
-    # ``crossattn_emb`` (1024-D for Anima); π_c broadcast via
-    # ``_content_routing_weights`` like π_f. Only content-routing mode (per-Linear
-    # ``lx_c`` softmax removed). ``content_router_layer_norm`` = parameterless LN.
+    # ChimeraHydra content router: network-level ContentRouter on pooled
+    # crossattn_emb; π_c broadcasts via _content_routing_weights like π_f.
     content_router_layer_norm: bool = True
-    # ContentRouter output-layer init magnitude. 0.0 (zero-init) = uniform π_c at
-    # step 0 → ΔW_c=0. Zero is NOT a fixed point here (disjoint P_bases_c·λ_c +
-    # per-prompt input break symmetry), so nonzero is purely a plateau-kick for
-    # the "usage uniform but content_margin≈0" regime — it loses the exact-identity
-    # start and seeds a usage skew the balance loss must undo. Keep small, opt-in.
+    # ContentRouter output-layer init magnitude. 0.0 = uniform π_c at step 0.
+    # Not a true fixed point here (disjoint P_bases_c·λ_c + per-prompt input
+    # break symmetry); nonzero is a plateau-kick, opt-in only.
     content_router_init_std: float = 0.0
 
-    # ChimeraHydra centered-gate λ init (BOTH pools), always on: gates recentered
-    # to ``π - 1/K``, routers zero-init, λ_c/λ_f start at chimera_lambda_init.
-    # Gives ΔW=0 at init yet nonzero router gradient (disjoint P-subspaces survive
-    # mean subtraction); balance loss sees the RAW simplex. ≤0 floored to 1e-2.
+    # ChimeraHydra centered-gate λ init (both pools, always on): gates
+    # recentered to π - 1/K, routers zero-init, λ starts here. Gives ΔW=0 at
+    # init yet nonzero router gradient. ≤0 floored to 1e-2.
     chimera_lambda_init: float = 1e-2
 
-    # Per-expert capability levers (frozen-Cayley chimera only — orthogonality-
-    # PRESERVING alternative to use_ortho_init). Both distill to the standard
-    # up-stack (inference/on-disk unchanged); mutually exclusive with use_ortho_init.
-    #   * ``chimera_expert_basis_mult`` (m≥1): over-complete ``(out, m·r)`` frozen
-    #     pool from a DISJOINT U-slice + m·r Cayley; forward selects an r-dim
-    #     Stiefel subspace (trainable colspace, disjoint across experts, no
-    #     collapse). Auto-downgrades per-layer on overflow; m=1 = canonical r-slice.
-    #   * ``chimera_expert_diag``: per-expert ``(K, r)`` trainable diagonal σ
-    #     (init 1) — the singular spectrum the ortho-only path lacks. ΔW=0 still holds.
+    # Per-expert capability levers (frozen-Cayley chimera only; mutually
+    # exclusive with use_ortho_init — both distill to the standard up-stack).
+    #   chimera_expert_basis_mult (m≥1): over-complete (out, m·r) frozen pool
+    #     from a disjoint U-slice; forward selects a trainable r-dim Stiefel
+    #     subspace. m=1 = canonical r-slice.
+    #   chimera_expert_diag: per-expert trainable diagonal σ (init 1).
     chimera_expert_basis_mult: int = 1
     chimera_expert_diag: bool = False
 
-    # Step-expert (turbo per-step head split). >1 → ``StepExpertLoRAModule``:
-    # shared ``lora_down`` + K up-heads selected by diffusion step (no router).
-    # 0/1 = inactive. See ``networks/lora_modules/step_expert.py``.
+    # Step-expert (turbo per-step head split). >1 → StepExpertLoRAModule:
+    # shared lora_down + K up-heads selected by diffusion step. 0/1 = inactive.
     step_expert_K: int = 0
 
     # SmoothQuant-style per-channel input pre-scaling
     channel_scales_dict: Optional[Dict[str, torch.Tensor]] = None
 
     # DSR-style learnable register tokens trained jointly with the LoRA
-    # (docs/proposal/headroom_register_tokens.md; shared machinery with the
-    # standalone register method via networks/register_injection.py). K tokens
-    # enter the self-attn sequence at block ``register_insert_block`` (DSR's
-    # "starting block" — Tab. 9 sweet spot 8, 0 = stack entry), ride to the
-    # end of the stack, and are stripped before unpatchify. 0 = off (default).
-    # Registers can't merge into DiT weights → the checkpoint becomes
-    # kept-live at inference (is_mergeable() False, static merge refused).
+    # (shared machinery with the standalone register method via
+    # networks/register_injection.py). K tokens enter the self-attn sequence
+    # at block register_insert_block, ride to the end, stripped before
+    # unpatchify. 0 = off. Registers can't merge into DiT weights → checkpoint
+    # is kept-live at inference (is_mergeable() False).
     num_registers: int = 0
     register_insert_block: int = 8
-    # Registers get their own optimizer group at unet_lr × this scale — they
-    # must grow ~14–24× the median patch norm to become sinks, which a
-    # LoRA-scale lr rarely reaches (proposal §metrics).
+    # Own optimizer group at unet_lr × this scale — registers need to grow far
+    # past the median patch norm to become sinks, which a LoRA-scale lr rarely
+    # reaches on its own.
     register_lr_scale: float = 100.0
     register_init_std: float = 0.02
 
@@ -417,16 +359,11 @@ class LoRANetworkCfg:
         exclude_patterns.append(_DEFAULT_EXCLUDE)
         include_patterns = _as_str_list(kwargs.get("include_patterns"))
 
-        # adaln convenience knobs (mirror the turbo distill surface): train_adaln
-        # adds the adaln_up_{branch} Linears to the target set — they sit in
-        # _DEFAULT_EXCLUDE, so this rescues them via include_patterns (an
-        # exclude-override, not a whitelist, so the default attn+MLP set is
-        # untouched). adaln_rank / adaln_alpha give them their own rank / alpha
-        # (0/absent rank = the network's; 0/absent alpha = derived from
-        # network_dim/network_alpha by the √r law, below). Translates to the exact
-        # include_patterns / network_reg_dims / network_reg_alphas primitives the
-        # turbo harness builds by hand (networks/methods/turbo_dmd.py); injected
-        # into reg_dims / reg_alphas after those strings are parsed, below.
+        # adaln convenience knobs: train_adaln adds adaln_up_{branch} Linears to
+        # the target set (they sit in _DEFAULT_EXCLUDE, rescued via
+        # include_patterns). adaln_rank/adaln_alpha give them their own
+        # rank/alpha (0/absent = derived below); injected into reg_dims/
+        # reg_alphas after those strings are parsed.
         train_adaln = _as_bool(kwargs.get("train_adaln"))
         adaln_rank_raw = kwargs.get("adaln_rank")
         adaln_rank = int(adaln_rank_raw) if adaln_rank_raw is not None else 0
@@ -462,8 +399,8 @@ class LoRANetworkCfg:
         ortho_centered_gate = _as_bool(kwargs.get("ortho_centered_gate"))
         ortho_lambda_init = float(kwargs.get("ortho_lambda_init", 0.0))
         if ortho_centered_gate and ortho_lambda_init <= 0.0:
-            # Centering with λ0=0 is a no-op (router-logit grad ∝ (P_k-mean)diag(λ0)ℓ
-            # vanishes); 1e-2 fires the mechanism and survives bf16 (1e-6 lost to noise).
+            # Centering with λ0=0 is a no-op (router-logit grad vanishes at
+            # λ0=0); 1e-2 fires the mechanism and survives bf16.
             ortho_lambda_init = 1e-2
             logger.info(
                 "ortho_centered_gate=True with ortho_lambda_init<=0; "
@@ -541,14 +478,12 @@ class LoRANetworkCfg:
         ortho_init_std = float(kwargs.get("ortho_init_std", 0.02))
         use_ortho_init = _as_bool(kwargs.get("use_ortho_init"))
 
-        # FECL knobs. Default off; turning it on requires `num_bands >= 3`
-        # to be a meaningful objective (see compute_fecl docstring).
+        # FECL knobs. Default off; requires num_bands >= 3 to be meaningful.
         fera_fecl_weight = float(kwargs.get("fera_fecl_weight", 0.0))
         fera_num_bands = int(kwargs.get("fera_num_bands", kwargs.get("num_bands", 3)))
 
-        # ChimeraHydra knobs. ``num_experts`` (parent Hydra cfg) is treated
-        # as a derived value when ``use_chimera_hydra=True`` — recomputed
-        # below so users only set K_c / K_f.
+        # ChimeraHydra knobs — num_experts is derived from K_c+K_f below when
+        # use_chimera_hydra=True, so users only set K_c/K_f.
         use_chimera_hydra = _as_bool(kwargs.get("use_chimera_hydra"))
         num_experts_content = int(kwargs.get("num_experts_content", 3))
         num_experts_freq = int(kwargs.get("num_experts_freq", 3))
@@ -657,13 +592,10 @@ class LoRANetworkCfg:
             # no-MoE = no router; Hydra defaults to per-layer
             route_per_layer = use_moe_style is not False
 
-        # ChimeraHydra: pin the three-axis cells to (shared_A, per-layer,
-        # input) regardless of TOML wiring. The chimera content router IS
-        # a per-layer shared_A Hydra router on pooled lx; the freq router
-        # adds a second routing source on top via a dedicated network-level
-        # mechanism. Stamping these three values means the save metadata
-        # flows through the standard MoE branch and the loader can detect
-        # the chimera-specific stamps without a parallel three-axis path.
+        # ChimeraHydra: pin the three-axis cells to (shared_A, per-layer, input)
+        # regardless of TOML wiring — the content router is a per-layer
+        # shared_A Hydra router on pooled lx; the freq router adds a second
+        # source via a dedicated network-level mechanism.
         if use_chimera_hydra:
             if use_moe_style not in (False, "shared_A"):
                 raise ValueError(
@@ -686,11 +618,8 @@ class LoRANetworkCfg:
             route_per_layer = True
             router_source = "input"
 
-        # SVD-Down (down_init="weight_svd") targets the plain LoRAModule only —
-        # the ortho/Hydra/Chimera classes own their own SVD seeding and the
-        # network.py pass-through is gated to LoRAModule, so a non-plain variant
-        # would silently ignore it. Fail loudly instead of no-op'ing. T-LoRA
-        # (use_timestep_mask) is fine — it stays on LoRAModule.
+        # SVD-Down (down_init="weight_svd") targets plain LoRAModule only — a
+        # non-plain variant would silently ignore it, so fail loudly instead.
         if down_init != "kaiming" and (
             use_ortho
             or use_ortho_init
@@ -742,12 +671,8 @@ class LoRANetworkCfg:
             if adaln_rank > 0:
                 reg_dims = {**(reg_dims or {}), _adaln_pat: adaln_rank}
             if adaln_alpha <= 0:
-                # Derive from the network's own rank/alpha instead of inheriting
-                # network_alpha at a smaller rank (which runs the adaln modules
-                # network_dim/adaln_rank hotter in alpha/rank). √r law
-                # (alpha ∝ √r — docs/methods/adaln.md), matching
-                # networks/methods/easycontrol.py. adaln_rank = 0 shares the
-                # network rank, so the factor is 1 and this is a no-op.
+                # √r law (alpha ∝ √r — docs/methods/adaln.md) instead of
+                # inheriting network_alpha at a smaller rank.
                 _r = adaln_rank if adaln_rank > 0 else network_dim
                 adaln_alpha = network_alpha * math.sqrt(_r / max(network_dim, 1))
             reg_alphas = {**(reg_alphas or {}), _adaln_pat: adaln_alpha}
@@ -875,23 +800,16 @@ class LoRANetworkCfg:
     ) -> "LoRANetworkCfg":
         """Build cfg from a checkpoint key-sniff (warm-start / inference path).
 
-        Mirrors the ``LoRANetwork(...)`` call previously embedded in
-        ``create_network_from_weights``. Per-module dims / alphas come from
-        ``modules_dim`` / ``modules_alpha``, so ``lora_dim`` / ``alpha`` here
-        are placeholders. Training-time schedules (warmup, T-LoRA) stay off
-        in the warm-start path.
+        Per-module dims/alphas come from modules_dim/modules_alpha, so
+        lora_dim/alpha here are placeholders; training-time schedules stay off.
 
-        ``specialize_experts_by_sigma_buckets`` / ``num_sigma_buckets`` /
-        ``sigma_bucket_boundaries`` come from safetensors metadata stamped by
-        ``save_weights`` — the partition leaves no tensor footprint
-        (``_expert_band`` / ``_sigma_edges`` are non-persistent) so it has to
-        be reconstructed from those scalars at load time.
+        specialize_experts_by_sigma_buckets/num_sigma_buckets/
+        sigma_bucket_boundaries are reconstructed from safetensors metadata —
+        the partition leaves no tensor footprint.
 
-        For non-MoE checkpoints (plain LoRA / OrthoLoRA / T-LoRA) the
-        three-axis stamps are not stamped at save time; absence is taken as
-        ``(False, False, "none")``. MoE checkpoints (Hydra / OrthoHydra /
-        StackedExperts) must carry all three stamps — plan2 task #6 retired
-        the legacy ``ss_use_hydra`` / ``ss_use_fei_router`` fallback.
+        Non-MoE checkpoints have no three-axis stamps; absence = (False,
+        False, "none"). MoE checkpoints (Hydra/OrthoHydra/StackedExperts)
+        must carry all three — pre-plan2 checkpoints no longer load.
         """
         if (
             new_use_moe_style is not None

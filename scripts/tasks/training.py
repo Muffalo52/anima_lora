@@ -34,7 +34,7 @@ from ._common import (
 # [training] knob tables + a [[datasets]] blueprint tail) selected via the
 # EASYADAPTER env var. All train the base ``easycontrol`` method with the
 # descriptor's [training] table folded in as CLI overrides. Per-adapter
-# staging/preprocess bodies are registered in ``_EASY_ADAPTERS`` (below).
+# staging/preprocess bodies are registered in ``_EASY_ADAPTERS`` below.
 
 
 def _easyadapter() -> str:
@@ -54,11 +54,11 @@ def cmd_lora(extra):
 def cmd_register(extra):
     """Register-token adapter on a FROZEN Anima DiT (docs/proposal/headroom_register_tokens.md).
 
-    DSR-style register tokens inserted at ``insert_block`` (default 8 — DSR's
-    "starting block" sweet spot, Tab. 9) + a trained self-attn QKV surface
-    (``networks/methods/register.py`` / ``configs/methods/register.toml``).
-    Compile is supported (train.py widens the dynamic-seq bound by K); block
-    swap stays forced off. Override knobs via ``--network_args`` or the config::
+    DSR-style register tokens inserted at ``insert_block`` (default 8) plus a
+    trained self-attn QKV surface (``networks/methods/register.py`` /
+    ``configs/methods/register.toml``). Compile is supported (train.py widens
+    the dynamic-seq bound by K); block swap stays forced off. Override knobs
+    via ``--network_args`` or the config::
 
         make register                                     # K36 @ block 8, unfrozen QKV, arm B
         make register ARGS="--network_args num_registers=16 qkv_mode=lora"
@@ -87,17 +87,13 @@ def cmd_turbo(extra):
     ``make test-turbo`` / ``--infer_steps 4 --cfg 1.0``).
 
     Honors ``PRESET`` (default ``default``) — translates ``blocks_to_swap`` and
-    ``gradient_checkpointing`` from ``configs/presets.toml`` into CLI flags so
-    ``make turbo PRESET=low_vram`` enables grad ckpt + unsloth offload, and
-    ``PRESET=half/quarter/tenth`` shrinks the dataset via ``--sample_ratio``.
-    ``extra`` is appended last, so user CLI overrides win.
+    ``gradient_checkpointing`` into CLI flags (``PRESET=low_vram`` enables
+    grad ckpt + unsloth offload; ``PRESET=half/quarter/tenth`` shrinks the
+    dataset via ``--sample_ratio``). ``extra`` is appended last, so CLI wins.
 
     ``--queue`` anywhere in ``extra`` enqueues the distillation as a daemon
-    command-job (run serially behind any other queued work) and returns
-    immediately, instead of running it inline — the bespoke-loop analogue of
-    ``make lora --queue``. The job is labeled ``turbo`` so the GUI's Turbo
-    tab can re-attach to it. Preset flags are baked into the queued argv since the
-    daemon's command path does no config merging.
+    command-job and returns immediately instead of running inline. Job is
+    labeled ``turbo`` so the GUI's Turbo tab can re-attach to it.
     """
     extra = list(extra or [])
     preset_flags = bespoke_preset_flags(_preset())
@@ -128,20 +124,17 @@ def cmd_soup(extra):
 
     Selection is a fnmatch **path_pattern** (``|`` = alternatives, matched
     against each image's path relative to its subset image_dir) rather than a
-    single artist dir. ``ARTISTS_SHARD=k_N`` is the alternative selector — one
-    round-robin shard of the artist subdirs, expanded to an explicit glob by the
-    pipeline (slug ``shard1of6``); mutually exclusive with ``PATH_PATTERN`` /
-    ``TARGET``. With none of them set it falls back to the top-level
-    ``path_pattern`` **or** ``artists_shard`` in the soup config.
-    ``TARGET`` is a convenience shorthand: ``TARGET=x`` ⇒
-    ``PATH_PATTERN="x/*" NAME=x``. ``ARGS`` reaches the fine-tune runs. Env knobs
-    (all optional): ``NAME`` (output slug; default derived from the pattern),
-    ``POOL_PATH_PATTERN`` (Phase-1 uncond pool glob, default "*" = whole dataset,
-    the fine-tune set always unioned in), ``UNCOND_RATIO`` (0.5),
-    ``UNCOND_EPOCHS`` (2), ``NUM_SOUP`` (3 — number of seeded fine-tunes to
-    soup, seeds 1001..1000+N), ``LR_POOL`` (per-ingredient LRs, e.g.
-    ``"1e-5,2e-5,4e-5"``; cycled — unset = every ingredient trains at the config
-    LR) or ``LR_INTERVAL`` (``"1e-5:4e-5"``, geometric over NUM_SOUP points),
+    single artist dir. ``ARTISTS_SHARD=k_N`` is an alternative selector — one
+    round-robin shard of the artist subdirs (slug ``shard1of6``); mutually
+    exclusive with ``PATH_PATTERN``/``TARGET``. With none set it falls back to
+    the top-level ``path_pattern`` / ``artists_shard`` in the soup config.
+    ``TARGET`` is shorthand: ``TARGET=x`` ⇒ ``PATH_PATTERN="x/*" NAME=x``.
+    ``ARGS`` reaches the fine-tune runs. Env knobs (all optional): ``NAME``
+    (output slug), ``POOL_PATH_PATTERN`` (Phase-1 uncond pool glob, default
+    "*" = whole dataset), ``UNCOND_RATIO`` (0.5), ``UNCOND_EPOCHS`` (2),
+    ``NUM_SOUP`` (3 — fine-tunes to soup, seeds 1001..1000+N), ``LR_POOL``
+    (per-ingredient LRs, e.g. ``"1e-5,2e-5,4e-5"``, cycled) or
+    ``LR_INTERVAL`` (``"1e-5:4e-5"``, geometric over NUM_SOUP points),
     ``RANK`` (default network_dim), ``PRESET``.
     Submitted as ONE daemon command job — the pipeline runs train.py
     subprocesses directly (nested daemon submission would deadlock the serial
@@ -161,9 +154,8 @@ def cmd_soup(extra):
         _preset(),
     ]
     # CUSTOM=<file> runs an ad-hoc soup config from configs/gui-methods/custom/
-    # (the shared scratch dir, alongside `make lora-gui CUSTOM=`; kept out of the
-    # tracked configs/soup/soup.toml). The file seeds BOTH the [soup] pipeline
-    # knobs and the fine-tune method config.
+    # (shared scratch dir, kept out of the tracked configs/soup/soup.toml).
+    # The file seeds BOTH the [soup] pipeline knobs and the fine-tune method config.
     custom = os.environ.get("CUSTOM")
     if custom:
         stem = Path(custom).stem
@@ -269,9 +261,7 @@ def _toml_table_to_argv(table: dict) -> list[str]:
     """Flatten a flat TOML table into ``--key value`` train.py argv.
 
     Bools become bare ``--flag`` when true (omitted when false); lists spread
-    into ``--key v1 v2``; scalars become ``--key str(value)``. Used to fold a
-    near_twins.toml ``[training]`` table into CLI overrides (CLI wins the merge
-    chain, so these override the easycontrol method config).
+    into ``--key v1 v2``; scalars become ``--key str(value)``.
     """
     argv: list[str] = []
     for key, val in table.items():
@@ -296,14 +286,11 @@ def _easy_cfg_path(adapter: str) -> Path:
 def _easy_load(adapter: str) -> tuple[dict, str, str]:
     """Load ``configs/easycontrol/<adapter>.toml`` → ``(cfg, name, base)``.
 
-    The top-level ``name`` key (default = the file stem) is the single source of
-    truth for the run: it picks the ``post_image_dataset/easycontrol/<name>/``
-    base tree and the ``anima_easycontrol_<name>`` output_name default. Set
-    ``name = "sanitize"`` and the whole pipeline reroutes under
-    ``easycontrol/sanitize/`` with no other path edits — re-run staging →
-    preprocess → train so the generated blueprint tail tracks the new slug.
-    Explicit ``[preprocess]`` path keys / ``[training].output_name`` still win if
-    present (back-compat), but are no longer needed.
+    The top-level ``name`` key (default = the file stem) is the single source
+    of truth for the run: it picks the ``post_image_dataset/easycontrol/<name>/``
+    base tree and the ``anima_easycontrol_<name>`` output_name default.
+    Explicit ``[preprocess]`` path keys / ``[training].output_name`` still win
+    if present (back-compat).
     """
     path = _easy_cfg_path(adapter)
     if not path.is_file():
@@ -320,12 +307,10 @@ def _easy_load(adapter: str) -> tuple[dict, str, str]:
 def _resolve_blueprint_path(path: str, name: str) -> str:
     """Resolve a blueprint subset path against the current ``name`` slug.
 
-    Two complementary steps so ``name`` stays the single source of truth:
-    1. Interpolate the ``{name}`` placeholder the miner now writes into the
-       blueprint tail (``post_image_dataset/easycontrol/{name}/resized`` …).
-    2. As a fallback for older blueprints that baked a resolved slug in, swap the
-       ``<slug>`` component of a ``post_image_dataset/easycontrol/<slug>/...``
-       path to ``name``. Non-matching paths (custom locations) are left untouched.
+    Interpolates the ``{name}`` placeholder the miner writes into the
+    blueprint tail; falls back to swapping the ``<slug>`` component of an
+    older ``post_image_dataset/easycontrol/<slug>/...`` path. Non-matching
+    (custom) paths are left untouched.
     """
     path = path.replace("{name}", name)
     parts = Path(path).parts
@@ -337,15 +322,13 @@ def _resolve_blueprint_path(path: str, name: str) -> str:
 def _easy_train_extra(adapter: str, extra) -> list[str]:
     """Build train.py extra-argv for an ``EASYADAPTER=<adapter>`` descriptor run.
 
-    ``configs/easycontrol/<adapter>.toml`` is a multi-purpose file (top-level
-    ``name`` + ``[staging]`` / ``[preprocess]`` / ``[training]`` knob tables above
-    a ``[general]`` + ``[[datasets]]`` blueprint), but train.py's dataset-config
-    validator rejects any top-level key outside the blueprint. So we extract just
-    the blueprint sections into a clean generated sidecar and point
-    ``--dataset_config`` at that, then fold the optional ``[training]`` table
-    (with ``output_name`` defaulting to ``anima_easycontrol_<name>``) into CLI
-    overrides on top of the easycontrol method config. User-supplied ``extra``
-    argv is appended last so it still wins.
+    ``configs/easycontrol/<adapter>.toml`` is a multi-purpose file, but
+    train.py's dataset-config validator rejects any top-level key outside the
+    blueprint. So we extract just the blueprint sections into a clean
+    generated sidecar (``--dataset_config``), then fold the optional
+    ``[training]`` table (``output_name`` defaulting to
+    ``anima_easycontrol_<name>``) into CLI overrides. User ``extra`` argv is
+    appended last so it still wins.
     """
     cfg, name, base = _easy_load(adapter)
     blueprint = {k: cfg[k] for k in ("general", "datasets") if k in cfg}
@@ -356,9 +339,7 @@ def _easy_train_extra(adapter: str, extra) -> list[str]:
         )
 
     # Resolve subset paths against the current `name` slug so a `name` change
-    # reroutes training. ``text_cache_dir``/``latent_cache_dir`` ride the slug too
-    # (colorize redirects the TE + white-balanced target-latent caches;
-    # near_twins leaves them unset).
+    # reroutes training.
     for ds in blueprint.get("datasets", []):
         for s in ds.get("subsets", []):
             for key in (
@@ -371,8 +352,8 @@ def _easy_train_extra(adapter: str, extra) -> list[str]:
                 if key in s:
                     s[key] = _resolve_blueprint_path(s[key], name)
 
-    # Write the blueprint-only dataset config under the slug base dir. Stable-pathed
-    # so the --queue daemon path can re-read it later, regenerated each invocation.
+    # Write the blueprint-only dataset config under the slug base dir. Stable
+    # path so --queue can re-read it later; regenerated each invocation.
     base_dir = ROOT / base
     base_dir.mkdir(parents=True, exist_ok=True)
     ds_path = base_dir / "dataset_config.toml"
@@ -384,7 +365,7 @@ def _easy_train_extra(adapter: str, extra) -> list[str]:
         encoding="utf-8",
     )
 
-    # output_name defaults to the name-derived slug; an explicit [training].output_name wins.
+    # output_name defaults to the name-derived slug; explicit [training].output_name wins.
     training = dict(cfg.get("training") or {})
     training.setdefault("output_name", f"anima_easycontrol_{name}")
 
@@ -415,16 +396,13 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     """Resize + VAE/TE caching for the mined near-twin pair tree.
 
     Every knob is read from the ``[preprocess]`` table of
-    ``configs/easycontrol/near_twins.toml`` (written by the staging step), so this
-    stays in lockstep with the dataset blueprint that step also rewrites. The
-    staging/resized/cache/cond dirs default to ``post_image_dataset/easycontrol/
-    <name>/{staging,resized,cache,cond}`` (the top-level ``name`` slug), so they
-    need no manual ``[preprocess]`` entry; an explicit path key still overrides.
+    ``configs/easycontrol/near_twins.toml``. The staging/resized/cache/cond
+    dirs default to ``post_image_dataset/easycontrol/<name>/{staging,resized,
+    cache,cond}``; an explicit path key still overrides.
 
-    The mined ``staging/`` tree holds native-resolution images (symlinks to the
-    corpus), so the pass first resizes them into constant-token buckets under
-    ``resized/`` (``target_res`` tiers) — that resized tree is the training
-    ``image_dir`` — and only then VAE/TE-encodes it into ``cache/``.
+    The mined ``staging/`` tree holds native-resolution images (symlinks to
+    the corpus), so this first resizes them into buckets under ``resized/``
+    (the training ``image_dir``), then VAE/TE-encodes into ``cache/``.
     """
     pp = cfg.get("preprocess") or {}
     staging = pp.get("image_dir", f"{base}/staging")
@@ -432,7 +410,7 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     cache = pp.get("cache_dir", f"{base}/cache")
     recursive = ["--recursive"] if pp.get("recursive", True) else []
     # Bucket tiers: descriptor's [preprocess].target_res wins, else base.toml's
-    # target_res (tracks the shared tier contract); final fallback [1024].
+    # target_res; final fallback [1024].
     target_res = pp.get("target_res")
     if target_res is None:
         from ._common import _path_overrides
@@ -443,15 +421,9 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     target_res_flag = (
         ["--target_res", *[str(e) for e in target_res]] if target_res else []
     )
-    # Free-fit (native-aspect token-band resize): [preprocess].freefit wins, else
-    # base.toml's freefit (shared with the LoRA pipeline). CAVEAT pair coherence —
-    # the cond/target pairing in _near_twins_build_cond matches twins on an EXACT
-    # same bucket string, and the loader (_load_cond_latent) resolves+validates the
-    # cond latent at the TARGET's bucket, so a pair whose members free-fit to
-    # different shapes is dropped at cond-build with a warning (more often than
-    # under coarse constant buckets, since free-fit granularity is per-token-count).
-    # Near-twins share an aspect so most pairs survive; pairs from differently-sized
-    # source scans are the casualties.
+    # Free-fit: [preprocess].freefit wins, else base.toml's freefit. CAVEAT: a
+    # pair whose members free-fit to different shapes is cross-shape-paired
+    # (or dropped if truly unpaired) — see _near_twins_build_cond.
     freefit = pp.get("freefit")
     if freefit is None:
         from ._common import _path_overrides
@@ -463,8 +435,8 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
         if pp.get("freefit_max_ratio") is not None:
             freefit_flag += ["--freefit_max_ratio", str(pp["freefit_max_ratio"])]
 
-    # 1. Resize staging tree into buckets. min_pixels defaults to 0 (not 0.5MP) so a
-    #    small member can't be dropped and orphan its pair partner.
+    # Resize staging tree into buckets. min_pixels defaults to 0 (not 0.5MP) so a
+    # small member can't be dropped and orphan its pair partner.
     run(
         [
             PY,
@@ -541,21 +513,19 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
 def _near_twins_build_cond(pp: dict, base: str) -> None:
     """Materialize the ``cond/`` latent tree for the near-twins *removal* task.
 
-    Pairing convention (matches the generated blueprint): the denoising target is
-    the clean ``_no_tags`` member; its ``_tags`` twin is the EasyControl condition
-    reference. The loader resolves the cond latent by the *target* stem (bucket
-    first, then a stem-glob fallback) under ``cond_cache_dir``, so for each
-    ``{id}_no_tags_{WxH}_anima.npz`` target latent we symlink the sibling
-    ``{id}_tags_{W'xH'}_anima.npz`` into ``cond/<artist>/{id}_no_tags_{W'xH'}_anima.npz``
-    (cond content = the _tags latent, filed under the _no_tags stem at the *twin's*
-    bucket). Same-bucket twins are the constant-bucket common case; under free-fit a
-    twin may resize to a different shape (W'xH' ≠ WxH) and is paired anyway — cond≠
-    target shapes are supported (the cond stream encodes at its native token count,
-    cond_diff_loss self-skips on a shape mismatch). Only a truly unpaired target
-    (no _tags twin at any bucket) is skipped with a warning.
+    Pairing convention: the denoising target is the clean ``_no_tags`` member;
+    its ``_tags`` twin is the EasyControl condition reference. The loader
+    resolves the cond latent by the *target* stem under ``cond_cache_dir``, so
+    for each ``{id}_no_tags_{WxH}_anima.npz`` target we symlink the sibling
+    ``{id}_tags_{W'xH'}_anima.npz`` into
+    ``cond/<artist>/{id}_no_tags_{W'xH'}_anima.npz`` (filed at the *twin's*
+    bucket). Under free-fit a twin may land at a different shape (W'xH' ≠ WxH)
+    and is still paired — cond≠target shapes are supported (cond_diff_loss
+    self-skips on a mismatch). A truly unpaired target is skipped with a
+    warning.
 
-    Pure symlinks over the existing cache; the tree is rebuilt from scratch each
-    run so a dropped pair can't leave a stale link behind.
+    Pure symlinks over the existing cache; the tree is rebuilt from scratch
+    each run so a dropped pair can't leave a stale link behind.
     """
     cache_dir = ROOT / pp.get("cache_dir", f"{base}/cache")
     cond_dir = ROOT / pp.get("cond_dir", f"{base}/cond")
@@ -578,10 +548,8 @@ def _near_twins_build_cond(pp: dict, base: str) -> None:
         twin = npz.with_name(f"{m['id']}_tags_{m['bucket']}_anima.npz")
         twin_bucket = m["bucket"]
         if not twin.is_file():
-            # Free-fit may land the _tags twin at a DIFFERENT shape than the clean
-            # target — that's fine (cond≠target is supported: the cond stream
-            # encodes at its native token count, cond_diff_loss self-skips on a
-            # shape mismatch). Pair the twin at whatever bucket it has.
+            # Free-fit may land the _tags twin at a different shape — fine,
+            # cond≠target is supported. Pair at whatever bucket it has.
             cands = sorted(npz.parent.glob(f"{m['id']}_tags_*_anima.npz"))
             if not cands:
                 print(
@@ -594,9 +562,8 @@ def _near_twins_build_cond(pp: dict, base: str) -> None:
             twin = cands[0]
             twin_bucket = twin_pat.search(twin.name)["bucket"]
             crossfit += 1
-        # File the symlink under the target stem at the TWIN's actual bucket so the
-        # loader's stem-glob fallback resolves it and reads the right reso. For the
-        # same-bucket case the name is unchanged (target bucket == twin bucket).
+        # File under the target stem at the TWIN's actual bucket so the loader's
+        # stem-glob fallback resolves it. Same-bucket case: name is unchanged.
         link = (
             cond_dir
             / npz.relative_to(cache_dir).parent
@@ -616,13 +583,12 @@ def _near_twins_stage(adapter: str, cfg: dict, base: str, extra) -> None:
     """Mine the in-artist near-twin pair tree (the near_twins/sanitize staging step).
 
     The miner self-reads its ``[staging]`` table + ``name`` slug from the
-    descriptor and rewrites the blueprint tail back into the *same* file, so we
-    point both ``--config`` (read) and ``--config-out`` (write) at
-    ``configs/easycontrol/<adapter>.toml`` — otherwise the miner falls back to its
-    near_twins.toml default and a ``sanitize`` run would mine into the wrong file.
-    ``cfg``/``base`` are unused (the miner re-reads the file itself); the signature
-    just matches the registry contract. User ``extra`` argv wins last (the miner's
-    precedence is CLI > toml > default), so an explicit ``--config`` still overrides."""
+    descriptor and rewrites the blueprint tail back into the *same* file, so
+    both ``--config``/``--config-out`` point at
+    ``configs/easycontrol/<adapter>.toml`` (else a ``sanitize`` run would mine
+    into the miner's near_twins.toml default). ``cfg``/``base`` are unused —
+    the signature just matches the registry contract.
+    """
     cfg_path = str(_easy_cfg_path(adapter))
     run(
         [
@@ -641,12 +607,11 @@ def _near_twins_stage(adapter: str, cfg: dict, base: str, extra) -> None:
 def _colorize_prep_paths(base: str) -> list[str]:
     """Slug-derived prep.py path flags so ``name`` reroutes colorize's trees.
 
-    ``--src`` stays the shared color corpus (``post_image_dataset/resized`` — the
-    colorize *targets*); only the synthetic staging tree + cond/text/target caches
-    ride the slug, matching the blueprint's ``cond_cache_dir`` / ``text_cache_dir``
-    / ``latent_cache_dir`` (the white-balanced target-latent cache).
-    Injected before the descriptor knob tables so a ``[staging]``/``[preprocess]``
-    key (or user ``extra``) still wins via argparse last-flag precedence."""
+    ``--src`` stays the shared color corpus (``post_image_dataset/resized``);
+    only the synthetic staging tree + cond/text/target caches ride the slug.
+    Injected before the descriptor knob tables so a ``[staging]``/
+    ``[preprocess]`` key (or user ``extra``) still wins via last-flag
+    precedence."""
     return [
         "--staging",
         f"{base}/staging",
@@ -662,10 +627,9 @@ def _colorize_prep_paths(base: str) -> list[str]:
 def _colorize_stage(adapter: str, cfg: dict, base: str, extra) -> None:
     """Colorize staging: synthesize the synthetic B&W manga condition tree.
 
-    Runs only prep.py's mangafy stage (``--skip_encode --skip_text``) over the
-    shared color corpus into ``{base}/staging``. Knobs come from the descriptor's
-    ``[staging]`` table; user ``extra`` argv wins last. The cond-latent +
-    color-only-text caching is the separate preprocess pass."""
+    Runs only prep.py's mangafy stage over the shared color corpus into
+    ``{base}/staging``. Knobs come from the descriptor's ``[staging]`` table.
+    The cond-latent + color-only-text caching is the separate preprocess pass."""
     knobs = _toml_table_to_argv(cfg.get("staging") or {})
     run(
         [
@@ -684,9 +648,8 @@ def _colorize_stage(adapter: str, cfg: dict, base: str, extra) -> None:
 def _colorize_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     """Colorize preprocess: cache cond latents + color-only text over the staged tree.
 
-    Runs prep.py's encode + color-text stages (``--skip_mangafy`` — mangafy is the
-    staging step). The color *target* latents + TE are reused from the shared LoRA
-    cache, so no target re-encode. Knobs come from the descriptor's
+    Runs prep.py's encode + color-text stages. The color *target* latents + TE
+    are reused from the shared LoRA cache. Knobs come from the descriptor's
     ``[preprocess]`` table; pass ``ARGS="--no-skip_mangafy"`` to re-stage inline."""
     knobs = _toml_table_to_argv(cfg.get("preprocess") or {})
     run(
@@ -704,13 +667,10 @@ def _colorize_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
 def _inpaint_prep_paths(base: str) -> list[str]:
     """Slug-derived prep.py path flags so ``name`` reroutes inpaint's trees.
 
-    ``--src`` stays the shared corpus (``post_image_dataset/resized`` — the inpaint
-    *targets*); only the masked staging tree + cond/text caches ride the slug,
-    matching the blueprint's ``cond_cache_dir`` / ``text_cache_dir``. The text cache
-    holds full captions with shuffle + tag-dropout variants (the cond-latent target
-    captions are otherwise reused from the shared LoRA cache). Injected before the
-    descriptor knob tables so a ``[staging]``/``[preprocess]`` key (or user
-    ``extra``) still wins via argparse last-flag precedence."""
+    ``--src`` stays the shared corpus (``post_image_dataset/resized``); only
+    the masked staging tree + cond/text caches ride the slug. Injected before
+    the descriptor knob tables so a ``[staging]``/``[preprocess]`` key (or
+    user ``extra``) still wins via last-flag precedence."""
     return [
         "--staging",
         f"{base}/staging",
@@ -724,10 +684,9 @@ def _inpaint_prep_paths(base: str) -> list[str]:
 def _inpaint_stage(adapter: str, cfg: dict, base: str, extra) -> None:
     """Inpaint staging: synthesize the gray-masked condition tree.
 
-    Runs only prep.py's mask stage (``--skip_encode --skip_text``) over the shared
-    corpus into ``{base}/staging``. Knobs come from the descriptor's ``[staging]``
-    table; user ``extra`` argv wins last. The cond-latent + caption-text caching is
-    the separate preprocess pass."""
+    Runs only prep.py's mask stage over the shared corpus into
+    ``{base}/staging``. Knobs come from the descriptor's ``[staging]`` table.
+    The cond-latent + caption-text caching is the separate preprocess pass."""
     knobs = _toml_table_to_argv(cfg.get("staging") or {})
     run(
         [
@@ -745,12 +704,10 @@ def _inpaint_stage(adapter: str, cfg: dict, base: str, extra) -> None:
 def _inpaint_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     """Inpaint preprocess: cache cond latents over the masked staging tree.
 
-    Runs prep.py's encode + caption-text stages (``--skip_mask`` — masking is the
-    staging step). The target latents are reused from the shared LoRA cache (no
-    re-encode); the text stage re-caches full captions with shuffle + tag-dropout
-    variants into ``{base}/text``. Knobs come from the descriptor's ``[preprocess]``
-    table; pass ``ARGS="--no-skip_mask"`` to re-stage inline, or ``--skip_text`` to
-    reuse the shared LoRA TE cache instead."""
+    Runs prep.py's encode + caption-text stages. Target latents are reused
+    from the shared LoRA cache (no re-encode); text stage re-caches full
+    captions into ``{base}/text``. Pass ``ARGS="--no-skip_mask"`` to re-stage
+    inline, or ``--skip_text`` to reuse the shared LoRA TE cache instead."""
     knobs = _toml_table_to_argv(cfg.get("preprocess") or {})
     run(
         [
@@ -767,11 +724,10 @@ def _inpaint_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
 def _subject_stage(adapter: str, cfg: dict, base: str, extra) -> None:
     """Subject staging: mine cross-image same-character pairs (directedit_ec Phase 2).
 
-    ``easycontrol_adapters/tools/subject_pairs.py`` reads the descriptor's
-    ``[staging]`` table itself and rewrites the blueprint tail back into the same
-    file (near_twins contract). CPU-only: both pair members are corpus images, so
-    staging is symlinks + a ``pairs.json`` manifest + the ``cond/`` latent tree —
-    no encode pass (latents/TE reused from the shared LoRA cache)."""
+    ``easycontrol_adapters/tools/subject_pairs.py`` reads its ``[staging]``
+    table and rewrites the blueprint tail in place (near_twins contract).
+    CPU-only: staging is symlinks + a ``pairs.json`` manifest + the ``cond/``
+    latent tree — no encode pass (latents/TE reused from the shared cache)."""
     cfg_path = str(_easy_cfg_path(adapter))
     run(
         [
@@ -808,11 +764,10 @@ def _subject_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
 def _subject_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
     """Subject-edit staging: mine delta-caption edit pairs (directedit_ec Phase 2.5).
 
-    ``easycontrol_adapters/tools/subject_edit_pairs.py`` — subject_pairs contract
-    (reads its ``[staging]`` table, rewrites the blueprint tail in place), but the
-    staged ``.txt`` files are REAL files holding the tag delta vs the cond partner,
-    not caption symlinks. Still CPU-only; the TE encode over the delta captions is
-    the preprocess step."""
+    ``easycontrol_adapters/tools/subject_edit_pairs.py`` — subject_pairs
+    contract, but the staged ``.txt`` files are REAL files holding the tag
+    delta vs the cond partner, not caption symlinks. Still CPU-only; the TE
+    encode over the delta captions is the preprocess step."""
     cfg_path = str(_easy_cfg_path(adapter))
     run(
         [
@@ -831,13 +786,10 @@ def _subject_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
 def _subject_edit_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     """Subject-edit preprocess: rebuild ``cond/`` + TE-encode the delta captions.
 
-    The delta captions are new text, so the shared LoRA TE cache does not apply —
-    ``cache_text_embeddings.py`` runs over ``{base}/staging`` into ``{base}/text``
-    (the blueprint's ``text_cache_dir``). Knobs from the ``[preprocess]`` table
-    (shuffle variants on, tag dropout OFF — dropping part of an instruction leaves
-    the target unexplained; ``min_pixels=0`` — low-tier resized images sit under
-    the script's 0.5MP default). VAE latents + PE ride the shared cache untouched.
-    Re-run after re-mining (pass ``--overwrite`` — delta texts change but stems
+    The delta captions are new text, so the shared LoRA TE cache does not
+    apply — ``cache_text_embeddings.py`` runs over ``{base}/staging`` into
+    ``{base}/text``. VAE latents + PE ride the shared cache untouched. Re-run
+    after re-mining (pass ``--overwrite`` — delta texts change but stems
     don't, and the existence check can't see that)."""
     run(
         [
@@ -893,11 +845,12 @@ def _twin_edit_stage(adapter: str, cfg: dict, base: str, extra) -> None:
 
 
 # Per-adapter materialization bodies (training is generic via _easy_train_extra);
-# only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter. Both
-# receive ``(adapter, cfg, base, extra)``. ``sanitize`` reuses the near-twin miner
-# wholesale (same pipeline, different discriminator tags via its descriptor file).
+# only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter.
+# Both receive ``(adapter, cfg, base, extra)``.
 _EASY_ADAPTERS = {
     "near_twins": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
+    # sanitize reuses the near-twin miner wholesale (same pipeline, different
+    # discriminator tags via its own descriptor file).
     "sanitize": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
     "colorize": {"stage": _colorize_stage, "preprocess": _colorize_preprocess},
     "inpaint": {"stage": _inpaint_stage, "preprocess": _inpaint_preprocess},
@@ -921,12 +874,10 @@ def cmd_easycontrol_preprocess(extra):
     preprocess (every knob from the ``[preprocess]`` table of
     ``configs/easycontrol/<adapter>.toml``):
       • ``colorize`` caches the synthetic-manga *condition* latents, the
-        white-balanced *target* latents ({base}/target, dropping sepia-core
-        targets by deleting their conds), and the color-only text over the
-        already-staged tree (mangafy is the separate staging step); target
-        TE/PE are reused from the LoRA cache.
-      • ``near_twins`` resizes + VAE/TE-caches the mined pair tree and symlinks the
-        ``cond/`` reference latents.
+        white-balanced *target* latents, and color-only text over the
+        already-staged tree; target TE/PE are reused from the LoRA cache.
+      • ``near_twins`` resizes + VAE/TE-caches the mined pair tree and
+        symlinks the ``cond/`` reference latents.
     """
     adapter = _easyadapter()
     if adapter in _EASY_ADAPTERS:
@@ -976,8 +927,8 @@ def cmd_easycontrol_staging(extra):
     """Generate an EasyControl adapter's *staging* dataset (no VAE/TE caching).
 
     The adapter-specific data-generation step that materializes the training/
-    condition tree, kept separate from the later ``easycontrol-preprocess`` VAE/TE
-    caching pass. Knobs come from the ``[staging]`` table of
+    condition tree, kept separate from the later ``easycontrol-preprocess``
+    VAE/TE caching pass. Knobs come from the ``[staging]`` table of
     ``configs/easycontrol/<adapter>.toml``; extra CLI args override them.
 
     ``EASYADAPTER=near_twins`` mines the in-artist near-twin pair tree into
@@ -987,12 +938,9 @@ def cmd_easycontrol_staging(extra):
         make easycontrol-staging EASYADAPTER=near_twins \\
             ARGS="--region --artists ama_mitsuki"
 
-    ``EASYADAPTER=colorize`` runs only the mangafy stage of
-    ``easycontrol_adapters/colorization/prep.py`` (synthesize the synthetic B&W
-    manga condition tree under ``post_image_dataset/easycontrol/colorize/staging/``)
-    — cond-latent + color-only-text caching stays in the later
-    ``easycontrol-preprocess EASYADAPTER=colorize`` pass (idempotent: it skips the
-    already-staged PNGs), e.g.::
+    ``EASYADAPTER=colorize`` runs only the mangafy stage (synthesize the
+    synthetic B&W manga condition tree; idempotent, skips already-staged
+    PNGs), e.g.::
 
         make easycontrol-staging EASYADAPTER=colorize ARGS="--engine cv2 --limit 8"
     """

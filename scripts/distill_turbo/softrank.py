@@ -1,18 +1,15 @@
-"""Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1).
+"""Soft-rank caption-discrimination auxiliary (docs/proposal/turbo_caption_ranking.md).
 
-Phase 0 measured that DP-DMD distillation degrades the teacher's caption
-discriminability, concentrated exactly at the student's step-0 state (σ → 1) — at
-σ=1.0 a quarter of anchors lose to a *random* caption (probe
-``bench/turbo/caption_ranking_probe.py``). This module is the training-time fix:
-a bounded listwise *rank* loss that pushes the matched caption to explain the
-DP-DMD diversity anchor better than mismatched ones.
+DP-DMD distillation degrades the teacher's caption discriminability, concentrated
+at the student's step-0 state (σ → 1) — at σ=1.0 a quarter of anchors lose to a
+*random* caption (``bench/turbo/caption_ranking_probe.py``). This module is the
+training-time fix: a bounded listwise *rank* loss that pushes the matched caption
+to explain the DP-DMD diversity anchor better than mismatched ones.
 
-``soft_rank`` is the ~15-line core vendored from ``softtorch`` (a-paulus/softtorch,
-Apache-2.0, arXiv:2603.08824) — the same relaxation
-``bench/soft_tokens_contrastive/_softrank.py`` vendors for the offline gradient
-probe (kept self-contained here rather than reaching across the bench tree). The
-soft-tokens program already settled that soft-rank wins over AGSM/InfoNCE: it is
-bounded by construction (``L → 0`` as the matched caption's rank → 1) and its
+``soft_rank`` is vendored from ``softtorch`` (a-paulus/softtorch, Apache-2.0,
+arXiv:2603.08824) — the same relaxation ``bench/soft_tokens_contrastive/_softrank.py``
+uses for the offline gradient probe (kept self-contained here). Soft-rank was
+chosen over AGSM/InfoNCE: bounded by construction (``L → 0`` at rank → 1) and its
 gradient aligns with the margin gradient (``cos ≈ 0.86``,
 [[project_softrank_agsm_gradient_probe]]).
 """

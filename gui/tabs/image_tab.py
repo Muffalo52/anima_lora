@@ -118,16 +118,12 @@ from library.preprocess.resize_preview import (
     compute_resize_preview,
 )
 
-# Debounce (ms) before loading the selected image. Holding an arrow key
-# auto-repeats currentItemChanged many times/sec; each _show() does a full-res
-# QPixmap decode + caption/meta refresh, so loading every intermediate leaf
-# pegs the UI. Coalesce: only load once selection settles for this long.
+# Debounce (ms) before loading the selected image — arrow-key auto-repeat fires
+# currentItemChanged many times/sec, and each _show() is a full-res decode.
 _NAV_DEBOUNCE_MS = 90
-# How many neighbours on each side of the current leaf to decode ahead of time
-# (so up/down lands on an already-decoded pixmap). Window = 2*_PREFETCH_RADIUS.
+# Neighbours on each side of the current leaf to decode ahead of time.
 _PREFETCH_RADIUS = 2
-# Max decoded pixmaps held in the prefetch cache (current + neighbours + a little
-# history). Full-res manga frames are a few MB each as QPixmap; keep it bounded.
+# Max decoded pixmaps held in the prefetch cache.
 _PM_CACHE_MAX = 12
 
 
@@ -158,20 +154,15 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._disk_text: str = ""  # last value seen on disk (for diff baseline)
         self._suspend_dirty = False  # while we set text programmatically
         # Resident autotag worker: a torch QProcess holding the tagger model so
-        # consecutive clicks skip the reload; torn down before any other GPU
-        # work frees the card. Signals wired to UI once autotag_btn/status exist
-        # (see below). See gui/tabs/_autotag.py.
+        # consecutive clicks skip the reload; torn down before other GPU work.
         self._tagger = _AutotagWorker(self)
-        # Coalesces rapid tree selection (arrow-key auto-repeat) into a single
-        # image load once navigation settles. See _NAV_DEBOUNCE_MS.
         self._pending_show_idx: int | None = None
         self._nav_timer = QTimer(self)
         self._nav_timer.setSingleShot(True)
         self._nav_timer.setInterval(_NAV_DEBOUNCE_MS)
         self._nav_timer.timeout.connect(self._show_pending)
         # Neighbour prefetch: decode ±_PREFETCH_RADIUS images off-thread into a
-        # bounded pixmap cache so the next up/down shows instantly. Insertion
-        # order = LRU-ish; oldest evicted past _PM_CACHE_MAX.
+        # bounded LRU-ish pixmap cache so the next up/down shows instantly.
         self._pm_cache: dict[str, QPixmap] = {}
         self._decode_inflight: set[str] = set()
         self._decode_signals = _DecodeSignals()
@@ -181,11 +172,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._caption_kb: TagKnowledgeBase | None = None
         self._caption_kb_source: Path | None = None
         self._caption_kb_mtime: float | None = None
-        # Per-language description KB cache (path -> (kb, mtime)), used by the
-        # tag-explanation tooltip so a translated sibling CSV doesn't clobber the
-        # base KB feeding autocomplete / caption-correct.
+        # Per-language description KB cache so a translated sibling CSV doesn't
+        # clobber the base KB feeding autocomplete / caption-correct.
         self._desc_kb_cache: dict[Path, tuple[TagKnowledgeBase, float]] = {}
-        # Make sure the resident worker (and its VRAM) dies with the app.
         _app = QApplication.instance()
         if _app is not None:
             _app.aboutToQuit.connect(self._tagger.kill)
@@ -197,19 +186,14 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         # Group-first: float every similarity group to the top, flattened across
         # folders. Off = per-folder tree. See _rebuild_tree_group_first.
         self._group_first: bool = False
-        # Similarity-group manifest (make curate-group). Stem-keyed so it works
-        # whether this tab views image_dataset/ or post_image_dataset/resized/.
-        self._groups: list[dict] = []
-        # Images marked for moving (Delete key toggles the current one; the move
-        # button moves the whole set to post_image_dataset/moved). Keyed by full
-        # path so a mark survives filter/sort/view rebuilds; cleared on dir change.
+        self._groups: list[dict] = []  # similarity-group manifest (make curate-group)
+        # Images marked for moving; keyed by full path so a mark survives
+        # filter/sort/view rebuilds. Cleared on dir change.
         self._marked: set[Path] = set()
-        # GUI curation decisions consumed by the preprocess resize step. These
-        # never move/edit source files; they only write a JSON sidecar that
-        # resize_images.py reads when present.
+        # GUI curation decisions for the preprocess resize step — never move/edit
+        # source files, only write a JSON sidecar resize_images.py reads.
         self._preprocess_decisions: dict[Path, str] = {}
-        # _overlay_pm is lazily composed on first toggle and cached so flipping
-        # the checkbox doesn't re-run the QPainter pipeline.
+        # Lazily composed + cached so flipping the checkbox doesn't re-run QPainter.
         self._source_pm: QPixmap | None = None
         self._mask_path: Path | None = None
         self._overlay_pm: QPixmap | None = None
@@ -297,8 +281,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
 
-        # Mask-overlay toggle. Checked state persists across navigation as a
-        # sticky "show overlay when available" preference.
         img_head = QHBoxLayout()
         img_head.setContentsMargins(0, 0, 0, 0)
         self.overlay_cb = QCheckBox(t("dataset_mask_overlay"))
@@ -310,9 +292,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.resize_preview_cb.setEnabled(False)
         self.resize_preview_cb.toggled.connect(self._on_overlay_toggled)
         img_head.addWidget(self.resize_preview_cb)
-        # No explicit "Use" button — an image with no decision is already
-        # processed (preprocess only honours skip/move), so "use" was a no-op
-        # marker. Skip / Clear / Move cover the real states.
+        # No explicit "Use" button: preprocess only honours skip/move, so a
+        # no-decision image is already processed.
         self.preprocess_skip_btn = QPushButton(t("dataset_preprocess_skip_short"))
         self.preprocess_skip_btn.setToolTip(t("dataset_preprocess_skip_tooltip"))
         self.preprocess_skip_btn.clicked.connect(
@@ -330,8 +311,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.preprocess_save_btn.setToolTip(t("dataset_preprocess_save_tooltip"))
         self.preprocess_save_btn.clicked.connect(self._save_preprocess_decisions)
         img_head.addWidget(self.preprocess_save_btn)
-        # Move button: moves the images marked by the Delete key into
-        # post_image_dataset/moved/. This replaces the old trash-delete action.
+        # Moves images marked by the Delete key into post_image_dataset/moved/.
         self.delete_btn = QPushButton(t("dataset_delete"))
         self.delete_btn.setToolTip(t("dataset_delete_tooltip"))
         apply_variant(self.delete_btn, "info")
@@ -388,9 +368,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         )
         self.versions_btn = QPushButton(t("caption_versions"))
         self.versions_btn.clicked.connect(self._open_versions)
-        # Read-only preview of the train-time caption variants written by
-        # preprocess into {stem}.variants.txt — selecting one shows it without
-        # touching the editable training caption. Hidden unless a sidecar exists.
+        # Read-only preview of {stem}.variants.txt; hidden unless a sidecar exists.
         self.variant_combo = QComboBox()
         self.variant_combo.setToolTip(t("caption_variants_tooltip"))
         self.variant_combo.setMaximumWidth(220)
@@ -407,9 +385,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         cap_head.addWidget(self.variant_combo)
         rl.addLayout(cap_head)
 
-        # Caption editor with inline tag-box overlay; @artist and section
-        # headers use accent colors so the trainer's split rules
-        # (anima_smart_shuffle in library/anima/training.py) stay visible.
+        # @artist and section headers use accent colors matching the trainer's
+        # split rules (anima_smart_shuffle in library/anima/training.py).
         self.cap = BoxedCaptionEdit()
         self.cap.setMaximumHeight(180)
         self.cap.textChanged.connect(self._on_text_changed)
@@ -429,9 +406,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
         sp.addWidget(right)
         sp.setSizes([340, 700])
-        # On window-resize, the file-tree pane keeps its width and the extra
-        # space flows to the image/caption pane (where the image is the
-        # Expanding element) rather than growing both proportionally.
+        # On resize, extra space flows to the image/caption pane, not the tree.
         sp.setStretchFactor(0, 0)
         sp.setStretchFactor(1, 1)
         lay.addWidget(sp, 1)
@@ -439,9 +414,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         QShortcut(QKeySequence("Right"), self, lambda: self._nav(1))
         QShortcut(QKeySequence("Left"), self, lambda: self._nav(-1))
         QShortcut(QKeySequence.Save, self, self._save)
-        # Delete toggles the move mark on the current image; Esc un-marks it.
-        # Both act per-current-image and are scoped to the tree (WidgetShortcut)
-        # so they don't hijack the caption editor on focus.
+        # Delete toggles the move mark, Esc un-marks; WidgetShortcut-scoped to
+        # the tree so they don't hijack the caption editor on focus.
         for target in (self.tree, self.img):
             move_sc = QShortcut(QKeySequence("D"), target, self._mark_current_for_move)
             move_sc.setContext(Qt.WidgetShortcut)
@@ -528,12 +502,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return ROOT / "post_image_dataset" / "groups" / "groups.json"
 
     def _load_groups(self) -> None:
-        """Read groups.json (if present) into ``self._groups``.
-
-        Pure JSON — keeps the GUI torch-free. The tree view folds images under
-        green per-group nodes built from this list (ordered as written, largest
-        first). A missing/unreadable manifest just leaves the plain folder tree.
-        """
+        """Read groups.json (if present) into ``self._groups``; pure JSON, keeps
+        the GUI torch-free. A missing/unreadable manifest leaves a plain tree."""
         self._groups = []
         path = self._groups_manifest_path()
         if path.is_file():
@@ -552,9 +522,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 self, "", t("dataset_group_queued", job_id=self._job_id)
             )
             return
-        # Grouping keys off PE-Spatial features of the resized images; with none
-        # on disk the task exits with an opaque "no images to group". Point the
-        # user at the real cause (run Preprocess first) instead.
+        # Grouping keys off PE-Spatial features of resized images, which fails
+        # opaquely with none on disk — point the user at Preprocess instead.
         resized_dir = default_resized_dir()
         has_resized = resized_dir.is_dir() and any(
             p.suffix.lower() in IMAGE_EXTS for p in resized_dir.rglob("*")
@@ -565,12 +534,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         # Grouping is GPU work — free the resident tagger first so they don't
         # fight over VRAM.
         self._tagger.kill()
-        # Busy UI before the submit so a cold-start daemon spin-up feels responsive.
         self.group_btn.setEnabled(False)
         self._progress_tracker.reset()
         self._progress_tracker.mark_starting(t("dataset_group_rebuild"))
-        # Grouping tightness is tuned from Settings (higher = tighter); pass the
-        # persisted thresholds through to `tasks.py curate-group`.
         frac = float(get_setting("group_match_frac_min", DEFAULT_GROUP_MATCH_FRAC_MIN))
         cell = float(get_setting("group_cell_match_min", DEFAULT_GROUP_CELL_MATCH_MIN))
         argv = [
@@ -592,11 +558,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._watch_job(job_id, replay_log=False)
 
     def _emit_log_line(self, line: str) -> None:
-        """No log widget on this tab — non-progress stdout lines are dropped.
-
-        The progress bar (tqdm) and the finish banner carry the user-facing
-        signal; a full log belongs to the Queue tab.
-        """
+        """No log widget on this tab; the progress bar + finish banner carry
+        the user-facing signal. A full log belongs to the Queue tab."""
 
     def _on_job_finished(self, state: str | None) -> None:
         self._job_timer.stop()
@@ -624,15 +587,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.group_btn.setEnabled(True)
 
     def _run_autotag(self) -> None:
-        """Tag the current image with the resident Anima Tagger.
-
-        First click spawns a torch subprocess that loads the model once; it then
-        stays alive so later clicks just stream an image path to it. The
-        predicted tags are appended into the editor when the result comes back —
-        the user reviews, then Save writes the ``.txt`` (creating it if absent).
-        The worker itself lives in ``gui.tabs._autotag._AutotagWorker``; this tab
-        only feeds it an image and reacts to its status/busy/result/error signals.
-        """
+        """Tag the current image with the resident Anima Tagger (see
+        ``gui.tabs._autotag._AutotagWorker``); predicted tags are appended into
+        the editor, review + Save writes the ``.txt``."""
         idx = self._current_index()
         if not 0 <= idx < len(self._images):
             return
@@ -654,7 +611,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.autotag_status.setVisible(bool(text))
 
     def _on_autotag_result(self, image: Path, caption: str) -> None:
-        """Append the predicted caption into the editor (dirty → Save lights up)."""
         if not caption:
             QMessageBox.information(self, "", t("caption_autotag_empty"))
             return
@@ -752,19 +708,15 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         """Show the clicked tag's KB entry as a rich tooltip at the cursor.
 
         The base tag KB (``danbooru_tags_classified.csv``) carries Korean
-        descriptions. A non-Korean UI resolves to a same-language sibling if one
-        exists, else the English ``danbooru_tags_classified.en.csv`` (shipped by
-        ``download-danbooru-tags``) — so ja/cn show English rather than
-        untranslated Hangul. We only suppress the tooltip when the sole file is
-        the Korean base. The autocomplete helper stays on for every language
-        (tag names / categories are language-neutral). See CONTRIBUTING.md §5."""
+        descriptions; a non-Korean UI resolves to a same-language sibling or
+        else the English CSV, so ja/cn show English rather than raw Hangul —
+        the tooltip is suppressed only when the sole file is the Korean base.
+        See CONTRIBUTING.md §5."""
         lang = current_language()
         if lang == "ko":
             kb = self._load_caption_kb(warn=False)
         else:
             csv_path = find_tag_csv(ROOT, lang=lang)
-            # Suppress only when the resolved file is the Korean base (no
-            # translated / English sibling on disk) — that would show Hangul.
             if csv_path is None or csv_path.name == "danbooru_tags_classified.csv":
                 return
             kb = self._describe_kb(csv_path)
@@ -787,25 +739,23 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _start_tag_completion_preload(self) -> None:
         """Build the tag-autocomplete model on a daemon thread so the ~114k-row
-        CSV parse never blocks the first keystroke. Runs at most once per
-        successful load (a missing CSV leaves the door open for a retry)."""
+        CSV parse never blocks the first keystroke."""
         if getattr(self, "_completion_preloading", False):
             return
         self._completion_preloading = True
         threading.Thread(target=self._preload_tag_completion, daemon=True).start()
 
     def reload_tag_knowledge_base(self) -> None:
-        """Re-attempt the tag-autocomplete load after the danbooru CSV may have
-        appeared mid-session (e.g. just downloaded via the Models dialog). A
-        no-op once tags are loaded, so it's cheap to call on every download."""
+        """Re-attempt the tag-autocomplete load (e.g. after a Models-dialog
+        download); a no-op once tags are already loaded."""
         if getattr(self, "_completion_loaded", False):
             return
         self._completion_preloading = False
         self._start_tag_completion_preload()
 
     def _preload_tag_completion(self) -> None:
-        # Worker thread: pure Python only, no Qt object creation and no writes
-        # to self — the parsed payload is marshalled back via a queued signal.
+        # Worker thread: no Qt object creation, no writes to self — the payload
+        # is marshalled back via a queued signal.
         payload = None
         try:
             csv_path = find_tag_csv(ROOT)
@@ -828,8 +778,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             return
         self._completion_loaded = True
         kb, csv_path, mtime, names, kind_lookup = payload
-        # Seed the shared KB cache (main-thread write) so tag-click explanations
-        # and caption-correct reuse this parse instead of re-reading the CSV.
+        # Seed the shared KB cache so tag-click/caption-correct reuse this parse.
         if self._caption_kb is None:
             self._caption_kb = kb
             self._caption_kb_source = csv_path
@@ -926,8 +875,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         prev_stem: str | None = None
         if preserve_selection and self._current_caption_path is not None:
             prev_stem = self._current_caption_path.stem
-        if d != self._current_dir:
-            # Deletion marks are path-scoped to one dir; drop them on a switch.
+        if d != self._current_dir:  # marks are path-scoped to one dir
             self._marked.clear()
             self._preprocess_decisions.clear()
             self._image_size_cache.clear()
@@ -937,9 +885,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._load_preprocess_decisions()
         self._load_groups()  # reload the group manifest for the tree folds
         self._image_size_cache.clear()
-        # Drop prefetched pixmaps: a reload re-scans for new/changed files, and
-        # cached entries are keyed by path so changed content would be stale.
-        self._pm_cache.clear()
+        self._pm_cache.clear()  # keyed by path; stale after a rescan
         self._decode_inflight.clear()
         self._all_images = _imgs(d)
         had_match = self._apply_filter_and_sort(prev_stem=prev_stem)
@@ -950,18 +896,12 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self._set_image_none()
             self._refresh_buttons()
             self._refresh_inline_diff()
-        elif not had_match:
-            # Fresh dir, no prior selection to restore — pick the first image.
+        elif not had_match:  # fresh dir, no prior selection to restore
             self._select_tree_index(0)
 
     def _display_label(self, p: Path) -> str:
-        """``stem`` for top-level images, ``parent/stem`` for nested ones.
-
-        Lets users tell apart shards organized by character/series subfolder
-        in ``image_dataset/`` (the trainer enforces unique stems across the
-        tree, so the stem itself is still a valid unique key — the prefix is
-        purely a display affordance).
-        """
+        """``stem`` for top-level images, ``parent/stem`` for nested ones (the
+        trainer enforces unique stems tree-wide; the prefix is purely display)."""
         if self._current_dir is None:
             return p.stem
         try:
@@ -993,13 +933,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _apply_filter_and_sort(self, *, prev_stem: str | None = None) -> bool:
         """Rebuild the visible tree from ``_all_images`` using the current
-        search text and sort direction.
-
-        Returns True if a row matching ``prev_stem`` was selected, False
-        otherwise. Block-signals while rebuilding so search keystrokes don't
-        trigger ``_on_tree_item_changed`` (which would prompt to save unsaved
-        caption edits on every keystroke).
-        """
+        search text and sort direction. Returns True if a row matching
+        ``prev_stem`` was selected. Block-signals while rebuilding so search
+        keystrokes don't trigger a save-unsaved-edits prompt."""
         q = self._search_text.strip().lower()
         if q:
             visible = [
@@ -1048,15 +984,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return target_row >= 0
 
     def _rebuild_tree(self, visible: list[Path]) -> None:
-        """Rebuild the tree widget from ``visible``.
-
-        The folder structure under ``self._current_dir`` is primary. Within a
-        folder, images that belong to a similarity group (from
-        ``make curate-group``) nest one level deeper under a green per-group
-        node; ungrouped images sit directly in the folder. Group nodes are
-        per-folder, so a group spanning folders shows up once under each. Leaves
-        are image stems; everything auto-expands so the hierarchy is visible
-        without an extra click."""
+        """Rebuild the tree from ``visible``. Folder structure is primary;
+        within a folder, images belonging to a similarity group nest under a
+        green per-group node (per-folder, so a cross-folder group shows once
+        under each). Everything auto-expands."""
         self.tree.clear()
         self._tree_item_to_index.clear()
         if not visible:
@@ -1077,8 +1008,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     ) -> None:
         """Folder-primary layout (default): groups nest under their folder, then
         float above the ungrouped files at the same level."""
-        # Folders keyed by relative parent path; group sub-nodes by (folder,
-        # group index) so each folder gets its own green node per group.
         folder_items: dict[Path, QTreeWidgetItem] = {}
         group_nodes: dict[tuple[Path, int], QTreeWidgetItem] = {}
         group_counts: dict[tuple[Path, int], int] = {}
@@ -1109,7 +1038,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 leaf = QTreeWidgetItem(node, [p.stem])
                 leaf.setData(0, _TREE_BASE_TEXT_ROLE, p.stem)
                 self._tree_item_to_index[leaf] = idx
-        # Label group nodes once their per-folder visible member count is known.
         for key, node in group_nodes.items():
             node.setText(
                 0, t("dataset_group_label", n=key[1] + 1, size=group_counts[key])
@@ -1119,10 +1047,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def _rebuild_tree_group_first(
         self, visible: list[Path], stem_to_group: dict[str, int]
     ) -> None:
-        """Group-first layout: every similarity group becomes a single
-        root-level green node holding all its visible members (across folders,
-        labelled with their folder prefix), sorted by group index. The ungrouped
-        images follow below in the normal folder tree."""
+        """Group-first layout: every similarity group becomes a single root-level
+        green node holding all its visible members (across folders, labelled
+        with folder prefix); ungrouped images follow below as a normal tree."""
         group_members: dict[int, list[tuple[int, Path]]] = {}
         ungrouped: list[tuple[int, Path]] = []
         for idx, p in enumerate(visible):
@@ -1132,8 +1059,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             else:
                 group_members.setdefault(gi, []).append((idx, p))
 
-        # Members shown with their folder prefix so cross-folder groups stay
-        # legible (stems alone would be ambiguous).
+        # Folder prefix keeps cross-folder groups legible (stems alone are ambiguous).
         for gi in sorted(group_members):
             members = group_members[gi]
             node = QTreeWidgetItem(
@@ -1150,8 +1076,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 leaf.setData(0, _TREE_BASE_TEXT_ROLE, label)
                 self._tree_item_to_index[leaf] = idx
 
-        # Divider only when both sections exist, so it never dangles.
-        if group_members and ungrouped:
+        if group_members and ungrouped:  # only when both sections exist
             self._add_tree_separator()
 
         folder_items: dict[Path, QTreeWidgetItem] = {}
@@ -1171,8 +1096,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def _add_tree_separator(self) -> None:
         """Append a non-selectable horizontal divider row at the tree root.
 
-        A real 2px QFrame line (set as the row's item widget) reads clearly on
-        the tree's light background, unlike dash glyphs which wash out."""
+        A real 2px QFrame line reads clearly, unlike dash glyphs which wash out."""
         sep = QTreeWidgetItem(self.tree, [""])
         sep.setFlags(Qt.NoItemFlags)
         line = QFrame()
@@ -1186,19 +1110,15 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         group_nodes: dict[tuple[Path, int], QTreeWidgetItem],
     ) -> None:
         """Reorder each folder's children so green group nodes sit above the
-        ungrouped files at the *same* level (groups never cross into another
-        folder — they stay children of their own folder, so they can't rise
-        above a higher tree level). Within the group block and within the rest,
-        the original filename order is preserved.
-        """
+        ungrouped files at the same level (groups stay children of their own
+        folder). Original filename order is preserved within each block."""
         group_set = set(group_nodes.values())
-        # Each folder node + the invisible root (top-level images).
         parents = [*folder_items.values(), self.tree.invisibleRootItem()]
         for parent in parents:
             children = parent.takeChildren()
             grouped = [c for c in children if c in group_set]
             rest = [c for c in children if c not in group_set]
-            if grouped:  # only touch folders that actually hold a group node
+            if grouped:
                 parent.addChildren(grouped + rest)
             else:
                 parent.addChildren(children)
@@ -1210,10 +1130,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         group_nodes: dict[tuple[Path, int], QTreeWidgetItem],
     ) -> QTreeWidgetItem:
         """Lazily create the green similarity-group node under ``folder``.
-
-        ``key`` is (folder rel-path, group index). Text is set later (in
-        ``_rebuild_tree``) once the per-folder visible member count is known;
-        only created for groups with a visible member in that folder."""
+        ``key`` is (folder rel-path, group index); text is set later in
+        ``_rebuild_tree`` once the per-folder member count is known."""
         cached = group_nodes.get(key)
         if cached is not None:
             return cached
@@ -1229,11 +1147,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self, rel_parent: Path, folder_items: dict[Path, QTreeWidgetItem]
     ) -> QTreeWidget | QTreeWidgetItem:
         """Resolve (and lazily create) the QTreeWidgetItem for ``rel_parent``.
-
-        Returns ``self.tree`` for the root (Path('.')) so callers can pass it
-        as the parent of a leaf item directly — QTreeWidgetItem(parent, …)
-        accepts either the tree widget or another item.
-        """
+        Returns ``self.tree`` for the root, since QTreeWidgetItem(parent, …)
+        accepts either the tree widget or another item."""
         if rel_parent in (Path("."), Path("")):
             return self.tree
         cached = folder_items.get(rel_parent)
@@ -1245,7 +1160,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return item
 
     def _select_tree_index(self, idx: int) -> None:
-        """Highlight the tree leaf corresponding to image index ``idx``."""
         for item, i in self._tree_item_to_index.items():
             if i == idx:
                 self.tree.setCurrentItem(item)
@@ -1280,13 +1194,11 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._apply_filter_and_sort()
 
     def _reload_current_dir(self) -> None:
-        """Re-scan the currently selected directory (for new/changed images)."""
         name = self.dc.currentText()
         if name:
             self._load_dir(name, preserve_selection=True)
 
     def _add_dir(self) -> None:
-        """Pick a directory and add it to the combo for this session."""
         if not self._confirm_discard_if_dirty():
             return
         start = str(self._dirs.get(self.dc.currentText(), Path.home()))
@@ -1296,15 +1208,13 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         if not chosen:
             return
         path = Path(chosen)
-        # Use the absolute path string as the display key — unambiguous and
-        # avoids collisions with the built-in short labels (image_dataset, …).
+        # Absolute path as the display key — avoids collisions with built-in labels.
         label = str(path)
         for existing in self._dirs.values():
             if existing == path:
                 QMessageBox.information(
                     self, t("directory"), t("dataset_add_dir_already", name=label)
                 )
-                # Switch to it so the user lands on the dir they tried to add.
                 for k, v in self._dirs.items():
                     if v == path:
                         idx = self.dc.findText(k)
@@ -1382,12 +1292,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.preprocess_save_btn.setText(t("dataset_preprocess_save") + " *")
 
     def _on_tree_item_changed(self, current, _previous) -> None:
-        """Show the image for the newly selected tree leaf.
-
-        Folder rows (no index) are non-selectable in the data sense; only
-        leaves correspond to an image. We confirm-discard before switching so
-        the unsaved-edit prompt fires on navigation.
-        """
+        """Show the image for the newly selected tree leaf; confirm-discard
+        before switching so the unsaved-edit prompt fires on navigation."""
         if current is None:
             return
         idx = self._tree_item_to_index.get(current)
@@ -1402,9 +1308,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 finally:
                     self.tree.blockSignals(False)
             return
-        # Defer the expensive load (full-res decode + caption/meta refresh) so
-        # arrow-key auto-repeat doesn't load every leaf it skips past. The dirty
-        # prompt above stays synchronous so a cancel can revert immediately.
+        # Defer the expensive load so arrow-key auto-repeat doesn't load every
+        # leaf it skips past; the dirty prompt above stays synchronous.
         self._pending_show_idx = idx
         self._nav_timer.start()
 
@@ -1417,7 +1322,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_mark_styles()
 
     def _cache_pixmap(self, key: str, pm: QPixmap) -> None:
-        """Insert into the prefetch cache, evicting the oldest past the cap."""
         self._pm_cache.pop(key, None)  # refresh recency
         self._pm_cache[key] = pm
         while len(self._pm_cache) > _PM_CACHE_MAX:
@@ -1425,7 +1329,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             del self._pm_cache[oldest]
 
     def _prefetch_neighbors(self, row: int) -> None:
-        """Decode the ±_PREFETCH_RADIUS images around ``row`` off-thread."""
         for offset in range(1, _PREFETCH_RADIUS + 1):
             for nbr in (row - offset, row + offset):
                 if not 0 <= nbr < len(self._images):
@@ -1437,8 +1340,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 self._decode_pool.start(_DecodeTask(key, self._decode_signals))
 
     def _on_image_decoded(self, key: str, img) -> None:
-        """Background decode landed: convert to QPixmap and cache it. The result
-        is only stashed — the visible image is set by _show on the GUI thread."""
+        """Background decode landed; the result is only stashed — the visible
+        image is set by _show on the GUI thread."""
         self._decode_inflight.discard(key)
         if img is None or key in self._pm_cache:
             return
@@ -1451,8 +1354,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             return
         p = self._images[row]
         key = str(p)
-        # Prefetched neighbour → instant; otherwise decode now (and cache it so
-        # bouncing back is instant too).
+        # Prefetched neighbour → instant; else decode now and cache it.
         pm = self._pm_cache.get(key)
         if pm is None:
             pm = QPixmap(key)
@@ -1475,7 +1377,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_inline_diff()
 
     def _set_image(self, p: Path, source: QPixmap | None) -> None:
-        """Bind a new source pixmap + its (possibly absent) mask, then refresh."""
         self._source_pm = source
         self._mask_path = (
             _resolve_mask_path(p, self._current_dir) if source is not None else None
@@ -1486,7 +1387,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._apply_image_view()
 
     def _apply_image_view(self) -> None:
-        """Push the right pixmap onto ``self.img`` based on overlay state."""
         if self._source_pm is None:
             return
         pm = self._source_pm
@@ -1547,8 +1447,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _resize_preview_fit_mode(self):
         """(fit_mode, max_ratio) from the live preprocess-tab widgets, falling
-        back to configs/preprocess.toml when the tab isn't available. Free-fit is
-        the only resize mode, so fit_mode is always ``"freefit"``."""
+        back to configs/preprocess.toml. Free-fit is the only resize mode."""
         spin = getattr(self._preprocess_tab, "freefit_max_ratio_spin", None)
         if spin is not None:
             return "freefit", float(spin.value())
@@ -1557,10 +1456,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return "freefit", max_ratio
 
     def _current_index(self) -> int:
-        """Index into ``self._images`` of the currently selected image.
-
-        Reads the selected tree leaf; -1 if nothing is on an image (e.g. a
-        folder/group node is selected)."""
+        """Index into ``self._images`` of the currently selected image; -1 if
+        nothing is on an image (e.g. a folder/group node is selected)."""
         item = self.tree.currentItem()
         if item is not None:
             idx = self._tree_item_to_index.get(item)
@@ -1569,9 +1466,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return -1
 
     def app_context_menu(self, target, global_pos):
-        """Right-click hook (called by MainWindow's global filter). Over an
-        image — the preview or a tree leaf — offer "open in system viewer"
-        instead of the app default; return None elsewhere so the default shows."""
+        """Right-click hook (MainWindow's global filter). Over an image, offer
+        "open in system viewer"; return None elsewhere so the default shows."""
         path = self._image_under_cursor(target, global_pos)
         if path is None:
             return None
@@ -1583,8 +1479,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return menu
 
     def _image_under_cursor(self, target, global_pos) -> Path | None:
-        """The image path the right-click landed on: the tree leaf under the
-        cursor, or the currently shown preview. None if neither applies."""
         if target is self.tree or self.tree.isAncestorOf(target):
             pos = self.tree.viewport().mapFromGlobal(global_pos)
             item = self.tree.itemAt(pos)
@@ -1711,8 +1605,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_preprocess_controls()
 
     def _preprocess_decision_text(self, path: Path | None) -> str:
-        # The "no decision" state is already conveyed by the tree-view row styling
-        # on the left, so render nothing here to avoid clutter over the image.
+        # "No decision" is already conveyed by the tree row styling; render nothing.
         if path is None:
             return ""
         if path in self._marked:
@@ -1738,11 +1631,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             enabled and (current_has_decision or has_any_decision)
         )
         self.preprocess_save_btn.setEnabled(self._current_dir is not None)
-        # The decision state is appended to the image-meta line (single row).
         self._refresh_image_meta(path)
 
     def _toggle_mark_current(self) -> None:
-        """Toggle the deletion mark on the currently selected image."""
         idx = self._current_index()
         if not 0 <= idx < len(self._images):
             return
@@ -1775,10 +1666,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._nav(1)
 
     def _refresh_mark_styles(self) -> None:
-        """Repaint tree leaves by pending source-delete/preprocess state.
-
-        Status markers are text prefixes instead of item icons/backgrounds so
-        filenames keep their original alignment in the tree."""
+        """Repaint tree leaves by pending source-delete/preprocess state. Text
+        prefixes instead of icons/backgrounds so filenames stay aligned."""
         for leaf, idx in self._tree_item_to_index.items():
             path = self._images[idx] if idx < len(self._images) else None
             base = leaf.data(0, _TREE_BASE_TEXT_ROLE) or leaf.text(0)
@@ -1800,7 +1689,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 leaf.setData(0, Qt.ForegroundRole, None)
 
     def _unmark_current(self) -> None:
-        """Remove the move mark from the currently selected image."""
         idx = self._current_index()
         if not 0 <= idx < len(self._images):
             return
@@ -1819,7 +1707,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.delete_btn.setText(t("dataset_delete") + (f" ({n})" if n else ""))
 
     def _delete_marked(self) -> None:
-        """Move every marked image (+ sidecars) under post_image_dataset/moved."""
         targets = sorted(self._marked)
         if not targets:
             return
@@ -1832,8 +1719,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        # Remember where the user was so the rebuilt tree doesn't snap to the
-        # top; anchor on position to land on the nearest surviving neighbour.
+        # Remember position so the rebuilt tree lands on the nearest surviving neighbour.
         open_stem = (
             self._current_caption_path.stem
             if self._current_caption_path is not None
@@ -1857,8 +1743,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._marked.clear()
         self._mark_preprocess_dirty()
         self._refresh_delete_button()
-        # Drop the editor context so the reload doesn't prompt about a caption
-        # whose image we just removed.
+        # Drop editor context so reload doesn't prompt about a now-removed caption.
         self._current_caption_path = None
         self._disk_text = ""
         self._set_caption_text("")
@@ -1886,13 +1771,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         anchor_row: int,
         deleted: set[Path],
     ) -> int:
-        """Pick which row to reselect after a delete so the view stays put.
-
-        If the image the user had open survived, return its new row. Otherwise
-        walk outward from ``anchor_row`` (forward first, then backward) over the
-        pre-delete order to find the nearest surviving neighbour, and return its
-        new row. Falls back to the top only when nothing else matches.
-        """
+        """Pick which row to reselect after a delete: the surviving open image if
+        any, else the nearest surviving neighbour walking out from ``anchor_row``
+        (forward then backward) over the pre-delete order, else row 0."""
         new_row = {p.stem: i for i, p in enumerate(self._images)}
         if open_stem is not None and open_stem in new_row:
             return new_row[open_stem]
@@ -1908,7 +1789,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return ROOT / "post_image_dataset" / "moved"
 
     def _set_image_none(self) -> None:
-        """Clear the preview pane (used after deleting the last image)."""
         self._source_pm = None
         self._mask_path = None
         self._overlay_pm = None
@@ -1917,7 +1797,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.img.clear()
         self._refresh_image_meta(None)
         self._refresh_preprocess_controls()
-        # No image → no variants to preview; drop any active read-only preview.
         self._previewing_variant = False
         self.cap.setReadOnly(False)
         self._variant_rows = []
@@ -1935,20 +1814,14 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     @staticmethod
     def _variant_item_label(label: str, text: str) -> str:
-        """Dropdown entry: the variant tag plus a short text preview."""
         short = text if len(text) <= 32 else text[:31] + "…"
         return f"{label}  {short}" if short else label
 
     def _refresh_variant_combo(self, image_path: Path) -> None:
-        """Repopulate the variant-preview dropdown for the current image.
-
-        Reads ``{stem}.variants.txt`` next to the image (only present under
-        ``resized/`` after preprocess). Resets any active preview back to the
-        editable training caption first, so navigating images never leaves the
-        editor stuck read-only.
-        """
-        # Leaving any prior preview: restore edit mode (the new image's caption
-        # was already loaded into the editor by ``_show``).
+        """Repopulate the variant-preview dropdown from ``{stem}.variants.txt``
+        (only present under ``resized/`` after preprocess). Resets any active
+        preview back to edit mode first, so navigation never leaves the editor
+        stuck read-only."""
         self._previewing_variant = False
         self.cap.setReadOnly(False)
 
@@ -1975,11 +1848,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _on_variant_selected(self, idx: int) -> None:
         """Preview a variant read-only, or restore the editable training caption.
-
-        Index 0 is the training caption; 1..N map to the sidecar rows. The
-        editor buffer (possibly with unsaved edits) is stashed on entering a
-        preview and restored on returning, so previewing never discards work.
-        """
+        Index 0 is the training caption; 1..N map to sidecar rows. The editor
+        buffer is stashed on entering a preview so previewing never discards work."""
         if idx <= 0:
             if self._previewing_variant:
                 self._previewing_variant = False
@@ -1996,7 +1866,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self._previewing_variant = True
         self.cap.setReadOnly(True)
         self._set_caption_text(self._variant_rows[row][1])
-        # No diff/save in preview — this isn't the editable caption.
         self.cap.setExtraSelections([])
         self.save_btn.setEnabled(False)
         self.revert_btn.setEnabled(False)
@@ -2008,14 +1877,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_inline_diff()
 
     def _editable_text(self) -> str:
-        """The user's edit buffer.
-
-        While a read-only variant preview is on screen the editor holds the
-        variant text, not the user's caption — the real buffer lives in
-        ``_preview_stash``. Dirty-detection and Save must read this, never the
-        raw editor, or previewing a variant looks like an unsaved edit (and
-        Save would clobber the caption with the variant).
-        """
+        """The user's edit buffer. While a variant preview is on screen the
+        editor holds variant text, not the caption — the real buffer lives in
+        ``_preview_stash``. Dirty-detection and Save must read this, or
+        previewing looks like an unsaved edit and Save clobbers the caption."""
         if self._previewing_variant:
             return self._preview_stash
         return self.cap.toPlainText()
@@ -2036,8 +1901,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             if add or rem:
                 label += "  " + t("caption_diff_stats", add=add, rem=rem)
         self.cap_label.setText(label)
-        # Versions button is enabled whenever there's a caption file context;
-        # the dialog itself shows "(no prior versions)" when empty.
         self.versions_btn.setEnabled(self._current_caption_path is not None)
 
     def _refresh_inline_diff(self) -> None:
@@ -2068,8 +1931,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             return
         new_text = self._editable_text()
         try:
-            # Snapshot the prior on-disk version into history before overwriting.
-            if cp.exists():
+            if cp.exists():  # snapshot the prior version into history first
                 _append_history(cp, self._disk_text)
             cp.write_text(new_text, encoding="utf-8")
         except OSError as e:
@@ -2090,8 +1952,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         cp = self._current_caption_path
         if cp is None:
             return
-        # Dialog always diffs against the on-disk text; a restored version
-        # replaces editor contents (a pending edit until Save).
         dlg = CaptionVersionsDialog(cp, self._disk_text, self)
         if dlg.exec() == QDialog.Accepted:
             restored = dlg.restored_text()
@@ -2125,8 +1985,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self._save()
             # If the save failed, _is_dirty() is still True — abort the switch.
             return not self._is_dirty()
-        # Discard: drop edits silently.
-        return True
+        return True  # discard: drop edits silently
 
     def _nav(self, d: int):
         leaves = self._visible_tree_leaves()
@@ -2150,8 +2009,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self.tree.setCurrentItem(leaves[new_pos])
 
     def _visible_tree_leaves(self) -> list[QTreeWidgetItem]:
-        """Return image leaves in the same order shown by the left tree."""
-
+        """Image leaves in the same order shown by the left tree."""
         leaves: list[QTreeWidgetItem] = []
 
         def walk(parent: QTreeWidgetItem) -> None:
