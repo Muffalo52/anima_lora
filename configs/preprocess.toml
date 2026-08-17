@@ -43,7 +43,9 @@ caption_tag_randomize_rate = 0.0
 #   make caption-position ARGS="--crops"    # report.json + the tagger's crops
 #   make caption-position ARGS="--flatten --apply"   # undo (clauses → flat bag)
 # Env: CAPTION_POSITION_CLAUSES. CLI: make preprocess ARGS="--caption_position_clauses"
-# (the GUI checkbox always exports the env var, so it wins over this key).
+# The GUI checkbox (Preprocessing tab → 캡션 편집) *initializes from this key*, so
+# flipping it here opts the GUI in too; it still exports the env var on submit, so
+# an explicit uncheck (persisted on the gui-method variant) wins over this file.
 # See docs/experimental/position_captions.md.
 caption_position_clauses = false
 

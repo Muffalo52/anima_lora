@@ -526,6 +526,15 @@ Precedence is env → config, with the CLI flag winning over both; the GUI alway
 exports the env var (persisting the checkbox to its variant's `[variant]` table),
 so it wins over `preprocess.toml` and the ConfigTab Train auto-chain honours it.
 
+Because the GUI always exports, the checkbox **initializes from the config key**
+(`_pp_default` in `gui/tabs/preprocess_tab.py`, the same rule `source_image_dir`
+already used): `caption_position_clauses = true` in `preprocess.toml` shows up
+checked, so flipping the key on the CLI side can't be silently cancelled by a GUI
+run exporting `0`. A variant's own `[variant]` value still wins over the file —
+and an unchecked box now *persists as `false`* rather than being dropped, since
+dropping it would let the file's `true` come back on the next load. Same wiring
+for `caption_autotag` / `_mode` / `_min_confidence`.
+
 Two things follow from applying without a review step: it **rewrites the source
 captions in place** (under v2 that includes taking bound tags out of the flat
 bag), and there is no undo button in the GUI. The pass is idempotent — a caption
