@@ -217,6 +217,24 @@ def _check_path(tok: str, top: set[str], base: Path | None = None) -> str | None
     return tok
 
 
+def _anchor_family_ref(tok: str, next_char: str) -> str | None:
+    """The path token to verify, or ``None`` when there is nothing to verify.
+
+    A glob prefix (``results/20260607-*``) or a brace expansion
+    (``results/20260816-16{18,34}-2c-*``) is a *family* reference, not a literal
+    path claim — and :data:`_MULTI_RE` truncates it at the ``*`` / ``{``, so the
+    partial stem would read as a broken path. Anchor on the parent directory
+    instead: the family ref still verifies its root, while the stem is left
+    alone. A family with no parent (``foo*``) has nothing to anchor on and is
+    skipped. (The make-target check does the same for
+    ``make preprocess-{resize,vae,…}``.)
+    """
+    if next_char not in ("*", "{"):
+        return tok
+    head, sep, _ = tok.rpartition("/")
+    return head + "/" if sep else None
+
+
 def _code_fragments(line: str, in_fence: bool) -> list[str]:
     """Code fragments on a line: the whole line inside a fence, else each inline
     `code` span separately. Kept separate (not joined) so adjacent spans can't
@@ -252,16 +270,9 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
             seen: set[str] = set()
             for rx in (_MULTI_RE, _SINGLE_RE):
                 for m in rx.finditer(line):
-                    tok = m.group(0)
-                    # A glob prefix (`results/20260607-*`) isn't a literal path
-                    # claim — the regex truncates at the '*'. Anchor on the parent
-                    # directory instead so the family ref still verifies its root
-                    # but the partial stem doesn't read as a broken path.
-                    if line[m.end() : m.end() + 1] == "*":
-                        head, sep, _ = tok.rpartition("/")
-                        if not sep:
-                            continue  # bare glob (`foo*`) — nothing to anchor
-                        tok = head + "/"
+                    tok = _anchor_family_ref(m.group(0), line[m.end() : m.end() + 1])
+                    if tok is None:
+                        continue
                     bad = _check_path(tok, top, base=doc.parent)
                     if bad and bad not in seen:
                         seen.add(bad)

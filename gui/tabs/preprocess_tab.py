@@ -118,6 +118,13 @@ DEFAULT_CAPTION_CORRECT_ORDER = False
 DEFAULT_CAPTION_INSERT_NO_ARTIST = False
 DEFAULT_CAPTION_TRIGGER_WORD = ""
 DEFAULT_CAPTION_TRIGGER_AT_FRONT = False
+DEFAULT_CAPTION_POSITION_CLAUSES = False
+DEFAULT_CAPTION_AUTOTAG = False
+# Mirrors library.preprocess.autotag.MODES — kept as a literal so the Qt-side
+# module doesn't drag in the PIL/torch import chain (see gui/CLAUDE.md).
+CAPTION_AUTOTAG_MODES = ("missing", "merge", "overwrite")
+DEFAULT_CAPTION_AUTOTAG_MODE = "missing"
+DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE = 0.0
 DEFAULT_SAM_PROMPTS = ("speech bubble", "text bubble")
 DEFAULT_SAM_THRESHOLD = 0.5
 DEFAULT_SAM_DILATE = 5
@@ -144,6 +151,10 @@ _GUI_PREPROCESS_KEYS = {
     "caption_insert_no_artist",
     "caption_trigger_word",
     "caption_trigger_at_front",
+    "caption_position_clauses",
+    "caption_autotag",
+    "caption_autotag_mode",
+    "caption_autotag_min_confidence",
     "run_sam_mask",
     "run_mit_mask",
     "mask_path_pattern",
@@ -228,6 +239,22 @@ def _load_preprocess_toml() -> dict:
         return toml.loads(PREPROCESS_TOML.read_text(encoding="utf-8"))
     except (OSError, toml.TomlDecodeError):
         return {}
+
+
+def _pp_default(key: str, fallback):
+    """Effective default for a knob ``configs/preprocess.toml`` can own.
+
+    Load it into the widget *and* compare against it when persisting, so the
+    variant only records a real divergence (same rule as ``source_image_dir``).
+
+    Load-bearing for the caption-master stages: the CLI resolves them env →
+    ``preprocess.toml`` → hardcoded, and this tab **always** exports the env var,
+    so a checkbox left at the hardcoded default would export ``0`` and silently
+    beat a user who set the key to ``true`` in the (user-owned, `make
+    update`-surviving) TOML.
+    """
+    value = _load_preprocess_toml().get(key)
+    return fallback if value is None else value
 
 
 def _load_sam_yaml() -> dict:
@@ -671,6 +698,82 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.dropout_edit,
         )
 
+        text_box.setLayout(text_form)
+        form_layout.addWidget(text_box)
+
+        # Auto-tagging — its own box because it runs *first* and is the only
+        # stage that can create a caption from nothing; everything in the
+        # caption-rewriting box below edits text that already exists.
+        autotag_box = QGroupBox(t("preprocess_caption_autotag_box"))
+        autotag_form = QFormLayout()
+
+        self.caption_autotag_chk = QCheckBox(t("preprocess_caption_autotag"))
+        self.caption_autotag_chk.setToolTip(t("preprocess_caption_autotag_tip"))
+        self.caption_autotag_chk.setChecked(
+            bool(pp_cfg.get("caption_autotag", DEFAULT_CAPTION_AUTOTAG))
+        )
+        autotag_form.addRow(
+            self._field_label("caption_autotag", t("preprocess_caption_autotag")),
+            self.caption_autotag_chk,
+        )
+
+        # Mode labels are translated; the payload is the untranslated mode name
+        # carried as item data, so a language switch can't change what runs.
+        self.caption_autotag_mode_combo = QComboBox()
+        for mode in CAPTION_AUTOTAG_MODES:
+            self.caption_autotag_mode_combo.addItem(
+                t(f"preprocess_caption_autotag_mode_{mode}"), mode
+            )
+        self.caption_autotag_mode_combo.setToolTip(
+            t("preprocess_caption_autotag_mode_tip")
+        )
+        self._set_autotag_mode(
+            str(pp_cfg.get("caption_autotag_mode", DEFAULT_CAPTION_AUTOTAG_MODE))
+        )
+        autotag_form.addRow(
+            self._field_label(
+                "caption_autotag_mode", t("preprocess_caption_autotag_mode")
+            ),
+            self.caption_autotag_mode_combo,
+        )
+
+        self.caption_autotag_confidence_spin = QDoubleSpinBox()
+        self.caption_autotag_confidence_spin.setRange(0.0, 1.0)
+        self.caption_autotag_confidence_spin.setSingleStep(0.05)
+        self.caption_autotag_confidence_spin.setDecimals(2)
+        self.caption_autotag_confidence_spin.setValue(
+            float(
+                pp_cfg.get(
+                    "caption_autotag_min_confidence",
+                    DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE,
+                )
+            )
+        )
+        self.caption_autotag_confidence_spin.wheelEvent = lambda e: e.ignore()
+        self.caption_autotag_confidence_spin.setToolTip(
+            t("preprocess_caption_autotag_min_confidence_tip")
+        )
+        autotag_form.addRow(
+            self._field_label(
+                "caption_autotag_min_confidence",
+                t("preprocess_caption_autotag_min_confidence"),
+            ),
+            self.caption_autotag_confidence_spin,
+        )
+
+        self.caption_autotag_chk.toggled.connect(self._sync_autotag_enabled)
+        self._sync_autotag_enabled(self.caption_autotag_chk.isChecked())
+
+        autotag_box.setLayout(autotag_form)
+        form_layout.addWidget(autotag_box)
+
+        # Caption rewriting — the knobs that edit the caption *text* before it is
+        # encoded, split out of the text-caching box (which owns the variant /
+        # dropout knobs). Order follows the pipeline: position clauses rewrite the
+        # caption master first, then correction reorders + slots the trigger word.
+        caption_box = QGroupBox(t("preprocess_caption_editing"))
+        caption_form = QFormLayout()
+
         self.caption_correct_order_chk = QCheckBox(
             t("preprocess_caption_correct_order")
         )
@@ -678,7 +781,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_correct_order_tip")
         )
         self.caption_correct_order_chk.setChecked(DEFAULT_CAPTION_CORRECT_ORDER)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_correct_order",
                 t("preprocess_caption_correct_order"),
@@ -693,7 +796,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_insert_no_artist_tip")
         )
         self.caption_insert_no_artist_chk.setChecked(DEFAULT_CAPTION_INSERT_NO_ARTIST)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_insert_no_artist",
                 t("preprocess_caption_insert_no_artist"),
@@ -706,7 +809,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self.caption_trigger_word_edit.setToolTip(
             t("preprocess_caption_trigger_word_tip")
         )
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_trigger_word",
                 t("preprocess_caption_trigger_word"),
@@ -721,15 +824,39 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_trigger_at_front_tip")
         )
         self.caption_trigger_at_front_chk.setChecked(DEFAULT_CAPTION_TRIGGER_AT_FRONT)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_trigger_at_front",
                 t("preprocess_caption_trigger_at_front"),
             ),
             self.caption_trigger_at_front_chk,
         )
-        text_box.setLayout(text_form)
-        form_layout.addWidget(text_box)
+
+        # Position clauses. Unlike its neighbours this is a GPU stage (SAM3 +
+        # the tagger) that rewrites the caption master in place, so it is off by
+        # default and the tooltip says both. Bound to the `preprocess.toml` key
+        # so a dataset that opted in on the CLI stays opted in here.
+        self.caption_position_clauses_chk = QCheckBox(
+            t("preprocess_caption_position_clauses")
+        )
+        self.caption_position_clauses_chk.setToolTip(
+            t("preprocess_caption_position_clauses_tip")
+        )
+        self.caption_position_clauses_chk.setChecked(
+            bool(
+                pp_cfg.get("caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES)
+            )
+        )
+        caption_form.addRow(
+            self._field_label(
+                "caption_position_clauses",
+                t("preprocess_caption_position_clauses"),
+            ),
+            self.caption_position_clauses_chk,
+        )
+
+        caption_box.setLayout(caption_form)
+        form_layout.addWidget(caption_box)
 
         sam_box = QGroupBox(t("preprocess_masking_sam"))
         sam_outer = QVBoxLayout()
@@ -938,6 +1065,27 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         caption_trigger_at_front = meta.get(
             "caption_trigger_at_front", DEFAULT_CAPTION_TRIGGER_AT_FRONT
         )
+        # The caption-master stages fall back to preprocess.toml, not to the
+        # hardcoded default: this tab always exports their env vars, which win
+        # over the TOML, so an unbound checkbox would cancel a CLI opt-in.
+        caption_position_clauses = meta.get(
+            "caption_position_clauses",
+            pp_cfg.get("caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES),
+        )
+        caption_autotag = meta.get(
+            "caption_autotag", pp_cfg.get("caption_autotag", DEFAULT_CAPTION_AUTOTAG)
+        )
+        caption_autotag_mode = meta.get(
+            "caption_autotag_mode",
+            pp_cfg.get("caption_autotag_mode", DEFAULT_CAPTION_AUTOTAG_MODE),
+        )
+        caption_autotag_min_confidence = meta.get(
+            "caption_autotag_min_confidence",
+            pp_cfg.get(
+                "caption_autotag_min_confidence",
+                DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE,
+            ),
+        )
         run_sam_mask = meta.get(
             "run_sam_mask",
             settings.get("run_sam_mask", DEFAULT_RUN_SAM_MASK),
@@ -981,6 +1129,13 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.caption_insert_no_artist_chk.setChecked(bool(caption_insert_no_artist))
             self.caption_trigger_word_edit.setText(str(caption_trigger_word or ""))
             self.caption_trigger_at_front_chk.setChecked(bool(caption_trigger_at_front))
+            self.caption_position_clauses_chk.setChecked(bool(caption_position_clauses))
+            self.caption_autotag_chk.setChecked(bool(caption_autotag))
+            self._set_autotag_mode(str(caption_autotag_mode))
+            self.caption_autotag_confidence_spin.setValue(
+                float(caption_autotag_min_confidence)
+            )
+            self._sync_autotag_enabled(self.caption_autotag_chk.isChecked())
             self.run_sam_mask_chk.setChecked(bool(run_sam_mask))
             self.mask_path_pattern_edit.setText(str(mask_path_pattern or "*"))
             self._set_rule_cards(mask_rules)
@@ -1090,6 +1245,10 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.caption_insert_no_artist_chk,
             self.caption_trigger_word_edit,
             self.caption_trigger_at_front_chk,
+            self.caption_position_clauses_chk,
+            self.caption_autotag_chk,
+            self.caption_autotag_mode_combo,
+            self.caption_autotag_confidence_spin,
             self.run_sam_mask_chk,
             self.mask_path_pattern_edit,
             self.run_mit_mask_chk,
@@ -1109,6 +1268,28 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.save_btn.setText(t("preprocess_save_settings"))
             apply_variant(self.save_btn, None)
             self.save_btn.setToolTip(t("preprocess_save_settings_tip"))
+
+    def _set_autotag_mode(self, mode: str) -> None:
+        """Select the combo entry whose item *data* is ``mode`` (not its label)."""
+        index = self.caption_autotag_mode_combo.findData(
+            str(mode or DEFAULT_CAPTION_AUTOTAG_MODE)
+        )
+        if index < 0:
+            index = self.caption_autotag_mode_combo.findData(
+                DEFAULT_CAPTION_AUTOTAG_MODE
+            )
+        self.caption_autotag_mode_combo.setCurrentIndex(max(index, 0))
+
+    def _autotag_mode(self) -> str:
+        return str(
+            self.caption_autotag_mode_combo.currentData()
+            or DEFAULT_CAPTION_AUTOTAG_MODE
+        )
+
+    def _sync_autotag_enabled(self, enabled: bool) -> None:
+        """Grey out the mode/confidence knobs when auto-tagging is off."""
+        self.caption_autotag_mode_combo.setEnabled(bool(enabled))
+        self.caption_autotag_confidence_spin.setEnabled(bool(enabled))
 
     def _field_label(self, key: str, text_str: str) -> ClickableLabel:
         """Build a ClickableLabel that shows this field's help when clicked."""
@@ -1379,6 +1560,18 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "CAPTION_TRIGGER_AT_FRONT": (
                 "1" if self.caption_trigger_at_front_chk.isChecked() else "0"
             ),
+            # Gates the SAM3 + tagger stage tasks.py chains before the caption /
+            # TE steps (it rewrites the caption master those two then read).
+            "CAPTION_POSITION_CLAUSES": (
+                "1" if self.caption_position_clauses_chk.isChecked() else "0"
+            ),
+            # Gates the Anima Tagger stage tasks.py chains right after resize —
+            # it *creates* the caption master every later caption stage reads.
+            "CAPTION_AUTOTAG": "1" if self.caption_autotag_chk.isChecked() else "0",
+            "CAPTION_AUTOTAG_MODE": self._autotag_mode(),
+            "CAPTION_AUTOTAG_MIN_CONFIDENCE": (
+                f"{float(self.caption_autotag_confidence_spin.value()):g}"
+            ),
             "PREPROCESS_PATH_PATTERN": (
                 self.preprocess_path_pattern_edit.text().strip()
                 or DEFAULT_PREPROCESS_PATH_PATTERN
@@ -1400,6 +1593,12 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "caption_insert_no_artist": self.caption_insert_no_artist_chk.isChecked(),
             "caption_trigger_word": self.caption_trigger_word_edit.text().strip(),
             "caption_trigger_at_front": self.caption_trigger_at_front_chk.isChecked(),
+            "caption_position_clauses": self.caption_position_clauses_chk.isChecked(),
+            "caption_autotag": self.caption_autotag_chk.isChecked(),
+            "caption_autotag_mode": self._autotag_mode(),
+            "caption_autotag_min_confidence": float(
+                self.caption_autotag_confidence_spin.value()
+            ),
         }
 
     def preprocess_config_snapshot(self) -> dict[str, object]:
@@ -1600,6 +1799,43 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             meta.pop("caption_trigger_at_front", None)
         else:
             meta["caption_trigger_at_front"] = trigger_at_front
+
+        # These four compare against the preprocess.toml-resolved default, not
+        # the hardcoded one: with `caption_position_clauses = true` in the TOML,
+        # popping an unchecked box would hand the next load a checked box again
+        # (and the box is what gets exported).
+        position_clauses = self.caption_position_clauses_chk.isChecked()
+        if position_clauses == bool(
+            _pp_default("caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES)
+        ):
+            meta.pop("caption_position_clauses", None)
+        else:
+            meta["caption_position_clauses"] = position_clauses
+
+        autotag = self.caption_autotag_chk.isChecked()
+        if autotag == bool(_pp_default("caption_autotag", DEFAULT_CAPTION_AUTOTAG)):
+            meta.pop("caption_autotag", None)
+        else:
+            meta["caption_autotag"] = autotag
+
+        autotag_mode = self._autotag_mode()
+        if autotag_mode == str(
+            _pp_default("caption_autotag_mode", DEFAULT_CAPTION_AUTOTAG_MODE)
+        ):
+            meta.pop("caption_autotag_mode", None)
+        else:
+            meta["caption_autotag_mode"] = autotag_mode
+
+        autotag_confidence = float(self.caption_autotag_confidence_spin.value())
+        if autotag_confidence == float(
+            _pp_default(
+                "caption_autotag_min_confidence",
+                DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE,
+            )
+        ):
+            meta.pop("caption_autotag_min_confidence", None)
+        else:
+            meta["caption_autotag_min_confidence"] = autotag_confidence
 
         if include_mask:
             mask_path_pattern = (

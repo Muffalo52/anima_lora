@@ -143,6 +143,26 @@ def _boolish(value, default: bool = False) -> bool:
     return default
 
 
+def _floatish(*values, default: float = 0.0) -> float:
+    """First value that parses as a float, else ``default``.
+
+    Mirrors ``_boolish``'s env-then-config-then-default layering for the numeric
+    knobs; a blank env var (the GUI writes ``""`` for an empty field) falls
+    through rather than raising.
+    """
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return float(text)
+        except ValueError:
+            continue
+    return float(default)
+
+
 def _sigma_demote_routes(extra) -> list[str]:
     """The σ-demote routes (``["N:D", …]``) to chain, or ``[]`` when off.
 
@@ -216,6 +236,11 @@ def _pop_explicit_demote_routes(extra) -> tuple[list[str], list[str]]:
     return routes, cleaned
 
 
+# Mirrors ``library.preprocess.autotag.MODES``; duplicated rather than imported
+# so this module stays free of the PIL/torch import chain.
+_AUTOTAG_MODES = ("missing", "merge", "overwrite")
+
+
 def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
     """Caption correction flags/config for preprocess-time TE caching.
 
@@ -245,6 +270,39 @@ def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
             os.environ.get("CAPTION_TRIGGER_AT_FRONT"),
             _boolish(overrides.get("caption_trigger_at_front"), False),
         ),
+        # Not a `correct_captions.py` flag — it gates a separate stage that runs
+        # BEFORE the caption/TE steps (see `cmd_preprocess`). It rides in this
+        # dict because it is the same family of caption-master rewrites and the
+        # GUI groups them together; `_caption_correction_enabled` /
+        # `_caption_correction_args` deliberately ignore it.
+        "position_clauses": _boolish(
+            os.environ.get("CAPTION_POSITION_CLAUSES"),
+            _boolish(overrides.get("caption_position_clauses"), False),
+        ),
+        # Same deal as `position_clauses`: a separate caption-master stage, not
+        # a `correct_captions.py` flag. This one runs even earlier (it *creates*
+        # the captions the rest of the chain reads) — see `cmd_preprocess`.
+        "autotag": _boolish(
+            os.environ.get("CAPTION_AUTOTAG"),
+            _boolish(overrides.get("caption_autotag"), False),
+        ),
+        "autotag_mode": str(
+            os.environ.get("CAPTION_AUTOTAG_MODE")
+            or overrides.get("caption_autotag_mode")
+            or "missing"
+        ).strip(),
+        "autotag_min_confidence": _floatish(
+            os.environ.get("CAPTION_AUTOTAG_MIN_CONFIDENCE"),
+            overrides.get("caption_autotag_min_confidence"),
+            default=0.0,
+        ),
+        # The caption-MASTER stages are driven from this dict alone — the
+        # caller's ``extra`` never reaches them — so the subset scope has to
+        # ride along. Without it a ``--path_pattern``-scoped preprocess would
+        # cache latents for the requested slice while rewriting captions across
+        # the WHOLE master, which autotag ``merge``/``overwrite`` makes
+        # destructive.
+        "path_pattern_args": _resolved_path_pattern_args(extra),
     }
 
     cleaned: list[str] = []
@@ -275,6 +333,34 @@ def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
         }:
             config["trigger_at_front"] = False
             i += 1
+        elif tok in {"--caption_position_clauses", "--caption-position-clauses"}:
+            config["position_clauses"] = True
+            i += 1
+        elif tok in {
+            "--no_caption_position_clauses",
+            "--no-caption-position-clauses",
+        }:
+            config["position_clauses"] = False
+            i += 1
+        elif tok in {"--caption_autotag", "--caption-autotag"}:
+            config["autotag"] = True
+            i += 1
+        elif tok in {"--no_caption_autotag", "--no-caption-autotag"}:
+            config["autotag"] = False
+            i += 1
+        elif tok in {"--caption_autotag_mode", "--caption-autotag-mode"}:
+            if i + 1 >= len(extra):
+                raise SystemExit(f"{tok} requires a value ({'|'.join(_AUTOTAG_MODES)})")
+            config["autotag_mode"] = str(extra[i + 1]).strip()
+            i += 2
+        elif tok in {
+            "--caption_autotag_min_confidence",
+            "--caption-autotag-min-confidence",
+        }:
+            if i + 1 >= len(extra):
+                raise SystemExit(f"{tok} requires a value")
+            config["autotag_min_confidence"] = _floatish(extra[i + 1], default=0.0)
+            i += 2
         elif tok in {"--caption_trigger_word", "--caption-trigger-word"}:
             if i + 1 >= len(extra):
                 raise SystemExit(f"{tok} requires a value")
@@ -283,7 +369,30 @@ def _caption_correction_config(extra) -> tuple[dict[str, object], list[str]]:
         else:
             cleaned.append(tok)
             i += 1
+
+    # Fail fast on a bad mode: the stage runs after resize, so a typo would
+    # otherwise surface as an argparse error minutes into a GPU job.
+    mode = str(config.get("autotag_mode") or "missing")
+    if mode not in _AUTOTAG_MODES:
+        raise SystemExit(
+            f"caption autotag mode {mode!r} is not one of {'|'.join(_AUTOTAG_MODES)}"
+        )
+    config["autotag_mode"] = mode
     return config, cleaned
+
+
+def _caption_autotag_args(config: dict[str, object]) -> list[str]:
+    """Child flags for the in-pipeline autotag stage.
+
+    Always ``--apply``: inside ``make preprocess`` the user already opted in via
+    the checkbox / env, and a dry run there would produce a report nobody reads
+    while the TE step encodes the un-tagged captions.
+    """
+    args = ["--mode", str(config.get("autotag_mode") or "missing")]
+    confidence = float(config.get("autotag_min_confidence") or 0.0)
+    if confidence > 0.0:
+        args += ["--min_confidence", f"{confidence:g}"]
+    return [*args, "--apply"]
 
 
 def _caption_correction_enabled(config: dict[str, object]) -> bool:
@@ -755,9 +864,17 @@ def cmd_preprocess_captions(extra, caption_config: dict[str, object] | None = No
     + variants on runs in passthrough (``--no_correct``): v0 mirrors the raw
     caption and the shuffle/dropout/randomize sidecars ride alongside, so the
     user can see the train-time variants directly in ``resized/``.
+
+    The caption-MASTER stages (autotag, position clauses) run first when their
+    config knob is on: this step *mirrors* the master, so a rewrite that landed
+    after it would be invisible to the sidecars — and to the TE caches encoded
+    from them. In the full ``preprocess`` chain they already ran (earlier, in
+    their GPU-ordered slots) and the guard makes these calls no-ops.
     """
     if caption_config is None:
         caption_config, extra = _caption_correction_config(extra)
+    _run_caption_autotag_stage(caption_config)
+    _run_caption_position_stage(caption_config)
     correct = _caption_correction_enabled(caption_config)
     shuffle, dropout, randomize = _variant_settings()
     n_variants = int(_float_or_zero(shuffle))
@@ -801,6 +918,11 @@ def cmd_preprocess_captions(extra, caption_config: dict[str, object] | None = No
 def cmd_preprocess_te(extra, caption_config: dict[str, object] | None = None):
     if caption_config is None:
         caption_config, extra = _caption_correction_config(extra)
+    # Master rewrites before anything reads the master. `cmd_preprocess_captions`
+    # runs them too, but the no-correction + no-variants path below skips that
+    # step entirely and encodes the source captions directly.
+    _run_caption_autotag_stage(caption_config)
+    _run_caption_position_stage(caption_config)
     shuffle, dropout, randomize = _variant_settings()
     n_variants = int(_float_or_zero(shuffle))
     # The caption step writes the variant sidecars (the encode source of truth);
@@ -935,6 +1057,140 @@ def cmd_caption_index(extra):
     )
 
 
+def _caption_master_argv(script: str, extra) -> list[str]:
+    """Child argv (no interpreter) for a caption-MASTER rewrite pass.
+
+    Resolves the subset scope once (explicit flag in ``extra`` > env > config)
+    and drops it from the tail so an explicitly-passed ``--path_pattern`` is
+    emitted exactly once rather than twice.
+    """
+    return [
+        script,
+        "--src",
+        _path("source_image_dir", "image_dataset"),
+        "--dst",
+        _path("resized_image_dir", "post_image_dataset/resized"),
+        *_resolved_path_pattern_args(extra),
+        *_drop_option_with_value(extra, {"--path_pattern", "--path-pattern"}),
+    ]
+
+
+def _caption_position_argv(extra) -> list[str]:
+    """Child argv (no interpreter) for the position-clause pass.
+
+    Shared by the standalone ``caption-position`` target and the in-pipeline
+    stage ``cmd_preprocess`` chains, so the two can't drift on paths/scoping.
+    """
+    return _caption_master_argv("scripts/preprocess/position_captions.py", extra)
+
+
+def _caption_autotag_argv(extra) -> list[str]:
+    """Child argv (no interpreter) for the batch autotag pass.
+
+    Shared by the standalone ``caption-autotag`` target and the in-pipeline
+    stage ``cmd_preprocess`` chains, so the two can't drift on paths/scoping.
+    """
+    return _caption_master_argv("scripts/preprocess/autotag_captions.py", extra)
+
+
+# Caption-MASTER rewrite stages (autotag, position clauses) mutate
+# ``image_dataset/*.txt``, and every entry point that reads the master needs them
+# to have happened first — `preprocess` (in its own early, GPU-ordered slots),
+# `preprocess-te`, and `preprocess-captions` run on its own. So each of those
+# calls the stage, and this key on the shared caption-config dict records that it
+# already ran in this chain: `cmd_preprocess` threads ONE dict through
+# `cmd_preprocess_te` → `cmd_preprocess_captions`, so the later calls no-op while
+# a standalone target still gets its own dict and runs the stage. Both passes are
+# idempotent on an already-rewritten caption (autotag `missing` sees a sidecar,
+# position skips `already-has-clauses`) but neither is free — each pays a tagger /
+# SAM3 load over the whole tree.
+_STAGE_RAN_KEY = "_master_stages_ran"
+
+
+def _stage_already_ran(config: dict[str, object], stage: str) -> bool:
+    """Has ``stage`` run for this caption-config dict? Marks it if not."""
+    ran = config.setdefault(_STAGE_RAN_KEY, set())
+    if not isinstance(ran, set):  # a caller hand-rolled the dict — treat as fresh
+        ran = set()
+        config[_STAGE_RAN_KEY] = ran
+    if stage in ran:
+        return True
+    ran.add(stage)
+    return False
+
+
+def _stage_path_pattern_args(config: dict[str, object]) -> list[str]:
+    """Subset scope stashed by :func:`_caption_correction_config`.
+
+    Empty for a hand-rolled dict — the argv builder then falls back to the
+    env/config pattern exactly as the standalone targets do.
+    """
+    args = config.get("path_pattern_args")
+    return list(args) if isinstance(args, (list, tuple)) else []
+
+
+def _run_caption_autotag_stage(config: dict[str, object]) -> None:
+    """Run the in-pipeline autotag pass if enabled and not yet run."""
+    if not config.get("autotag") or _stage_already_ran(config, "autotag"):
+        return
+    mode = str(config.get("autotag_mode") or "missing")
+    print(f"  [preprocess] autotag ({mode}): Anima Tagger → caption master")
+    argv = [*_stage_path_pattern_args(config), *_caption_autotag_args(config)]
+    run([PY, *_caption_autotag_argv(argv)])
+
+
+def _run_caption_position_stage(config: dict[str, object]) -> None:
+    """Run the in-pipeline position-clause pass if enabled and not yet run.
+
+    Inline rather than through ``cmd_caption_position``: the caller is itself a
+    daemon job on a serial queue, so submitting a nested job would wait on a
+    queue that can't advance.
+    """
+    if not config.get("position_clauses") or _stage_already_ran(config, "position"):
+        return
+    print("  [preprocess] position clauses: SAM3 + tagger → caption master")
+    run([PY, *_caption_position_argv([*_stage_path_pattern_args(config), "--apply"])])
+
+
+def cmd_caption_autotag(extra):
+    """Auto-tag the dataset with the Anima Tagger (GPU, daemon-routed).
+
+    Writes ``.txt`` sidecars into the caption master. ``--mode missing``
+    (default) only fills in uncaptioned images; ``merge`` appends novel tags to
+    every caption while keeping its position clauses; ``overwrite`` replaces the
+    caption outright. Dry-run by default; ``ARGS="--apply"`` writes, and must be
+    followed by ``make preprocess-te`` (caption edits do NOT invalidate the TE
+    caches, and the ``.variants.txt`` sidecars override the CLI dropout rate).
+
+    Routed through the daemon like every other agent-launched GPU job — it holds
+    the tagger resident for the whole sweep and would otherwise OOM-collide with
+    a live train run.
+    """
+    from ._common import _resolve_run_mode, run_command
+
+    mode, extra = _resolve_run_mode(extra)
+    run_command("caption-autotag", _caption_autotag_argv(extra), mode=mode)
+
+
+def cmd_caption_position(extra):
+    """Append position-aware clauses to multi-subject captions (GPU, daemon-routed).
+
+    SAM3 ``girl`` instances → reading order → mask-blanked crops → Anima Tagger →
+    ``… On the left, <tags>. On the right, <tags>.`` appended to the caption
+    master. Dry-run by default; ``ARGS="--apply"`` writes, and must be followed
+    by ``make preprocess-te`` (caption edits do NOT invalidate the TE caches, and
+    the ``.variants.txt`` sidecars override the CLI dropout rate).
+
+    Routed through the daemon like every other agent-launched GPU job — it holds
+    SAM3 + the tagger resident for the whole sweep and would otherwise
+    OOM-collide with a live train run.
+    """
+    from ._common import _resolve_run_mode, run_command
+
+    mode, extra = _resolve_run_mode(extra)
+    run_command("caption-position", _caption_position_argv(extra), mode=mode)
+
+
 # `cmd_preprocess` auto-fetches this (~0.7 MB) vocab on demand: the caption index
 # it gates is a hard requirement for soft-tokens contrastive training (train.py
 # raises FileNotFoundError without it). Fetch is best-effort.
@@ -955,11 +1211,22 @@ def cmd_preprocess(extra):
     if encoder is not None:
         _require_repa_encoder_model(encoder)
     cmd_preprocess_resize(extra)
+    # Auto-tagging *creates* the caption master every later caption stage reads
+    # (position clauses, correction, TE), so it has to land first — right after
+    # resize, because it tags the resized pixels training actually sees. The
+    # caption/TE steps would run it themselves, but only after the VAE pass; the
+    # early call here fixes the order and the stage guard makes theirs a no-op.
+    _run_caption_autotag_stage(caption_config)
     # VAE/TE steps read on-disk shapes — strip the low-res convenience flags AND
     # the resize-only --target_res so their argparse never sees an undefined arg.
     downstream = _pop_resize_only_args(extra)
     _, vae_extra = _resolve_lowres_filter(downstream)
     cmd_preprocess_vae(vae_extra)
+    # Position clauses rewrite the caption MASTER, so the stage has to land
+    # before the caption/TE steps read it (they write the variant sidecars and
+    # encode). Pinned here rather than left to `cmd_preprocess_te` so the GPU
+    # order stays VAE → SAM3/tagger; the guard keeps it from running twice.
+    _run_caption_position_stage(caption_config)
     cmd_preprocess_te(downstream, caption_config=caption_config)
     # Caption index as a free by-product — consumed by the IP-Adapter pair sampler,
     # artist balancing, analytics, AND soft-tokens (which hard-errors without it).

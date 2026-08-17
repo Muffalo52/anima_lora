@@ -31,6 +31,24 @@ caption_tag_dropout_rate = 0.1
 # Override: make preprocess ARGS="--caption_tag_randomize_rate 0.2"
 caption_tag_randomize_rate = 0.0
 
+# Position clauses ("On the left, …") for multi-subject images. true = `make
+# preprocess` runs the SAM3 + tagger pass inline after the VAE cache, WITH
+# --apply — it rewrites the caption master in place (no dry run, no report to
+# review), and the caption/TE steps right after it re-encode the result. The
+# caption-only entry points honour it too — `make preprocess-captions` and `make
+# preprocess-te` run the pass before they read the master, so a re-encode can't
+# mirror a pre-clause caption (in the full chain it runs once, early). false =
+# the stage never runs in any chain; `make caption-position` stays the dry-run
+# front door. Eyeball a dry run once on a new dataset before flipping this on:
+#   make caption-position ARGS="--crops"    # report.json + the tagger's crops
+#   make caption-position ARGS="--flatten --apply"   # undo (clauses → flat bag)
+# Env: CAPTION_POSITION_CLAUSES. CLI: make preprocess ARGS="--caption_position_clauses"
+# The GUI checkbox (Preprocessing tab → 캡션 편집) *initializes from this key*, so
+# flipping it here opts the GUI in too; it still exports the env var on submit, so
+# an explicit uncheck (persisted on the gui-method variant) wins over this file.
+# See docs/experimental/position_captions.md.
+caption_position_clauses = false
+
 # σ-demote sibling latents (sigma_lowres). true = after every VAE pass
 # (`make preprocess` / `preprocess-vae`) also emit the demoted_{H}x{W} keys the
 # `--sigma_lowres` trainer swaps to, on the certified 1024:896 route — so the

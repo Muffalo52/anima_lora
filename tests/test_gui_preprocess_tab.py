@@ -267,6 +267,67 @@ def test_preprocess_tab_caption_options_round_trip_to_variant():
             tab.deleteLater()
 
 
+def test_caption_master_stages_default_from_preprocess_toml(monkeypatch):
+    """`caption_position_clauses = true` in the TOML must reach the checkbox.
+
+    The tab always exports CAPTION_POSITION_CLAUSES / CAPTION_AUTOTAG, and env
+    beats the config file in tasks.py — so a checkbox pinned to the hardcoded
+    default would export "0" and silently cancel a CLI-side opt-in.
+    """
+    from gui import _load
+    from gui.tabs import preprocess_tab
+
+    monkeypatch.setattr(
+        preprocess_tab,
+        "_load_preprocess_toml",
+        lambda: {
+            "caption_position_clauses": True,
+            "caption_autotag": True,
+            "caption_autotag_mode": "merge",
+            "caption_autotag_min_confidence": 0.35,
+        },
+    )
+
+    tab = None
+    with _temporary_custom_variant("__pytest_preprocess_master_stages__") as (
+        variant,
+        path,
+    ):
+        tab = _make_tab()
+        assert tab.caption_position_clauses_chk.isChecked()
+        assert tab.caption_autotag_chk.isChecked()
+        assert tab._autotag_mode() == "merge"
+
+        # A variant carrying no override keeps the config's answer, and the env
+        # the daemon job inherits agrees with it.
+        tab.set_variant(variant, method="lora")
+        assert tab.caption_position_clauses_chk.isChecked()
+        assert tab.caption_autotag_chk.isChecked()
+        env = tab.preprocess_env()
+        assert env["CAPTION_POSITION_CLAUSES"] == "1"
+        assert env["CAPTION_AUTOTAG"] == "1"
+        assert env["CAPTION_AUTOTAG_MODE"] == "merge"
+        assert env["CAPTION_AUTOTAG_MIN_CONFIDENCE"] == "0.35"
+
+        # Unchecking must PERSIST as false — popping it (the old rule, which
+        # compared against the hardcoded default) would let the config's `true`
+        # come back on the next load.
+        tab.caption_position_clauses_chk.setChecked(False)
+        tab.caption_autotag_chk.setChecked(False)
+        assert tab._save_all()
+        meta = _load(path)["variant"]
+        assert meta["caption_position_clauses"] is False
+        assert meta["caption_autotag"] is False
+
+        tab.set_variant(variant, method="lora")
+        assert not tab.caption_position_clauses_chk.isChecked()
+        assert not tab.caption_autotag_chk.isChecked()
+        assert tab.preprocess_env()["CAPTION_POSITION_CLAUSES"] == "0"
+
+        if tab is not None:
+            tab.deleteLater()
+
+
 def test_masking_task_reads_gui_sam_config_snapshot(monkeypatch):
     from scripts.tasks import masking
 

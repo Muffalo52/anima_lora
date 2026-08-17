@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from scripts.release.check_docs import (
     REPO_ROOT,
+    _anchor_family_ref,
     _check_path,
     collect_issues,
     known_make_targets,
@@ -76,6 +77,22 @@ def test_check_path_resolves_relative_to_the_referencing_doc():
     # under neither root is still flagged.
     missing = "bench/this_bench_does_not_exist.py"
     assert _check_path(missing, top, base=line_home) == missing
+
+
+def test_family_refs_anchor_on_their_parent_directory():
+    """`dir/2026*` and `dir/2026{18,34}-*` are families, not path claims.
+
+    The path regex truncates at the ``*`` / ``{``, so the partial stem would be
+    flagged as a nonexistent path. Both forms must fall back to verifying the
+    parent directory instead — the brace case is the one docs use when citing a
+    handful of sibling run dirs at once.
+    """
+    assert _anchor_family_ref("bench/results/20260607-", "*") == "bench/results/"
+    assert _anchor_family_ref("bench/results/20260816-16", "{") == "bench/results/"
+    # No parent to anchor on → nothing to verify.
+    assert _anchor_family_ref("20260816-16", "{") is None
+    # A plain path is returned untouched, so ordinary refs still get checked.
+    assert _anchor_family_ref("library/train_util.py", " ") == "library/train_util.py"
 
 
 def test_known_make_targets_include_canonical_entries():

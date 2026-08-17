@@ -71,13 +71,6 @@ class MainWindow(QMainWindow):
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
-        # App-wide event filter catches ContextMenu before the target widget so right-click is
-        # uniform everywhere (text widgets would otherwise show Qt's copy/select-all menu).
-        # Removed in closeEvent so a _reload_ui rebuild doesn't stack filters.
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
-
         central = QWidget()
         main_lay = QVBoxLayout(central)
         main_lay.setContentsMargins(0, 0, 0, 0)
@@ -216,6 +209,19 @@ class MainWindow(QMainWindow):
 
         self._update_tensorboard_btn_style(False)
         self._update_queue_btn_style(False)
+
+        # App-wide event filter catches ContextMenu before the target widget so right-click is
+        # uniform everywhere (text widgets would otherwise show Qt's copy/select-all menu).
+        # Removed in closeEvent so a _reload_ui rebuild doesn't stack filters.
+        #
+        # Installed LAST, after the tree is built: it only handles ContextMenu and
+        # ToolTip, neither of which can fire before the window is shown, and an
+        # app-wide Python filter installed first sees every construction-time event
+        # (ChildAdded / Polish / LayoutRequest …). That was ~82k round-trips into
+        # Python per launch — it made even `addWidget` look expensive in a profile.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     def closeEvent(self, event):
         # Drop the app-wide context-menu filter so a _reload_ui rebuild doesn't leave a dead window filtering events.
