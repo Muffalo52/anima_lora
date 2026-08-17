@@ -224,7 +224,7 @@ register. Distillation cannot pass its own teacher, so the gate is only
 meaningful as a fraction of a ceiling, and the ceiling had never been measured
 on the corpus. Measured now on all **900** held-out pairs (no training; the
 teacher/reference/native arms are all cached, so this is a readout, not a run).
-Envelope: `bench/cjk_distill/results/20260816-1428-g34/`.
+Envelope: `bench/cjk_distill/results/20260816-1428-g34-g4b/`.
 
 | register | n | teacher (ceiling) | native (floor) | addressable | zero-shot student | ceiling attn | floor attn | addressable attn |
 |---|---|---|---|---|---|---|---|---|
