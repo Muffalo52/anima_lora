@@ -506,6 +506,15 @@ before the caption/TE steps — because it rewrites the caption master those two
 then read, and the same job re-encodes, so the TE-staleness trap is handled for
 you. Only the standalone `--apply` path needs the manual `make preprocess-te`.
 
+The two caption-only entry points honour the same knob: `make preprocess-captions`
+(mirror + variant sidecars) and `make preprocess-te` (which chains it) run the
+stage before they read the master, so a caption-only re-encode can never mirror a
+pre-clause caption. In the full chain it still runs exactly once — the "already
+ran" mark rides on the caption-config dict `cmd_preprocess` threads down into
+`cmd_preprocess_te` → `cmd_preprocess_captions`, so the later calls no-op instead
+of re-paying the SAM3 + tagger load. The GPU order stays VAE → SAM3/tagger
+because `cmd_preprocess` keeps its own early call in that slot.
+
 | Surface | How |
 |---|---|
 | Config | `caption_position_clauses = true` in `configs/preprocess.toml` (user-owned, survives `make update`) |
