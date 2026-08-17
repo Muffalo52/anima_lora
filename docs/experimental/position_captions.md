@@ -210,22 +210,106 @@ never reaches the model. The first sweep found one caption at 522 tokens
 
 ### Current dry-run sweep
 
-3008 images, whole dataset, defaults:
+3008 images, whole dataset, defaults (2026-08-17, after the skip triage below;
+the first sweep's numbers in brackets):
 
 | | n |
 |---|---|
 | candidates (prefilter passed) | 419 |
-| **proposals** | **317** |
-| skip: too-few-instances | 81 |
-| skip: count-mismatch | 19 |
+| **proposals** | **373** [317] |
+| skip: too-few-instances | 27 [81] |
+| skip: count-mismatch | 18 [19] |
 | skip: already-has-clauses (hand-written) | 15 |
-| skip: too-many-instances | 2 |
+| skip: too-many-instances | 1 [2] |
 | not a candidate (single-subject) | 2574 |
 
-Count-mismatch skip rate is 4.5% of candidates (probe B saw 15% on its
-13-image sample). Of the 317 proposals: 229 are 2-subject, 54 are 3, 34 are ≥4;
-137 come from `multiple views` sheets; median 8 tags per clause (i.e. the cap
-binds).
+Net against the first sweep: 59 of its 102 skips now propose, 3 regress (two to
+`--min_area_frac`, one to a lower-floor detection that overshoots the count).
+`count-mismatch` barely moves because the class *gained* members as
+`too-few-instances` shrank — an image whose retry now finds three boxes for a
+`2girls` caption lands here instead. That is the safe direction: a mismatch is a
+skip, not a wrong write.
+
+Of the 373 proposals: 249 are 2-subject, 58 are 3, 33 are ≥4; 152 come from
+`multiple views` sheets; median 8 tags per clause (i.e. the cap binds). 48
+proposals rest on at least one sub-0.5 detection — see the mask caveat below.
+
+### Triaging the skips (2026-08-17)
+
+The first full sweep skipped 81 `too-few-instances` + 19 `count-mismatch`. Both
+were investigated end-to-end; four mechanical causes, all fixed.
+
+**`too-few-instances` — under-detection, and the mitigation for it was dead
+code.**
+
+1. **The low-threshold retry never ran.** `Sam3Processor` carries its *own*
+   `confidence_threshold` (default 0.5) and applies it inside
+   `_forward_grounding` — boxes below it never reach the caller. The old
+   `detect()` post-filtered the returned list against `retry_score_threshold`,
+   which can only ever remove boxes, never add the ones SAM3 already dropped.
+   A probe at 0.5 reproduced the reported counts exactly on 20/20 sampled
+   failures; re-running at SAM3's real 0.35 floor brought 14 of the 20 to ≥2
+   instances. `build_detect_fn` now constructs the processor at the *lowest*
+   threshold it may be asked for and memoises the raw detections per image, so
+   the retry is a pure re-filter with no second image encode.
+2. **Multi-view sheets never even attempted the retry.** `detect_subjects`
+   gated it on `if expected and …`, and `caption_subject_count` returns `None`
+   for `multiple views` **by design** (the count tag counts characters, not
+   views). `None` is falsy, so the entire multi-view population — 35 of the 81
+   — skipped the retry before cause 1 could matter. The target is now
+   `expected or min_instances`.
+
+Irreducible tail: SAM3 scales every instance probability by one global presence
+score, so on some framings (extreme close-up, from-behind, cropped body) *all*
+boxes sink together — 2 of the 20 sampled stayed at zero detections even at 0.15.
+
+**`count-mismatch` — the two counts were counting different things.** Lowering
+the threshold makes this class *worse*, so it needed the opposite fix.
+
+3. **Nested boxes survive dedupe** (9/19 had a pair at IoMin ≥ 0.7, several at
+   exactly 1.00). Plain IoU is blind to nesting, and both over-detection
+   families are nested: an **inset** — a character icon drawn on a phone screen
+   inside the main subject, IoU 0.003 — and a **group box** spanning every
+   subject, IoU 0.44 against each member.
+
+   Suppressing on containment looks like the obvious fix and **was measured to
+   be a bad trade**: enabling it broke 34 rows that previously proposed, and an
+   ablation over those rows recovered 32 with the rule off. A *real* second
+   subject is exactly as nested as a group box — one girl in front of another,
+   an embrace, a background figure inside a foreground figure's box — and this
+   corpus has far more of those than group boxes. `--containment_threshold`
+   ships **off** (`1.01`); a surviving group box costs one `count-mismatch`
+   skip, which is the safe direction. Only the inset half is handled
+   automatically, by `--min_area_frac` (0.005 of the canvas) — that costs 2 real
+   but genuinely tiny subjects across the corpus, and buys back the insets.
+4. **Males and open-ended crowds.** `expected` counts girls, but the `girl`
+   prompt picks males up **inconsistently** — it found the boy in 7 of the 19
+   mismatches and missed him in 89 images that passed, so neither counting nor
+   ignoring him works as an equality. The gate is now the range
+   `girls … girls + boys` (`caption_boy_count`; unknown counts like
+   `multiple boys` drop the upper bound). Separately, `6+girls` was parsed as
+   *exactly six* — an open-ended crowd tag no detection can ever match — and now
+   returns `None` like `multiple girls`, deferring to detection.
+
+Whole-corpus result with the shipped settings: **59 of the 102 skips now
+propose, 3 regress** (table above).
+
+**Known residual — fragmentary masks at the low end.** Roughly 6% of instances
+in the recovered 0.35–0.5 band have a broken mask (holes, or a box spanning two
+views of a sheet with the mask covering pieces of both), and the blanked crop
+then feeds the tagger a mix — one maid-outfit view came back as
+`black dress, hood, mask`. Two candidate gates were measured and **both
+refuted**: mask *fill* does not separate them (a clean 0.87-score standing
+figure sits at 0.267 fill, same as the bad ones), and a row/column *gap* metric
+maxes out at 0.106 across all 141 instances because the blobs are diagonally
+offset. `main_frac` (largest connected component / mask) does correlate —
+`frag>1` is 0/35 above score 0.7 versus 8/53 in [0.4, 0.5) — but it also flags
+visually-clean crops whose hair or limbs simply split. No automatic gate is
+shipped; the dry-run report carries a per-detection `score`, and the low-score
+instances are the ones worth eyeballing. `report.json` also now records
+`detections` for **skipped** rows and, with `--crops`, writes a box overlay
+under `crops/_skipped/` — previously the rows most needing review were the only
+ones with no visual evidence at all.
 
 ## Knobs
 
@@ -237,8 +321,10 @@ binds).
 | `--path_pattern` | `*` | fnmatch glob (`\|` to OR) relative to the resized dir |
 | `--crops` | off | Export the mask-blanked crops next to the report |
 | `--prompt` | `girl` | SAM3 subject prompt (`person` sweeps the rare on-screen-boy images) |
-| `--score_threshold` / `--retry_score_threshold` | 0.5 / 0.3 | Detection floor; retry floor when the count undershoots |
+| `--score_threshold` / `--retry_score_threshold` | 0.5 / 0.35 | Detection floor; retry floor when the count undershoots. These are SAM3's **own** confidence floor, not a post-filter — see the skip-triage section |
 | `--iou_threshold` / `--pad` | 0.65 / 0.06 | Dedupe IoU; bbox padding fraction |
+| `--containment_threshold` | 1.01 (off) | Suppress a box this nested inside a kept one (intersection over the *smaller* box). Measured harmful on this corpus — see the triage section before enabling |
+| `--min_area_frac` | 0.005 | Drop detections below this fraction of the image (insets are not subjects) |
 | `--no_blank_crops` | — | Skip mask-blanking (this is what caused probe B's hair-color misses — diagnostic only) |
 | `--row_tol` | 0.25 | Row-clustering gap as a fraction of image height |
 | `--min_instances` / `--max_instances` | 2 / 8 | Instance-count window |
