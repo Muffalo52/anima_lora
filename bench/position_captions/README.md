@@ -1,5 +1,12 @@
 # position_captions — probes for position-aware auto-captioning
 
+> **Both probes came back green and the feature shipped** as
+> `make caption-position` (v2: the caption is rewritten, each bound tag moved
+> out of the flat bag). These are the Phase-0 feasibility probes, kept for the
+> record — the live doc is
+> [`docs/experimental/position_captions.md`](../../docs/experimental/position_captions.md)
+> and the retired design proposal is `_archive/proposals/position_captions.md`.
+
 Feasibility probes for expanding the auto-caption system with per-instance
 positional clauses in the dataset's existing hand-written convention
 (`On the left, akita neru, yellow eyes. On the middle, hatsune miku, …`).
