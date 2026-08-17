@@ -28,9 +28,10 @@ sigma_demote = "1024:896,1024:768"
 make preprocess          # or: make preprocess-vae
 ```
 
-Then train with the shipped recipe (**combo** — the stacked router, each σ
-routed to the deepest grid certified for it). `configs/base.toml` already
-carries the whole recipe behind one boolean, so the usual way in is:
+Then train with the shipped recipe (**combolate** — the stacked router, each σ
+routed to the deepest grid certified for it, with the late spans on).
+`configs/base.toml` already carries the whole recipe behind one boolean, so the
+usual way in is:
 
 ```toml
 # configs/base.toml
@@ -52,19 +53,28 @@ python train.py --method lora --preset default \
   --sigma_lowres_route2 1024:768 \
   --sigma_lowres_threshold2 0.65 \
   --sigma_lowres_threshold2_max 0.95 \
-  --sigma_lowres_yarnsig
+  --sigma_lowres_yarnsig \
+  --sigma_lowres_span late:0.75 \
+  --sigma_lowres_span2 late:0.75
 ```
 
-Per step, that reads: **768 if σ ∈ (0.65, 0.95); elif σ > 0.5 → 896 (+yarnsig);
-else native.** Measured at E16 scale (480 steps, 2 corpora × 3 seeds):
-**−18.3% wall, inside the seed lottery on both corpora** — the best measured
-combination of the two.
+Per step, that reads: **inside the last 75% of training — 768 if σ ∈ (0.65,
+0.95); elif σ > 0.5 → 896 (+yarnsig); else native** — and native throughout the
+first quarter. Measured at E16 scale (480 steps, 2 corpora × 3 seeds): ~**−14%
+wall** at **ΔW 0.75** against a native twin.
 
-Adding `--sigma_lowres_span late:0.75 --sigma_lowres_span2 late` gives
-`combolate`, which trades ~4pp of that throughput for a much closer endpoint
-weight-space footprint (ΔW 0.75 vs 0.37). It is **not** the default: see
-[when to schedule](#when-to-schedule) — on per-step-certified routes the
-schedule bought no render-level improvement and cost speed.
+Clearing both spans gives `combo`, the unscheduled arm — a better −18.3% and
+the best *render*-level footprint measured (inside the seed lottery on both
+corpora), at a much larger weight-space excursion (ΔW 0.37):
+
+```toml
+# configs/base.toml — combo
+sigma_lowres_span  = ""
+sigma_lowres_span2 = ""
+```
+
+Which to pick is a real trade rather than a strict ordering — see
+[when to schedule](#when-to-schedule).
 
 Validation always stays native, so val loss remains comparable across arms.
 
@@ -173,9 +183,9 @@ weight-space read (deterministic twin control: 1.000).
 
 | arm | wall Δ (hews/channel) | render cos (hews/channel) | ΔW cos | vs yardstick 0.9547/0.9541 |
 |---|---|---|---|---|
-| **`combo`** (shipped recipe) | **−18.2% / −18.4%** | 0.9576 / 0.9580 | 0.365 / 0.434 | inside both |
+| `combo` (combolate, spans cleared) | **−18.2% / −18.4%** | 0.9576 / 0.9580 | 0.365 / 0.434 | inside both |
 | `sigma896` (previous σ-gate) | −14.9% / −14.6% | 0.9538 / 0.9641 | 0.365 / 0.432 | boundary hews, inside channel |
-| `combolate` (combo + late spans) | −14.6% / −13.1% | 0.9461 / 0.9664 | 0.753 / 0.771 | **below hews**, inside channel |
+| **`combolate`** (shipped recipe) | −14.6% / −13.1% | 0.9461 / 0.9664 | 0.753 / 0.771 | **below hews**, inside channel |
 | `sigma896late` | −10.1% / −10.6% | 0.9535 / 0.9636 | 0.753 / 0.770 | ≈ `sigma896` |
 | `win768late` (768 window + late, no stack) | −6.1% / −6.3% | **0.9678 / 0.9728** | 0.959 / 0.962 | comfortably inside both |
 | `896only` (gate off) | −31.7% / −30.2% | 0.9494 / 0.9500 | 0.183 / 0.236 | **below both** |
@@ -195,26 +205,31 @@ Reads worth carrying:
 
 ### When to schedule
 
-The span flags exist for the amplification result above, but E16's standing
-verdict is that **scheduling is unnecessary on per-step-certified routes** —
-and the arm table is what settles it:
+**What ships is scheduled**: `configs/base.toml` sets `late:0.75` on both rules,
+so `--sigma_lowres` alone gives `combolate` — the conservative end of the trade,
+biased toward keeping the endpoint weights near a native run (ΔW 0.75 vs 0.37).
+
+E16's render-level evidence points the other way, and it is worth knowing before
+you accept the default:
 
 - `sigma896late ≈ sigma896` at render level, for 4.5pp of throughput.
 - On **hews** (the lenient corpus) `combolate` rendered at 0.9461 against a
   0.9547 yardstick — *below* the lottery, on all three seeds — where the
   unscheduled `combo` was inside on both corpora at a better −18.3%. On
   **channel** `combolate` was comfortably inside (0.9664).
-- So the late schedule bought ΔW closeness and cost throughput **without**
-  improving the render footprint. Since ΔW closeness ≠ render closeness (see
-  the reads above), that is not a trade worth taking by default.
+- So on the measured corpora the late schedule bought ΔW closeness and cost
+  throughput **without** improving the render footprint. Since ΔW closeness ≠
+  render closeness (see the reads above), the shipped default is the *weight-
+  space*-conservative pick, not the render-optimal one.
 
-Reach for spans when the bias is *off-map* — an uncertified route, an
-uncertified σ region, a probe. That is the regime the amplification law
-governs. Concretely:
+Clear both spans for `combo` if you want the render-measured arm and the
+throughput. Beyond that, reach for spans when the bias is *off-map* — an
+uncertified route, an uncertified σ region, a probe. That is the regime the
+amplification law governs. Concretely:
 
 - `combolate` (`--sigma_lowres_span late:0.75 --sigma_lowres_span2 late`) —
-  −13.9%, ΔW 0.75. Pick it if you specifically want the endpoint weights close
-  to a native run and can spend the throughput.
+  −13.9%, ΔW 0.75. The shipped arm. NB the measured arm used the default FRAC
+  on rule 2 (`late` = 0.5) while `base.toml` pins `late:0.75` on both.
 - `win768late` (drop the primary rule, keep `--sigma_lowres_span2 late`) —
   −6%, the max-margin arm (0.9678 / 0.9728). Maximum conservatism.
 
