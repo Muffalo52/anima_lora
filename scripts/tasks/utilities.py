@@ -53,7 +53,7 @@ def cmd_comfy_batch(extra):
             prompts = f"workflows/{prompts}"
         remaining = ["--prompts", prompts, *remaining]
 
-    images_dir = os.environ.get("IMAGES", "../comfy/input/to_colorize")
+    images_dir = os.environ.get("IMAGES", "../comfy/input/to_colorize2")
     if images_dir and "--images_dir" not in remaining:
         remaining = ["--images_dir", images_dir, *remaining]
 

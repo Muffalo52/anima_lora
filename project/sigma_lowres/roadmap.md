@@ -131,6 +131,59 @@ the gate params; comparator is **static yarn**, not PI):
    cannot beat 896's own S1 below the gate (in-band vs reenc at σ≤0.46 is
    reported but not a pass criterion). Gate stays σ>0.5 regardless.
 
+## YaRN/yarnsig on the 1024→768 window **[RUN 2026-08-15 — all three legs FAIL ship criteria; 768 stays plain, family closed at 768]**
+
+Outcome (`bench/results/20260815-1041-yarn768/`, full read in
+`bench/report.md` §"yarnsig on the 1024→768 window"): in-window = no harm
+but no win (both arms within 2 SEM of plain; yarnsig 2.8 SEM *worse* than
+static yarn at σ=0.875 — near-unity μ still discretely reassigns boundary
+bands); endpoint = improvement borderline (yarnsig−768 −0.030, 2.0 SEM)
+but in-band FAIL at 8 SEM (+0.070 over reenc) — `threshold2_max` stays
+0.95; downward = the family's largest paired win (yarn −0.082 / yarnsig
+−0.093 at σ=0.425, ~3 SEM) yet still +0.16–0.18 over reenc (~7 SEM) —
+gap reduction ≠ certification. No rule-2 wiring change; no window change;
+safe set unchanged. Original pre-registration below.
+
+Extends the (otherwise closed) alignment family to the deep route: the
+combo recipe's 1024→768 window (0.65, 0.95) was certified on **plain**
+demotion, and `train.py` deliberately keeps yarnsig primary-only. This
+probe measures whether the banded rope helps 768 at all. NOT a PI
+re-proposal (G11 closed uniform PI at 768 — pi *worse* than plain through
+σ 0.56–0.81; yarn beat PI by 5 SEM at 896 precisely via frequency
+selectivity), and NOT a param search: α,β = 1,4 and (σ_c, γ) = (0.35, 2)
+transported verbatim (rotation counts self-adapt to the 768 extent;
+inside the window μ ≥ ~0.85, near-static — the 768 crossover is *read*
+from this run's paired yarn−768 curve, not searched).
+
+Three σ regions, three separate legs — bins
+`--bins 4 --sigma_window 0.35,0.95 --endpoint_bin` (centers 0.425, 0.575,
+0.725, 0.875, 1.0), arms reenc/768/768yarn/768yarnsig, mirroring
+20260727-1639 otherwise (40 img × 8 draws/bin, soup_sincos adapter):
+
+1. **In-window leg (0.725, 0.875)**: paired {yarn,yarnsig}−768 ≤ 0 or
+   within 2 combined SEM → alignment does no harm where the route is
+   certified (a Phase-1b-style refinement candidate needs a further
+   ≥2 SEM *win* in-window). Any ≥2 SEM regression in-window → **discard
+   for 768 entirely**, route stays plain, family stays closed.
+2. **Endpoint leg (σ=1)**: the window's upper bound exists because the
+   σ=1 gap re-elevates (+0.130). 896yarn/yarnsig both drove the endpoint
+   negative (−0.013/−0.014, best+most-stable arms), so this is the one
+   leg with a favorable precedent. gap_768yarn(sig) at σ=1 in-band vs
+   reenc AND ≥2 SEM better than plain 768 → **upward-widening candidate**
+   (`threshold2_max` → ~1.0); a `--sigma_window 0.85,1.0` refinement
+   localizes the new upper σ\*, and only a rerun Phase-1b CMMD A/B ships
+   it.
+3. **Downward leg (0.425, 0.575)**: expectation LOW — the same leg
+   FAILED at 896 (in-band vs reenc +0.06–0.19, ≥3.4 SEM out, everywhere
+   below the gate). Pre-registered read: in-band vs reenc at either bin →
+   downward-widening candidate; else **downward widening for 768 closes
+   with the family** — no retune owed on this leg.
+
+Ship-gating unchanged regardless of outcome: yarnsig is wired
+primary-only (`train.py` choice==1), so even a pass ships nothing by
+itself — it buys a trainer wiring change (rule-2 yarnsig with its own
+certified window) plus the CMMD A/B, in that order.
+
 ## Phase 1b — trainer wiring **[BUILT 2026-07-26]** + the gate **[OPEN]**
 
 Wiring shipped opt-in (`--sigma_lowres`, route pinned to 1024→896 @ σ>0.5) —

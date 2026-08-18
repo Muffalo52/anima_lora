@@ -4,11 +4,16 @@ One JSON file per job under ``output/daemon/jobs/<id>/job.json`` so the daemon
 survives a restart and can show history. The in-memory job table is the
 authority while running; ``persist()`` mirrors each state change to disk, and
 ``load_all()`` rebuilds the table on boot for the reconciliation sweep.
+
+History is bounded, not infinite: ``prune_jobs()`` runs at boot (before
+``load_all()``) and drops the dirs of long-finished jobs — see its docstring for
+the candidate rules and ``config.JOB_RETENTION_*`` for the knobs.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -160,3 +165,98 @@ def load_all() -> dict[str, Job]:
         except (OSError, ValueError, TypeError):
             continue
     return out
+
+
+def _dir_size(d: Path) -> int:
+    """Bytes under ``d`` (best-effort — a file that vanishes mid-walk is 0)."""
+    total = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def prune_jobs(
+    *,
+    max_age_days: Optional[float] = None,
+    keep_recent: Optional[int] = None,
+    dry_run: bool = False,
+) -> dict:
+    """Delete the job dirs of terminal jobs older than ``max_age_days``.
+
+    The daemon calls this once at boot, *before* ``load_all()``, so a pruned job
+    never enters the in-memory table and can't be resurrected by a later
+    ``persist()``. Also exposed as ``python -m anima_daemon prune`` for a manual
+    sweep (dry-run by default there).
+
+    Deliberately conservative — a job dir is a candidate only when **all** hold:
+
+    - its ``job.json`` parses and its state is terminal (never a queued/running/
+      paused job, and never a dir whose record we couldn't read: an unparseable
+      or missing ``job.json`` might be a submit racing us, so we leave it);
+    - it is older than ``max_age_days`` by ``ended_at`` (falling back to
+      ``submitted_at``, then the dir mtime);
+    - it is not among the ``keep_recent`` newest terminal jobs.
+
+    ``max_age_days=0`` disables pruning entirely. Returns a summary dict
+    ``{scanned, pruned: [ids], kept, freed_bytes, errors}``; ``dry_run`` computes
+    it without deleting. Never raises: a dir we can't remove is counted in
+    ``errors`` and left alone.
+    """
+    days = config.JOB_RETENTION_DAYS if max_age_days is None else max_age_days
+    keep = config.JOB_RETENTION_KEEP if keep_recent is None else keep_recent
+    summary: dict = {
+        "scanned": 0,
+        "pruned": [],
+        "kept": 0,
+        "freed_bytes": 0,
+        "errors": 0,
+        "max_age_days": days,
+        "keep_recent": keep,
+        "dry_run": dry_run,
+    }
+    if days <= 0 or not config.JOBS_DIR.exists():
+        return summary
+
+    now = time.time()
+    cutoff = now - days * 86400.0
+    candidates: list[tuple[float, Path]] = []  # (age-key timestamp, dir)
+    for d in sorted(config.JOBS_DIR.iterdir()):
+        f = d / "job.json"
+        if not f.is_file():
+            continue
+        summary["scanned"] += 1
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("state") not in TERMINAL_STATES:
+            continue
+        ts = data.get("ended_at") or data.get("submitted_at")
+        if not isinstance(ts, (int, float)):
+            try:
+                ts = f.stat().st_mtime
+            except OSError:
+                continue
+        candidates.append((float(ts), d))
+
+    # Newest first, then drop the protected head — the floor applies to terminal
+    # jobs only, which is what the caller means by "keep the recent history".
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    for ts, d in candidates[keep:] if keep > 0 else candidates:
+        if ts >= cutoff:
+            continue
+        size = _dir_size(d)
+        if not dry_run:
+            try:
+                shutil.rmtree(d)
+            except OSError:
+                summary["errors"] += 1
+                continue
+        summary["pruned"].append(d.name)
+        summary["freed_bytes"] += size
+    summary["kept"] = len(candidates) - len(summary["pruned"])
+    return summary

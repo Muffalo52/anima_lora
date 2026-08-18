@@ -6,6 +6,7 @@ Lifecycle verbs, mapped to the guarantees in ``plan.md`` Phase 1:
     daemon-attach     non-owning viewer; ctrl-C detaches only, training lives on
     daemon-kill       abort the running (or JOB=<id>) job, free GPU; daemon stays up
     daemon-terminate  shut the whole daemon down (active job dies too)
+    daemon-prune      delete old terminal job dirs (dry-run unless --apply)
 
 plus the submit/observe front door:
 
@@ -488,6 +489,21 @@ def cmd_daemon_resume(extra):
         print(result["error"], file=sys.stderr)
         sys.exit(1)
     print(f"job {result.get('job_id')} → {result.get('state')} (thawed).")
+
+
+def cmd_daemon_prune(extra):
+    """Delete old terminal job dirs. Dry-run by default; ``ARGS="--apply"`` acts.
+
+    The daemon already sweeps at boot (``jobs.prune_jobs`` from
+    ``manager._reconcile``), so this is for reclaiming space from a daemon that's
+    been up for weeks, or for previewing what the sweep would take. Forwards
+    ``--days`` / ``--keep`` / ``--apply`` / ``--verbose`` straight through.
+    """
+    from anima_daemon import cli as _cli
+
+    rc = _cli.main(["prune", *(extra or [])])
+    if rc:
+        sys.exit(rc)
 
 
 def cmd_daemon_terminate(extra):
