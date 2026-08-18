@@ -437,9 +437,17 @@ class AnimaTrainer:
         loading_dtype = weight_dtype
         loading_device = "cpu" if self.is_swapping_blocks else accelerator.device
 
-        attn_mode = "torch"
-        if args.attn_mode is not None:
-            attn_mode = args.attn_mode
+        from library.runtime.backend import (
+            needs_rocm_attention_fallback,
+            resolve_attention_mode,
+        )
+
+        requested_attn_mode = args.attn_mode
+        attn_mode = resolve_attention_mode(requested_attn_mode, torch)
+        if needs_rocm_attention_fallback(requested_attn_mode, torch):
+            logger.warning(
+                "ROCm detected: using PyTorch SDPA instead of CUDA Flash Attention"
+            )
 
         if attn_mode == "flash4":
             # Flash Attention 4 (flash-attention-sm120) is not supported yet.

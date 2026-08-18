@@ -6,7 +6,7 @@
   <img src="docs/gui.png" alt="Anima LoRA GUI — training-config editor with method/variant picker, inline method help, and live training monitor" width="900">
 </p>
 
-One line — installs [uv](https://astral.sh/uv) and the **CUDA 13.2 toolkit** if missing, fetches the latest release, runs `uv sync` (Python 3.13 + torch), and on Windows opens the GUI (no git required). The installer is published as a signed-by-checksum release asset:
+One line — installs [uv](https://astral.sh/uv), selects NVIDIA CUDA or AMD ROCm on Windows, fetches the latest release, runs `uv sync` (Python 3.13 + torch), and opens the GUI (no git required). The installer is published as a signed-by-checksum release asset:
 
 ```bash
 # Linux / macOS
@@ -17,9 +17,11 @@ curl -LsSf https://github.com/sorryhyun/anima_lora/releases/latest/download/inst
 irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
 ```
 
-> **Requirements:** at least an Ampere GPU (RTX 3000-series / A100 or newer) + NVIDIA driver **≥595**. The installer sets up the **CUDA 13.2 toolkit, Python 3.13, and PyTorch 2.12** for you.
+> **Requirements:** NVIDIA needs at least an Ampere GPU (RTX 3000-series / A100 or newer) and driver **≥595**. The initial Windows ROCm path targets RDNA 4 (`gfx1200` / `gfx1201`) and is certified for Radeon RX 9070 XT. The installer sets up **Python 3.13 + PyTorch 2.12** and either CUDA 13.2 or ROCm 7.14.
 
 Installs into `./anima_lora/` (override with `ANIMA_DIR`). On Windows it also drops an **"Anima LoRA GUI"** shortcut on your desktop.
+
+Windows selects the GPU vendor automatically. Override detection before running the installer with `$env:ANIMA_BACKEND='cuda'` or `$env:ANIMA_BACKEND='rocm'`. ROCm uses PyTorch SDPA for attention and keeps `torch_compile = true`; CUDA keeps the existing Flash Attention path.
 
 <details>
 <summary><b>Safer install</b> — inspect &amp; verify the script before running</summary>
@@ -185,14 +187,20 @@ Adapter families that train something — a LoRA-style delta, a routing head, or
 ### Manual (from a clone)
 
 ```bash
-uv sync                   # Python 3.13 with pre-built flash attention 2
+# Linux / macOS
+uv sync
+
+# Windows: select exactly one backend
+uv sync --extra cuda-windows
+uv sync --extra rocm-windows
+
 hf auth login             # or just sign in from the GUI — auth is built in now
 make download-models      # DiT + Qwen3 TE + QwenImage VAE (+ SAM3 / MIT / PE for masking & image conditioning) into models/
 # place training images in image_dataset/ with .txt caption sidecars
 make gui                  # recommended — config editor + dataset browser + training monitor
 ```
 
-`uv sync` resolves to **torch 2.12 + CUDA 13.2** runtime. The manual clone path does **not** auto-install the CUDA 13.2 **toolkit** (needed for `torch.compile`/Triton) — install it per [guidebook §2](docs/guidelines/guidebook.md#2-cuda-132-handled-by-the-installer), or just run the one-line installer above, which does it for you.
+On Windows, the extras are mutually exclusive so `uv` cannot mix CUDA and ROCm wheels. Reuse the same extra for later manual `uv sync` commands. `make update` remembers the backend selected by the installer. The CUDA manual-clone path does **not** auto-install the CUDA 13.2 **toolkit** (needed for `torch.compile`/Triton) — install it per [guidebook §2](docs/guidelines/guidebook.md#2-cuda-132-handled-by-the-installer), or use the one-line installer above. The ROCm extra uses AMD's official ROCm 7.14 package index and does not install Flash Attention; `triton-windows` remains present because it supplies the Windows runtime used by `torch.compile` on both backends.
 
 > **Anima ships as a uv-locked application environment, not a generic pip package.** `pyproject.toml` pins `python ==3.13.*`, specific torch / flash-attn wheel URLs, and `index-strategy = "unsafe-best-match"` — these are maintainer-chosen, known-good builds. Install with `uv sync` against the committed `uv.lock`; don't `pip install` from `pyproject.toml` (pip won't honor uv's index strategy or the prebuilt flash-attn wheels).
 

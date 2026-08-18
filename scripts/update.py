@@ -32,6 +32,7 @@ import difflib
 import fnmatch
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,46 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _selected_windows_backend() -> str:
+    """Keep the accelerator chosen at install time across release updates."""
+    override = os.environ.get("ANIMA_BACKEND", "").strip().lower()
+    if override in {"cuda", "rocm"}:
+        return override
+
+    marker = ROOT / ".anima_backend"
+    if marker.is_file():
+        saved = marker.read_text(encoding="ascii").strip().lower()
+        if saved in {"cuda", "rocm"}:
+            return saved
+
+    # Existing installs predate the marker. Preserve a working ROCm venv when
+    # possible; otherwise retain the historical CUDA default.
+    python = ROOT / ".venv" / "Scripts" / "python.exe"
+    if python.is_file():
+        try:
+            result = subprocess.run(
+                [str(python), "-c", "import torch; print(bool(torch.version.hip))"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if result.stdout.strip() == "True":
+                return "rocm"
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return "cuda"
+
+
+def _uv_sync_command() -> list[str]:
+    command = ["uv", "sync"]
+    if sys.platform == "win32":
+        command.extend(["--extra", f"{_selected_windows_backend()}-windows"])
+    return command
+
+
 REPO = "sorryhyun/anima_lora"
 MANIFEST_FILE = ROOT / ".anima_release.json"
 BACKUP_ROOT = ROOT / ".anima-update-backups"
@@ -527,9 +568,10 @@ def _apply(
     print(f"\nmanifest updated: {MANIFEST_FILE.name} → {new_tag}")
 
     if not no_sync:
-        print("\nrunning uv sync …")
+        sync_command = _uv_sync_command()
+        print(f"\nrunning {' '.join(sync_command)} …")
         try:
-            subprocess.run(["uv", "sync"], cwd=ROOT, check=True)
+            subprocess.run(sync_command, cwd=ROOT, check=True)
         except FileNotFoundError:
             print("  uv not found on PATH; skip or run `uv sync` manually")
         except subprocess.CalledProcessError as e:
