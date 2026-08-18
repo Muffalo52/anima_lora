@@ -56,10 +56,7 @@ _WINDOW: MainWindow | None = None
 
 
 def _dark(app: QApplication):
-    """Apply the user's chosen named theme (Dark / Light / Sepia).
-
-    Thin wrapper kept for call-site stability; the palette + stylesheet now live
-    in ``gui.theme`` so individual widgets can share the same tokens."""
+    """Apply the user's chosen named theme (Dark / Light / Sepia)."""
     gui_theme.apply_theme(app)
 
 
@@ -70,13 +67,6 @@ class MainWindow(QMainWindow):
         self.resize(1100, 750)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
-
-        # App-wide event filter catches ContextMenu before the target widget so right-click is
-        # uniform everywhere (text widgets would otherwise show Qt's copy/select-all menu).
-        # Removed in closeEvent so a _reload_ui rebuild doesn't stack filters.
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
 
         central = QWidget()
         main_lay = QVBoxLayout(central)
@@ -117,10 +107,7 @@ class MainWindow(QMainWindow):
         self.update_btn.setToolTip(t("update_btn_tooltip"))
         self.update_btn.clicked.connect(lambda: open_update_dialog(self))
         lang_bar.addWidget(self.update_btn)
-        # Background check — paints the button amber + "Update ●" when a newer
-        # release exists. Skips silently when .anima_release.json is missing
-        # (no baseline → can't tell if user is already current) and reuses the
-        # 6h gui_settings.json cache so launches don't hit GitHub each time.
+        # Background check; paints the button amber when a newer release exists.
         self._update_check_thread = check_for_update_async(
             self, self._show_update_available
         )
@@ -132,7 +119,7 @@ class MainWindow(QMainWindow):
         )
         lang_bar.addWidget(self.issues_btn)
 
-        # Top-bar toggle, not a tab: the daemon job queue is global (spans every method); overlays are mutually exclusive.
+        # Top-bar toggle, not a tab: the daemon job queue is global; overlays are mutually exclusive.
         self.queue_btn = QPushButton(t("tab_queue"))
         self.queue_btn.setCheckable(True)
         self._queue_idle_style = gui_theme.nav_button_qss("queue")
@@ -140,7 +127,7 @@ class MainWindow(QMainWindow):
         self.queue_btn.toggled.connect(self._toggle_queue_view)
         lang_bar.addWidget(self.queue_btn)
 
-        # Top-bar toggle, not a tab: the run list is shared across every method (one global view).
+        # Top-bar toggle, not a tab: the run list is global, shared across every method.
         self.tensorboard_btn = QPushButton(t("tab_tensorboard"))
         self.tensorboard_btn.setCheckable(True)
         self._tensorboard_idle_style = gui_theme.nav_button_qss("tensorboard")
@@ -155,9 +142,8 @@ class MainWindow(QMainWindow):
         lang_bar.addWidget(self.settings_btn)
         main_lay.addLayout(lang_bar)
 
-        # Overlays share a QStackedWidget with the tab set; all widgets stay alive across switches
-        # so subprocess state and log buffers survive toggling. ConfigTab and MethodsTab both hold
-        # a reference to this shared panel's `.panel` to sync the log dir on variant switch / launch.
+        # Overlays share a QStackedWidget with the tab set; all widgets stay alive
+        # across switches so subprocess state and log buffers survive toggling.
         self._tb_tab = TensorBoardTab()
 
         # Built before ConfigTab so the Train auto-chain can flush this tab's
@@ -165,9 +151,7 @@ class MainWindow(QMainWindow):
         self._preprocess_tab = PreprocessingTab()
 
         self.tabs = QTabWidget()
-        # The Config tab is a MethodsTab picker over the shipped LoRA family plus
-        # the (now promoted) Turbo distiller; the Experimental tab is the same
-        # wrapper over the research methods + the soup pipeline.
+        # Config = MethodsTab over the shipped LoRA family + Turbo distiller.
         self.tabs.addTab(
             MethodsTab(
                 tb_panel=self._tb_tab.panel,
@@ -178,16 +162,14 @@ class MainWindow(QMainWindow):
             t("tab_config"),
         )
         self.tabs.addTab(self._preprocess_tab, t("tab_preprocess"))
-        # Every tab after the initial (Config) one is a LazyTabHolder: the real
-        # tab — widget tree, KB preload thread, daemon reattach — is built on
-        # first open, keeping the launch path to Config + Preprocess only.
+        # Every tab after Config is a LazyTabHolder: built on first open, keeping
+        # the launch path to Config + Preprocess only.
         self._image_tab = LazyTabHolder(
             lambda: ImageViewerTab(preprocess_tab=self._preprocess_tab)
         )
         self.tabs.addTab(self._image_tab, t("tab_images"))
         self.tabs.addTab(LazyTabHolder(MergeTab), t("tab_merge"))
-        # MethodsTab folds every trainable experimental method behind one dropdown; EasyControl keeps
-        # a dedicated tab because it has its own preprocess/dataset lifecycle.
+        # EasyControl keeps a dedicated tab (own preprocess/dataset lifecycle).
         self.tabs.addTab(
             LazyTabHolder(
                 lambda: MethodsTab(
@@ -208,8 +190,7 @@ class MainWindow(QMainWindow):
         self.tab_stack.addWidget(self._queue_tab)
         main_lay.addWidget(self.tab_stack)
 
-        # Live GPU utilisation/VRAM footer, always visible below the tab set
-        # (so it sits beneath the Config tab's CLI/log panel).
+        # Live GPU utilisation/VRAM footer, always visible below the tab set.
         self._gpu_bar = GpuStatusBar()
         main_lay.addWidget(self._gpu_bar)
         self.setCentralWidget(central)
@@ -217,27 +198,33 @@ class MainWindow(QMainWindow):
         self._update_tensorboard_btn_style(False)
         self._update_queue_btn_style(False)
 
+        # App-wide filter for uniform right-click + wrapped tooltips. Must install
+        # LAST, after the tree is built: it only handles ContextMenu/ToolTip (can't
+        # fire before the window is shown), but installed earlier it would also see
+        # every construction-time event (ChildAdded/Polish/...) — ~82k Python
+        # round-trips per launch, measurably slowing startup. Removed in closeEvent
+        # so a _reload_ui rebuild doesn't stack filters.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
     def closeEvent(self, event):
-        # Drop the app-wide context-menu filter so a _reload_ui rebuild doesn't leave a dead window filtering events.
+        # Drop the app-wide filter so a _reload_ui rebuild doesn't leave a dead window filtering events.
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
-        # Without this, closing the window leaves training subprocesses
-        # (accelerate → train.py) orphaned and still holding VRAM.
+        # Without this, closing the window leaves training subprocesses orphaned, still holding VRAM.
         for i in range(self.tabs.count()):
             cleanup = getattr(self.tabs.widget(i), "cleanup_subprocess", None)
             if callable(cleanup):
                 cleanup()
-        # The shared TensorBoard + Queue views live in the stack, not a tab set.
         self._tb_tab.cleanup_subprocess()
         self._queue_tab.cleanup_subprocess()
         self._gpu_bar.cleanup()
         super().closeEvent(event)
 
     def _reload_image_tab_kb(self) -> None:
-        """Refresh the Images tab's tag KB after a Models-dialog download. A
-        not-yet-built (lazy) Images tab needs nothing — it reads the fresh CSV
-        when first opened."""
+        """Refresh the Images tab's tag KB after a Models-dialog download."""
         if self._image_tab.inner is not None:
             self._image_tab.inner.reload_tag_knowledge_base()
 
@@ -247,8 +234,7 @@ class MainWindow(QMainWindow):
         self.update_btn.setStyleSheet(gui_theme.nav_button_qss("update"))
 
     def _clear_overlay_toggle(self, btn: QPushButton, style_fn) -> None:
-        """Silently un-check an overlay toggle (TensorBoard / Queue) and repaint
-        it, without re-firing its toggled handler."""
+        """Silently un-check an overlay toggle without re-firing its handler."""
         if btn.isChecked():
             btn.blockSignals(True)
             btn.setChecked(False)
@@ -257,7 +243,6 @@ class MainWindow(QMainWindow):
 
     def _toggle_tensorboard(self, on: bool):
         if on:
-            # TensorBoard and Queue are mutually-exclusive overlays.
             self._clear_overlay_toggle(self.queue_btn, self._update_queue_btn_style)
             self.tab_stack.setCurrentWidget(self._tb_tab)
         else:
@@ -271,7 +256,6 @@ class MainWindow(QMainWindow):
 
     def _toggle_queue_view(self, on: bool):
         if on:
-            # Queue and TensorBoard are mutually-exclusive overlays.
             self._clear_overlay_toggle(
                 self.tensorboard_btn, self._update_tensorboard_btn_style
             )
@@ -286,12 +270,9 @@ class MainWindow(QMainWindow):
         )
 
     def eventFilter(self, obj, event):  # noqa: N802 — Qt event handler name
-        """Intercept every right-click in the app and show our menu instead of
-        the target widget's default one (text widgets ship a copy/select-all
-        menu we want to override). Returning True consumes the event.
-
-        Also re-shows long plain tooltips wrapped to a bounded width so they
-        render as a readable multi-line box instead of one screen-wide strip."""
+        """Intercept every right-click to show our menu instead of the target
+        widget's default one, and re-show long tooltips wrapped to a bounded
+        width."""
         if event.type() == QEvent.ContextMenu:
             self._show_context_menu(event.globalPos())
             return True
@@ -305,9 +286,8 @@ class MainWindow(QMainWindow):
 
     def _show_context_menu(self, global_pos):
         """Walk up from the widget under the cursor; the first ancestor exposing
-        a callable ``app_context_menu(target, global_pos)`` gets to supply the
-        menu (e.g. the dataset image view → open-in-system-viewer). If none does
-        — or it declines by returning None — fall back to the app default."""
+        a callable ``app_context_menu(target, global_pos)`` supplies the menu,
+        else fall back to the app default."""
         target = QApplication.widgetAt(global_pos)
         w = target
         while w is not None:
@@ -345,13 +325,9 @@ class MainWindow(QMainWindow):
             self._reload_ui()
 
     def _reload_ui(self):
-        """Rebuild the main window in place to apply a language or theme change —
-        every string and per-widget theme token is resolved at construction, so a
-        fresh window is the cleanest way to re-render. The daemon owns running
-        jobs, so only local UI
-        state (unsaved edits, overlay subprocesses) resets; closeEvent reaps
-        the old window's TensorBoard/Queue children as usual. New window is
-        shown before the old closes so quitOnLastWindowClosed never fires."""
+        """Rebuild the main window in place to apply a language/theme change.
+        The daemon owns running jobs, so only local UI state resets. New window
+        is shown before the old closes so quitOnLastWindowClosed never fires."""
         global _WINDOW
         new = MainWindow()
         new.setGeometry(self.geometry())
@@ -362,11 +338,7 @@ class MainWindow(QMainWindow):
 
 def _ensure_source_image_dir() -> None:
     """Create the training source dir on launch so first-time users hit an
-    empty folder rather than a confusing "no images found" error from the
-    preprocess pipeline. Path comes from `source_image_dir` (now in
-    configs/preprocess.toml; a legacy copy in base.toml still wins, mirroring
-    load_path_overrides); falls back to `image_dataset/`.
-    """
+    empty folder rather than a confusing "no images found" error."""
     src = "image_dataset"
     # Read order matches load_path_overrides' precedence: a legacy base.toml key (read second) wins.
     for fname in ("preprocess.toml", "base.toml"):
@@ -392,8 +364,8 @@ def main():
     load_language()
     _ensure_source_image_dir()
     gui_theme._prefer_cleartype_font_engine()
-    # Pass fractional display scaling (125%/150%) through instead of snapping to 100%/200%
-    # (tiny text on HiDPI Windows). Must be set before QApplication is constructed.
+    # Pass fractional display scaling through (tiny text on HiDPI Windows otherwise).
+    # Must be set before QApplication is constructed.
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -401,18 +373,13 @@ def main():
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     _dark(app)
-    # Reflect the persisted "Debug mode" setting into the env *before* the daemon
-    # is spawned below, so a freshly-started daemon logs at DEBUG (see
-    # anima_daemon/__main__._setup_logging).
+    # Set before the daemon spawns below so a fresh daemon logs at DEBUG.
     if get_setting("debug_mode", False):
         os.environ["ANIMA_DEBUG"] = "1"
     global _WINDOW
     _WINDOW = MainWindow()
     _WINDOW.show()
-    # Bring the local training daemon up at launch (idempotent). Deferred to after
-    # the first paint via singleShot(0) so a cold-start daemon boot (process spawn
-    # + /health poll) runs in the background instead of blocking the window from
-    # appearing. Best-effort: a failure never surfaces here — the Train button's
-    # own ensure_daemon() does the real wait-for-health when a job is submitted.
+    # Deferred so a cold-start daemon boot doesn't block the window from appearing.
+    # Best-effort: the Train button's own ensure_daemon() does the real wait-for-health.
     QTimer.singleShot(0, gui_daemon.ensure_daemon_quietly)
     sys.exit(app.exec())

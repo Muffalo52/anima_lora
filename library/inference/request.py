@@ -20,18 +20,16 @@ the only one::
     latent = generate(args, get_generation_settings(args))
 
 ``to_args()`` feeds ``to_argv()`` through ``library.inference.args.build_default_args``
-(the parser ``inference.parse_args`` itself delegates to) rather than
-hand-building a namespace, so the **parser stays the single source of truth
-for every default** the generation code reads via ``getattr`` — this dataclass
-only carries the knobs an embedder commonly sets, and the long tail
+(the parser ``inference.parse_args`` itself delegates to) so the **parser
+stays the single source of truth for every default** — this dataclass only
+carries the knobs an embedder commonly sets, and the long tail
 (spectrum / ip-adapter / … sub-knobs) rides through ``extra_argv``.
 
-The request is frozen and ``generate()`` does not write back to the namespace
-``to_args()`` returns, so one ``GenerationRequest`` is safe to reuse across seeds
-(build a fresh namespace per call). When ``seed`` is unset, ``generate()``
-resolves a fresh random seed per call via ``resolve_seed(args)`` without storing
-it — call ``resolve_seed`` yourself (and assign ``args.seed``) if you need the
-concrete seed for saving.
+The request is frozen, and ``generate()`` doesn't write back to the namespace
+``to_args()`` returns, so one ``GenerationRequest`` is safe to reuse across
+calls (build a fresh namespace per call). When ``seed`` is unset, ``generate()``
+resolves a fresh random seed per call without storing it — call
+``resolve_seed(args)`` yourself if you need the concrete seed for saving.
 """
 
 from __future__ import annotations
@@ -40,9 +38,9 @@ import argparse
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence, Tuple, Union
 
-# The parser requires --text_encoder and --save_path. Inject these placeholders
-# in to_argv() when the request leaves them unset, so latent-only / non-saving
-# requests still build a valid namespace. A real generation must set them.
+# the parser requires --text_encoder and --save_path; inject placeholders
+# when unset so latent-only / non-saving requests still build a valid
+# namespace (a real generation must set them)
 _PLACEHOLDER_TEXT_ENCODER = "__unset_text_encoder__"
 _PLACEHOLDER_SAVE_PATH = "__unset_save_path__"
 
@@ -90,9 +88,8 @@ class GenerationRequest:
     output_type: str = "images"
     no_metadata: bool = False
 
-    # Verbatim CLI tokens appended after the structured fields, for the long
-    # tail this dataclass doesn't model (e.g. ["--spectrum", "--smc_cfg"]).
-    # Anything here overrides the same flag above.
+    # verbatim CLI tokens for the long tail this dataclass doesn't model
+    # (e.g. ["--spectrum", "--smc_cfg"]); overrides the same flag above
     extra_argv: Sequence[str] = field(default_factory=tuple)
 
     def to_argv(self) -> list[str]:

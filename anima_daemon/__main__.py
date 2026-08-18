@@ -1,16 +1,13 @@
 """Daemon process entry point: ``python -m anima_daemon [port]``.
 
-This is the long-lived, console-detached process that ``make daemon`` spawns.
-It takes the single-daemon lock (pidfile ``(pid, create_time)``; a live sibling
-that already answers ``/health`` on the port also makes us stand down), binds
-the preferred port — falling back to an ephemeral one if a *stranger* holds it
-— reconciles ``jobs/`` from any previous run, then serves until
-``POST /shutdown``.
+The long-lived, console-detached process ``make daemon`` spawns: takes the
+single-daemon lock, binds the preferred port (falling back to an ephemeral
+one if a stranger holds it), reconciles ``jobs/``, then serves until
+``POST /shutdown``. See ``anima_daemon/README.md``.
 
-A first argument that names a client verb (``submit`` / ``wait`` / ``status``,
-see ``cli.py``) instead dispatches to that verb and exits — the CLI front door
-for talking *to* a daemon. Anything else is still parsed as the port, so
-``python -m anima_daemon 8765`` keeps meaning "serve".
+A first argument naming a client verb (``submit``/``wait``/``status``, see
+``cli.py``) dispatches to that verb and exits instead — the CLI front door
+for talking *to* a daemon. Anything else is parsed as the port.
 """
 
 from __future__ import annotations
@@ -26,9 +23,8 @@ from .server import serve_with_fallback
 
 def _setup_logging() -> None:
     config.ensure_state_dirs()
-    # ANIMA_DEBUG (set by the GUI's "Debug mode" setting before it spawns us)
-    # turns on DEBUG-level logging so daemon.log captures the launch/queue
-    # decisions a bug report needs.
+    # ANIMA_DEBUG (GUI "Debug mode") turns on DEBUG logging so daemon.log
+    # captures the launch/queue decisions a bug report needs.
     level = logging.DEBUG if os.environ.get("ANIMA_DEBUG") else logging.INFO
     logging.basicConfig(
         level=level,
@@ -38,9 +34,8 @@ def _setup_logging() -> None:
 
 
 def main() -> int:
-    # Client verbs run *before* logging setup: they must print JSON on stdout and
-    # nothing else. They don't start or drive a daemon (`prune` is the one that
-    # touches the state dirs, read-mostly and daemon-independent by design).
+    # Client verbs run before logging setup: they must print only JSON to
+    # stdout, and don't start or drive a daemon.
     if len(sys.argv) > 1 and sys.argv[1] in cli.VERBS:
         return cli.main(sys.argv[1:])
 
@@ -67,18 +62,13 @@ def main() -> int:
     manager = JobManager()
     manager.start()
 
-    # Fingerprint the source we're booting with (Phase 0a): recorded in the
-    # pidfile + /health so a client that has since edited anima_daemon/* can
-    # detect it's talking to stale code and eagerly restart us. Computed once,
-    # here — /health must echo the BOOT value, never re-hash the (possibly newer)
-    # on-disk files, or the staleness check would always agree with itself.
+    # Fingerprint the source we're booting with, recorded in the pidfile +
+    # /health so a client can detect stale code and restart us (see
+    # config.source_fingerprint). Computed once — /health must echo the BOOT
+    # value, never re-hash on-disk files, or staleness would always agree.
     fingerprint = config.source_fingerprint()
 
     try:
-        # Falls back to an ephemeral port if a stranger holds the preferred one,
-        # but re-raises (→ exit 3) if a sibling anima daemon already owns it, so
-        # a startup race can't produce two daemons. The bound port is written to
-        # the pidfile below; clients re-resolve it from there.
         server = serve_with_fallback(manager, port=port, fingerprint=fingerprint)
     except OSError as exc:
         log.error("could not bind 127.0.0.1:%s (%s); another anima daemon?", port, exc)
@@ -92,10 +82,8 @@ def main() -> int:
         root=config.ROOT,
         fingerprint=fingerprint,
     )
-    # Mirror to a stable per-user path so a ComfyUI trainer node installed
-    # *outside* this checkout can discover us (and our bound port) without
-    # knowing the repo location. Best-effort: a read-only home dir shouldn't
-    # stop the daemon from serving in-repo clients.
+    # Mirror to a stable per-user path so a standalone install can discover us
+    # without knowing the repo location. Best-effort.
     try:
         proc.write_pidfile(
             config.global_pidfile(),

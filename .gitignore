@@ -1,4 +1,5 @@
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 .venv
@@ -35,8 +36,10 @@ output_temp/
 results
 logs
 _logs/
-.claude
+.claude/*
+!.claude/skills/
 .env
+.anima_backend
 .anima-update-backups
 node.zip
 _archive/
@@ -56,3 +59,7 @@ project/*/paper/*.log
 project/*/paper/*.blg
 # paper_bench = pure run artifacts (~15 GB, no scripts/docs; nothing ever tracked)
 project/sigma_lowres/paper_bench/
+bench/cjk_adapter/assets/
+bench/cjk_distill/assets/
+project/cjk_aware_anima/datasets/assets/
+

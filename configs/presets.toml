@@ -1,12 +1,3 @@
-# Hardware / run-scope presets — the middle layer of the merge chain
-# (base.toml → presets.toml[<preset>] → methods/<method>.toml → CLI).
-#
-# `[<name>.gui]` sub-tables are display metadata for the GUI preset picker
-# (stripped from the merge — see _METADATA_CONFIG_SECTIONS in
-# library/config/io.py). Only `group = "hardware"` sections appear in the
-# GUI's Hardware dropdown; data-scope presets ([half] etc.) stay CLI-only —
-# the GUI exposes sample_ratio / artists_shard as plain form fields instead.
-
 [default]
 blocks_to_swap = 0
 
@@ -17,8 +8,8 @@ description = "No memory-saving tricks — fastest when the model fits."
 order = 10
 
 [low_vram]
-gradient_checkpointing = true # only triggered when low_vram was set
-unsloth_offload_checkpointing = true  # only triggered when low_vram was set
+gradient_checkpointing = true
+unsloth_offload_checkpointing = true
 
 [low_vram.gui]
 group = "hardware"

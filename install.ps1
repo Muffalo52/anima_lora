@@ -2,7 +2,8 @@
 #
 #   irm https://raw.githubusercontent.com/sorryhyun/anima_lora/main/install.ps1 | iex
 #
-# Installs uv if missing, guides the CUDA 13.2 toolkit install if missing,
+# Installs uv if missing, selects CUDA or ROCm, guides the CUDA 13.2 toolkit
+# install if needed,
 # downloads the latest release tarball (no git required), seeds the update
 # baseline so the first `make update` is clean, and runs `uv sync`. Mirrors
 # scripts/update.py — keep the two in sync.
@@ -10,16 +11,42 @@
 # Options (env vars, since args don't pass through `irm | iex`):
 #   $env:ANIMA_VERSION    = 'v1.4.0'   install a specific tag   (default: latest)
 #   $env:ANIMA_DIR        = 'C:\path'  target directory         (default: .\anima_lora)
+#   $env:ANIMA_BACKEND    = 'auto'     auto | cuda | rocm        (default: auto)
 #   $env:ANIMA_SKIP_CUDA  = '1'        skip the CUDA 13.2 toolkit install/check
 
 $ErrorActionPreference = 'Stop'
 $Repo    = 'sorryhyun/anima_lora'
 $Version = $env:ANIMA_VERSION
 $Dir     = if ($env:ANIMA_DIR) { $env:ANIMA_DIR } else { 'anima_lora' }
+$Backend = if ($env:ANIMA_BACKEND) { $env:ANIMA_BACKEND.ToLowerInvariant() } else { 'auto' }
 
 function Say($m)  { Write-Host "==> $m" -ForegroundColor Cyan }
 function Die($m)  { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
 function Warn($m) { Write-Host "warning: $m" -ForegroundColor Yellow }
+
+if ($Backend -notin @('auto', 'cuda', 'rocm')) {
+  Die "ANIMA_BACKEND must be auto, cuda, or rocm (got '$Backend')"
+}
+
+if ($Backend -eq 'auto') {
+  try {
+    $gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
+      ForEach-Object { "$($_.Name) $($_.AdapterCompatibility)" })
+  } catch {
+    $gpuNames = @()
+    Warn 'GPU vendor detection failed; preserving the CUDA default'
+  }
+  $hasNvidia = [bool]($gpuNames -match '(?i)NVIDIA')
+  $hasAmd = [bool]($gpuNames -match '(?i)AMD|Advanced Micro Devices|Radeon')
+  if ($hasNvidia) {
+    $Backend = 'cuda' # Preserve the existing default on mixed-vendor systems.
+  } elseif ($hasAmd) {
+    $Backend = 'rocm'
+  } else {
+    $Backend = 'cuda'
+  }
+}
+Say "selected $Backend backend (override with ANIMA_BACKEND=auto|cuda|rocm)"
 
 # 0. neutralize an active Conda env (GH #21) ---------------------------------
 # With `conda activate base` live, conda's Library\bin sits on PATH. uv builds
@@ -69,7 +96,9 @@ function Test-Cuda132 {
   }
   try { return [bool]((& $nvcc --version 2>$null) -match 'release 13\.2([^0-9]|$)') } catch { return $false }
 }
-if ($env:ANIMA_SKIP_CUDA) {
+if ($Backend -eq 'rocm') {
+  Say 'ROCm selected - skipping the NVIDIA CUDA toolkit check'
+} elseif ($env:ANIMA_SKIP_CUDA) {
   Say 'ANIMA_SKIP_CUDA set — skipping the CUDA 13.2 toolkit check'
 } elseif (Test-Cuda132) {
   Say 'CUDA 13.2 toolkit detected'
@@ -148,6 +177,10 @@ try {
 
 Set-Location $Dir
 
+# Persist the install choice for scripts/update.py. This local file is ignored
+# by git and survives release updates.
+Set-Content -LiteralPath '.anima_backend' -Value $Backend -Encoding ascii
+
 # 4. seed the update baseline (before uv sync, so .venv isn't hashed) --------
 Say 'seeding update baseline (.anima_release.json)'
 try {
@@ -171,10 +204,11 @@ try {
   # not elevated, third-party AV, or Defender disabled -- retry loop handles it
 }
 
-Say 'running uv sync (this resolves torch + flash-attn; may take a while)'
+$BackendExtra = if ($Backend -eq 'rocm') { 'rocm-windows' } else { 'cuda-windows' }
+Say "running uv sync --extra $BackendExtra (may take a while)"
 $syncOk = $false
 for ($attempt = 1; $attempt -le 3; $attempt++) {
-  uv sync
+  uv sync --extra $BackendExtra
   if ($LASTEXITCODE -eq 0) { $syncOk = $true; break }
   if ($attempt -lt 3) {
     Say "uv sync failed (exit $LASTEXITCODE); retrying ($attempt/2) in 3s -- often a transient antivirus lock on a trampoline .exe"
@@ -199,6 +233,12 @@ trampoline .exe files. To fix:
      'uv sync', then turn it back on.
 "@ -ForegroundColor Yellow
   Die 'dependency install incomplete'
+}
+
+if ($Backend -eq 'rocm') {
+  Say 'verifying the ROCm PyTorch runtime'
+  uv run --extra rocm-windows python scripts/rocm_smoke_test.py
+  if ($LASTEXITCODE -ne 0) { Die 'ROCm PyTorch smoke test failed' }
 }
 
 # 6. shortcuts (best-effort — never abort the install over this) -------------

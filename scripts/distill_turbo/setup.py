@@ -1,17 +1,13 @@
 """Turbo distillation run construction — everything built before the step loop.
 
-``build_run`` owns the whole one-time setup of a DP-DMD run: the compile-storm
-guards, the DiT + adapter stack, warm-start / crash-resume, the three
-optimizer/scheduler pairs, the dataloader, the config snapshot + progress sink,
-the two per-forward closures, and the fake-critic head-start. It returns a
-:class:`RunContext` bundling every object the per-step loop (``distill.run_loop``)
-reads or mutates.
+``build_run`` builds the DiT + adapter stack, warm-start/crash-resume, the
+three optimizer/scheduler pairs, the dataloader, and the per-forward closures,
+returning a :class:`RunContext` that ``distill.run_loop`` reads/mutates.
 
-This is a pure extraction of the former ``distill.main`` setup block — the order
-of every construction step is load-bearing (harness ordering invariant:
-block-swap → grad-ckpt → apply_to → compile; compile-limit pinned before the
-first trace; resume applied only once every mutable object exists) and is kept
-verbatim. See the inline comments for the individual gotchas.
+Pure extraction of the former ``distill.main`` setup block. Construction order
+is load-bearing (block-swap → grad-ckpt → apply_to → compile; compile-limit
+pinned before the first trace; resume applied only once every mutable object
+exists) and is kept verbatim — see inline comments for the individual gotchas.
 """
 
 from __future__ import annotations
@@ -73,11 +69,9 @@ _LATENT_RES_RE = re.compile(r"_(\d{3,4})x(\d{3,4})_anima\.npz$")
 def _cached_token_counts(data_dir: str) -> set:
     """Distinct token counts present in the cached latents under ``data_dir``.
 
-    Self-describing compile budget (mirrors ``train.py::_derive_token_budget``):
-    the on-disk caches are the source of truth for which tiers the distillation
-    pool spans, so the dynamo cache is sized from what's really there rather than
-    from ``target_res``. Parses the pixel (W, H) out of each paired latent's
-    filename (no per-file I/O), so it tracks the actual training sample set.
+    Mirrors ``train.py::_derive_token_budget``: caches are the source of truth
+    for which tiers are present, not ``target_res``. Parses (W, H) out of each
+    latent's filename (no per-file I/O).
     """
     from library.io.cache import discover_cached_pairs
 
@@ -154,24 +148,20 @@ class RunContext:
 def build_run(args, cfg: TurboConfig) -> RunContext:
     """Construct the full DP-DMD run state and return it as a ``RunContext``.
 
-    Verbatim extraction of the former ``main`` setup block: every step keeps its
-    original order (see module docstring for why the ordering is load-bearing).
+    Verbatim extraction of the former ``main`` setup block — every step keeps
+    its original order (see module docstring for why that's load-bearing).
     """
     torch.manual_seed(cfg.seed)
     device, dtype = resolve_device_dtype()
 
-    # Compile-storm guard: pin the recompile budget + intra-op thread count BEFORE
-    # any block._forward traces. The turbo loop drives one compiled graph under
-    # many global states per step (grad_mode × requires_grad × view × token
-    # families), so the stock per-frame limit of 8 spills to eager mid-run.
-    # _pin_dynamo_limit is CONTEXT-PINNED (sets the ContextVar's global default) so
-    # it survives into the backward/AOTAutograd compile context — a plain
-    # config.recompile_limit = 64 reverts to 8 at the first grad forward.
-    # set_num_threads force-inits torch's intra-op pool NOW so the count is
-    # constant: a lazy mid-run flip is a GLOBAL_STATE guard (recompiles every
-    # {grad_mode, view} graph again) AND the CheckpointError trigger for the GAN
-    # grad-ckpt path (see selective_block_grad_ckpt). The later model-aware raise
-    # refines accumulated_recompile_limit; both writes idempotent via max().
+    # Compile-storm guard: pin recompile budget + intra-op thread count BEFORE any
+    # block._forward traces (many global states/step spill the default limit=8 to
+    # eager). _pin_dynamo_limit is CONTEXT-PINNED so it survives into backward —
+    # a plain config.recompile_limit assignment reverts at the first grad forward.
+    # set_num_threads must be forced now: a later flip is a GLOBAL_STATE guard
+    # (recompiles everything) and a CheckpointError trigger under GAN grad-ckpt
+    # (see selective_block_grad_ckpt). The later model-aware raise only refines
+    # accumulated_recompile_limit; both writes are idempotent via max().
     if cfg.torch_compile:
         _pin_dynamo_limit("recompile_limit", cfg.dynamo_recompile_limit)
     torch.set_num_threads(torch.get_num_threads())
@@ -185,16 +175,14 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         dit_weight_dtype=dtype,
     )
 
-    # Block swap (per-forward prepare hook done at each forward call below).
-    # compile_dit_blocks is deferred until AFTER the student/fake apply_to below
-    # (see the COMPILE LAST note further down) — order: block-swap → grad-ckpt →
-    # apply_to → compile, matching library/runtime/harness.py.
+    # Block swap; compile_dit_blocks deferred until after apply_to (COMPILE LAST
+    # note below) — order: block-swap → grad-ckpt → apply_to → compile.
     place_dit_for_training(model, device, blocks_to_swap=cfg.blocks_to_swap)
     enable_training_grad_ckpt(model, enabled=cfg.grad_ckpt)
 
-    # GAN feature tap (idea 1): resolve the tapped block (−1 → middle) and hand
-    # the index set to TurboDMDNetwork so it builds the disc + block hooks. Off
-    # when weight_gen == 0 (gan_indices=None → byte-identical DP-DMD).
+    # GAN feature tap: resolve the tapped block (−1 → middle) and hand the index
+    # set to TurboDMDNetwork to build the disc + block hooks. gan_indices=None
+    # when weight_gen==0 → byte-identical DP-DMD.
     gan_on = cfg.gan_loss_weight_gen > 0.0
     gan_indices = None
     if gan_on:
@@ -236,11 +224,9 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     for bank in turbo.fake_banks:
         bank.to(device=device, dtype=dtype)
 
-    # Crash-resume: the bundle carries the student/fake/disc weights the run died
-    # with, so it supersedes the warm start entirely — seeding from the init LoRA
-    # first would just be an SVD we immediately overwrite. Resolved here (before
-    # the networks are populated) so a bad --resume fails fast, and applied after
-    # the optimizers/schedulers exist.
+    # Crash-resume supersedes warm start entirely (seeding then overwriting would
+    # waste an SVD). Resolved here so a bad --resume fails fast; applied later
+    # once the optimizers/schedulers exist.
     resume_state = None
     if cfg.resume:
         arg = resolve_resume_arg(cfg.resume, cfg.output_dir, cfg.output_name)
@@ -278,13 +264,11 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     if turbo.disc is not None:
         turbo.disc.to(device=device)
 
-    # COMPILE LAST — student/fake apply_to (in TurboDMDNetwork above) have
-    # monkey-patched the targeted Linears, so torch.compile traces the adapter
-    # forward chain, not the bare DiT (the harness ordering invariant).
-    # compile_dynamic_seq (mirrors LoRA training): collapse per-token-count graphs
-    # to one symbolic-seq graph. Size the seq bound + dynamo cache from the token
-    # families actually in the cached pool (self-describing, like train.py;
-    # target_res is preprocess-only). Explicit cfg.target_res still overrides.
+    # COMPILE LAST: apply_to above monkey-patches Linears, so compile must trace
+    # the adapter forward, not the bare DiT (harness ordering invariant).
+    # dynamic_seq collapses per-token-count graphs to one symbolic-seq graph,
+    # sized from the token families actually in the cached pool (self-describing,
+    # like train.py); explicit cfg.target_res still overrides.
     n_token_families = None
     seq_range = None
     if cfg.target_res:
@@ -300,24 +284,19 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         if counts:
             n_token_families = len(counts)
             seq_range = (min(counts), max(counts))
-    # Free-fit fail-safe (mirrors train.py's auto-enable, which never reaches this
-    # bespoke loop — project_daemon_wiring_pattern): a free-fit pool lands many
-    # distinct token counts inside one tier's band, so the static per-count compile
-    # cascade would explode + poison the compile cache. Detect it self-describing
-    # off the cache and force dynamic_seq (cfg is frozen → local override).
+    # Free-fit fail-safe (train.py's auto-enable never reaches this bespoke loop):
+    # a free-fit pool spans many token counts, which would explode the static
+    # compile cascade — detect off the cache and force dynamic_seq (cfg is
+    # frozen → local override).
     dynamic_seq = cfg.compile_dynamic_seq
     if cfg.torch_compile and not dynamic_seq:
-        # Scan the cache only on the static path (the helper short-circuits when
-        # dynamic_seq is already on, but the arg is eager — keep the guard cheap).
         dynamic_seq = ensure_dynamic_seq_for_freefit(
             _cached_token_counts(cfg.data_dir), dynamic_seq, logger=logger
         )
-    # Partitioner saved-activation cap (mirrors train.py): budget<1.0 recomputes
-    # cheap intermediates in backward. Must be set BEFORE compile_dit_blocks
-    # (partitioning happens at first-forward compile). Skipped under grad_ckpt: it
-    # repartitions the joint graph, so checkpoint's recompute can pick a different
-    # graph than forward → CheckpointError (torch #166926), and ckpt already
-    # minimizes saved activations.
+    # Partitioner saved-activation cap (mirrors train.py). Must be set BEFORE
+    # compile_dit_blocks (partitioning happens at first-forward compile). Skipped
+    # under grad_ckpt: repartitioning can pick a different backward graph than
+    # forward → CheckpointError (torch #166926).
     if cfg.torch_compile and cfg.activation_memory_budget < 1.0 and not cfg.grad_ckpt:
         import torch._functorch.config as _functorch_config
 
@@ -341,11 +320,10 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
             grad_ckpt=cfg.grad_ckpt,
             logger=logger,
         )
-    # Isolate the persistent compile caches per compile signature: entries from
-    # runs under different seq-range bounds otherwise poison this run's wider
-    # dynamic-seq marks — AOTAutogradCache replays the stale narrow guard into the
-    # fresh ShapeEnv and the first ≥4032-token trace dies with a
-    # ConstraintViolationError. Same signature → warm reuse, shared with train.py.
+    # Isolate the compile cache per signature: a stale narrow seq-range guard
+    # from a different run poisons this one's wider dynamic-seq mark, dying with
+    # a ConstraintViolationError on the first ≥4032-token trace. Same signature
+    # still warm-reuses, shared with train.py.
     if cfg.torch_compile:
         isolate_compile_cache(
             compile_signature(
@@ -397,15 +375,11 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     )
 
     student_sched = make_scheduler(student_opt, cfg.iterations, cfg.student_lr)
-    # The fake optimizer takes ``iterations · fake_steps_per_student_step``
-    # updates in the main loop plus ``fake_warmup_steps`` head-start updates
-    # BEFORE it (the head-start is now counted in fake updates directly, NOT
-    # scaled by the cadence — see warmup.py). The fake scheduler is stepped
-    # through both phases, so its total update count — and hence the ``0.02·total``
-    # LR warmup span — is sized over the same total. The fake LR warmup therefore
-    # overlaps the head-start (the fake enters the main loop already calibrated
-    # AND at full LR), and the cosine still lands at the end of the main loop.
-    # The student schedule is independent: ``0.02·iterations``, no head-start offset.
+    # Fake scheduler spans main-loop updates (iterations · fake_steps_per_student_step)
+    # PLUS fake_warmup_steps head-start updates, stepped through both phases — so
+    # the ``0.02·total`` LR warmup overlaps the head-start (fake enters the main
+    # loop already at full LR) and the cosine still lands at loop end. Student
+    # schedule is independent: ``0.02·iterations``, no head-start offset.
     fake_sched = make_scheduler(
         fake_opt,
         cfg.iterations * cfg.fake_steps_per_student_step + cfg.fake_warmup_steps,
@@ -438,9 +412,9 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     if fdistill_on and cfg.f_ratio_normalization:
         fdistill_bins = torch.ones(cfg.f_bin_num, device=device)
 
-    # Apply the resume now that every mutable object exists (nets are on-device and
-    # compiled, all three optimizers/schedulers are built, the f-distill EMA buffer
-    # is allocated). start_step = student steps already completed; 0 on a fresh run.
+    # Apply resume now that every mutable object exists (nets on-device + compiled,
+    # optimizers/schedulers built, f-distill buffer allocated). start_step = student
+    # steps already completed; 0 on a fresh run.
     start_step = 0
     if resume_state is not None:
         start_step = apply_resume_state(
@@ -468,23 +442,17 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         # full AdamW moment sets and is the largest transient in the process.
         resume_state = None
 
-    # Soft-rank caption auxiliary (turbo_caption_ranking.md Phase 1): at the
-    # DP-DMD step-0 anchor, rank the matched caption against k shuffled-caption
-    # negatives so it explains the diversity target better. weight=0 → the whole
-    # path is off (no extra forwards) → byte-identical DP-DMD.
-    #
-    # Negatives are drawn from a cross-step caption pool (CaptionNegativePool) so
-    # the term fires even at batch_size=1, where within-batch negatives don't
-    # exist. The pool holds detached on-device caption clones (~1 MiB each →
-    # pool_size MiB VRAM); it must fill to `softrank_min_pool` (warmup_ratio of
-    # capacity) before firing, so negatives are a representative shuffle rather
-    # than the last few captions.
+    # Soft-rank caption auxiliary (docs/proposal/turbo_caption_ranking.md): ranks
+    # the matched caption against k shuffled-caption negatives at the DP-DMD
+    # step-0 anchor. weight=0 → fully off, byte-identical DP-DMD. Negatives come
+    # from a cross-step pool (CaptionNegativePool) so the term fires even at
+    # batch_size=1; must fill to `softrank_min_pool` before firing.
     from .softrank import CaptionNegativePool
 
     softrank_on = cfg.softrank_weight > 0.0
     softrank_pool = CaptionNegativePool(cfg.softrank_pool_size) if softrank_on else None
-    # L_CDM off-trajectory loss (docs/proposal/cdm.md Phase 1). weight=0 → the
-    # whole path is off (no extra forwards, no extra RNG draws) → byte-identical.
+    # L_CDM off-trajectory loss. weight=0 → fully off (no extra forwards/RNG
+    # draws) → byte-identical.
     cdm_on = cfg.cdm_weight > 0.0
     softrank_min_pool = max(
         cfg.softrank_k, round(cfg.softrank_warmup_ratio * cfg.softrank_pool_size)
@@ -530,12 +498,9 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
 
     # Bucket-grouped batch sampler (mirrors distill_mod): every batch is one
     # resolution — free-fit gives each image its own token count, so a
-    # cross-resolution batch can't stack. Batch ORDER is shuffled per epoch,
-    # seeded by cfg.seed, which activates the data-order axis of the training
-    # lottery (init + per-step noise already ride cfg.seed via manual_seed). The
-    # largest-token bucket is pinned first for compile warmup
-    # ([[project_compile_context_vram_climb]]). Supersedes the old shuffle=False
-    # path — bucket grouping is enforced by the sampler, not by on-disk order.
+    # cross-resolution batch can't stack. Order shuffled per epoch, seeded by
+    # cfg.seed (data-order axis of the training lottery); largest-token bucket
+    # pinned first for compile warmup ([[project_compile_context_vram_climb]]).
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_sampler=dataset.make_batch_sampler(shuffle=True, seed=cfg.seed),
@@ -547,9 +512,8 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
 
     snapshot_text = snapshot_toml_text(cfg, source_config=args.config)
-    # Canonical config snapshot beside the checkpoint (train.py convention): the
-    # provenance record inference / merge / tooling look for next to
-    # {output_name}.safetensors. Written unconditionally, independent of --no_log.
+    # Canonical config snapshot beside the checkpoint (train.py convention) —
+    # written unconditionally, independent of --no_log.
     write_config_snapshot(
         Path(cfg.output_dir) / f"{cfg.output_name}.snapshot.toml",
         snapshot_text,
@@ -560,19 +524,17 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         cfg.log_dir, tb_config_text(cfg), enabled=not cfg.no_log, logger=logger
     )
     if run_log is not None:
-        # Mirror the snapshot into the run log dir so the timestamped run is a
-        # self-contained record of "this run + the config that produced it".
+        # Mirror the snapshot into the run log dir: a self-contained record of
+        # "this run + the config that produced it".
         write_config_snapshot(
             run_log / f"{cfg.output_name}.snapshot.toml",
             snapshot_text,
             logger=logger,
         )
 
-    # Structured progress sink (issue #1): the bespoke loop, unlike train.py,
-    # never emitted the progress.jsonl that the GUI / daemon / log-analyst tail
-    # for step + ETA + terminal status. Reuse train.py's ProgressSink so a turbo
-    # run is followable by tailing one file. Default path (train.py convention):
-    # <output_dir>/../logs/<output_name>.progress.jsonl. Disabled under --no_log.
+    # Structured progress sink: reuse train.py's ProgressSink so a turbo run is
+    # followable by tailing one file (train.py path convention). Disabled under
+    # --no_log.
     progress_sink = None
     if not cfg.no_log:
         sink_path = ProgressSink.resolve_path(cfg)
@@ -612,34 +574,21 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     ):
         """Switch view, prepare block swap, run forward.
 
-        ``x`` is (B, 16, H, W); we unsqueeze to (B, 16, 1, H, W) inside.
+        ``x`` is (B, 16, H, W); unsqueezed to (B, 16, 1, H, W) inside.
 
-        With ``return_features_early`` (GAN feature tap, idea 3.1) the forward
-        stops after the deepest tapped block and returns the feature dict
-        ``{block_idx: feat}`` instead of a velocity — the caller pools it through
-        the disc and must NOT ``.squeeze(2)`` the result.
+        With ``return_features_early`` (GAN feature tap) the forward stops after
+        the deepest tapped block and returns ``{block_idx: feat}`` instead of a
+        velocity — the caller must NOT ``.squeeze(2)`` the result.
 
-        Per-forward CPU prep is the GPU-idle window between launches —
-        ``set_view`` short-circuits when already in ``view`` (see
-        ``TurboDMDNetwork.set_view``), and the cudagraph step-begin marker
-        is hoisted to once per outer step in the loop below.
+        ``model.training`` stays True for the whole run (DiT frozen) so
+        grad-ckpt stays armed via ``Block.forward``'s ``self.training`` gate;
+        toggling it per forward was the dominant per-forward CPU stall.
 
-        The DiT is frozen (``freeze_dit`` in ``__init__``), so ``model.training``
-        is left at its post-construction value (``True``) for the whole run —
-        grad-ckpt is gated on ``self.training`` inside ``Block.forward``, so it
-        stays armed without a per-forward toggle. We deliberately do NOT flip
-        train/eval per forward: the no_grad teacher/fake forwards build no
-        backward graph regardless, and the recursive submodule walk a per-forward
-        toggle triggered was the dominant per-forward CPU stall.
-
-        Checkpointing has two independent levers, both numerically exact (frozen
-        teacher, no dropout) and both no-ops on no_grad forwards: the global
-        ``--grad_ckpt`` (default OFF) arms unsloth-offload ckpt on EVERY
-        grad-bearing forward, while ``gan.grad_ckpt`` (default on) wraps only the
-        GAN gen forward (same unsloth-offload path — compile needs the
-        ``@torch._disable_dynamo`` it carries; see ``selective_block_grad_ckpt``)
-        to reclaim its ~3 GB without the global recompute. Recompute only bites on
-        the grad-bearing student/fake-update/GAN forwards.
+        Two independent, numerically-exact checkpoint levers, both no-ops on
+        no_grad forwards: global ``--grad_ckpt`` (default OFF) arms
+        unsloth-offload ckpt on every grad-bearing forward; ``gan.grad_ckpt``
+        (default on) wraps only the GAN gen forward via the same path (see
+        ``selective_block_grad_ckpt``).
         """
         turbo.set_view(view)
         if model.blocks_to_swap:
@@ -672,8 +621,7 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     )[1].tolist()
     # Continuous time at the anchor (incoming σ after k_anchor teacher steps).
     # `v_target = (ε − z_tk)/(1 − t_k)` — a σ mismatch here silently mis-scales
-    # the diversity target (proposal §6.3), so it's read from the teacher grid,
-    # not the student grid.
+    # the diversity target, so it's read from the teacher grid, not the student.
     t_k_anchor = float(teacher_anchor_sigmas[cfg.k_anchor])
     logger.info(
         f"DP-DMD grids: student σ={['%.3f' % s for s in student_sigmas]}, "
@@ -684,8 +632,8 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
     def _teacher_cfg_velocity(x, t_b, c_cond, c_null):
         """CFG-guided teacher velocity ``v_u + α·(v_c − v_u)`` (no grad, fp32).
 
-        Used by the DP-DMD K-step anchor rollout. At ``teacher_cfg == 1`` the
-        uncond forward is skipped (single forward).
+        Used by the DP-DMD K-step anchor rollout; skips the uncond forward when
+        ``teacher_cfg == 1``.
         """
         v_c = _forward("teacher", x, t_b, c_cond, no_grad=True).squeeze(2)
         if cfg.teacher_cfg == 1.0:
@@ -693,10 +641,9 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         v_u = _forward("teacher", x, t_b, c_null, no_grad=True).squeeze(2)
         return v_u.float() + cfg.teacher_cfg * (v_c.float() - v_u.float())
 
-    # Fake (critic) head-start. Skipped on resume: the restored critic is already
-    # calibrated against the restored student, and its scheduler has consumed the
-    # head-start's updates. Re-running it here would re-warm a cold critic against
-    # a trained student — the pathology this resume path exists to avoid.
+    # Fake head-start skipped on resume: the restored critic is already
+    # calibrated against the restored student; re-running it here would recreate
+    # the pathology this resume path exists to avoid.
     data_iter = iter(dataloader)
     if start_step > 0:
         logger.info(
@@ -741,19 +688,16 @@ def build_run(args, cfg: TurboConfig) -> RunContext:
         f"steps {start_step} → {cfg.iterations}"
     )
 
-    # Issue #2: tqdm repaints one `\r` line on stderr — fine interactively, but a
-    # redirected (`> run.log 2>&1`) or daemon-headless run then has no periodic
-    # step record at all between the save_every / validate_every lines. Off a TTY
-    # the live line buys nothing, so mirror the same metrics as a throttled
-    # logger.info at log_interval cadence; on a TTY tqdm already shows them.
+    # tqdm repaints one `\r` line on stderr — fine interactively, but a redirected
+    # or daemon-headless run then has no periodic step record between the
+    # save_every / validate_every lines. Off a TTY, mirror the same metrics as a
+    # throttled logger.info at log_interval cadence.
     try:
         console_steps = not sys.stderr.isatty()
     except Exception:  # stderr detached (pythonw) → no live line either way
         console_steps = True
     metrics = TurboMetrics(device)
-    # P0a (turbo_tau_split_critic): per-τ-bin critic-loss profile. One per fake
-    # bank when the τ-split is on (the Phase-1 mechanism check reads whether the
-    # split flattens each bank's excess over the single-critic baseline).
+    # Per-τ-bin critic-loss profile; one per fake bank when the τ-split is on.
     if cfg.fake_tau_banks > 1:
         tau_profiles = [
             TauBinCriticLoss(

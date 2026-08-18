@@ -1,59 +1,31 @@
 #!/usr/bin/env python3
 """Mangafy + cache condition latents (and white-balanced targets + color-only
-text) for the colorization EasyControl task.
+text) for the colorization EasyControl task. See ``README.md`` for the full
+pipeline description; summary of the four idempotent stages:
 
-Four idempotent stages:
+1. **Mangafy** — screen every color image under ``--src`` to a synthetic B&W
+   manga page (``--engine gpu``/``cv2``, both XDoG + algorithmic screentone,
+   no downloads), written to ``--staging``. Skips already-staged PNGs unless
+   ``--overwrite``.
+2. **Encode** — VAE-encode the staged manga images into ``--cond_cache_dir``
+   at native size so each cond latent shape matches its target exactly.
+3. **Target** — white-balance each color target (see ``wb.py``) and
+   VAE-encode into ``--target_cache_dir``. Targets below
+   ``--target_drop_sat`` (effectively monochrome) are dropped by deleting
+   their cond latents, pairing them out of training.
+4. **Text** — re-encode target captions filtered to color tags (plus
+   copyright/comic tags by default) into ``--text_cache_dir``, mirroring
+   ``--caption_src``. Skipped without ``--qwen3``/``--dit``.
 
-1. **Mangafy** — walk every color image under ``--src`` (the existing resized
-   training images), screen each to a synthetic B&W manga page, and write the
-   result to ``--staging`` mirroring the source subpath. Two engines via
-   ``--engine`` (both the XDoG + algorithmic-screentone synthesizer, no
-   downloads): ``gpu`` (default) runs the screens on CUDA
-   (:func:`mangafy_gpu.mangafy_array_gpu`, fast, serial); ``cv2`` runs the same
-   math on a CPU ProcessPool (:func:`mangafy.mangafy_array`). Skips
-   already-staged PNGs unless ``--overwrite``.
+Run from the repo root::
 
-2. **Encode** — VAE-encode the staged manga images into ``--cond_cache_dir`` via
-   the existing ``library.preprocess.cache_latents`` (same ``{stem}_{WxH}_anima.npz``
-   format as the target latent cache), at the image's **native size** so each
-   cond latent shape matches its target latent exactly. Skips cached resolutions.
-
-3. **Target** — white-balance each color *target* (the corpus is corpus-wide
-   warm/desaturated — see ``wb.py``; rendered colorize output otherwise lands on
-   the corpus-mean sepia tone) and VAE-encode the corrected image into
-   ``--target_cache_dir``, the colorize-specific target-latent cache the
-   training subset reads via ``latent_cache_dir`` (TE/PE stay on the shared
-   caches). Targets whose mean HSV saturation is below ``--target_drop_sat``
-   are effectively monochrome (white-balancing them yields flat gray, a bad
-   colorize target): they are **dropped** — their cond latents are deleted so
-   the train-time loader pairs them out. Scoped to the stems present in
-   ``--staging`` (the paired colorize set). Skips cached resolutions; pass
-   ``--overwrite`` after changing the WB knobs.
-
-4. **Text** — re-encode the *target* captions filtered to **color tags** (plus
-   the **copyright/series tag** by default, ``--text_keep_copyright``, and
-   optionally **comic/panel-format tags** via ``--text_keep_comic``;
-   :func:`color_caption.filter_to_colors_and_protected`) into ``--text_cache_dir``, mirroring
-   the source subpath. Reads ``.txt`` from ``--caption_src`` (the caption master,
-   nested identically to the resized tree), so the TE caches key-match the
-   colorize loader's ``image_dir=post_image_dataset/resized`` lookup. The colorize
-   dataset points its subset ``text_cache_dir`` here, so training reads
-   color-only captions while latents still come from the shared lora cache.
-   Skipped without ``--qwen3``/``--dit`` (omit via ``--skip_text``).
-
-The cond cache is paired with the color target at train time by the loader's
-``cond_cache_dir`` subset knob (stem-matched); the color-only text by
-``text_cache_dir``. Run from the repo root::
-
-    python easycontrol_adapters/colorization/prep.py            # full dataset (all 3 stages)
+    python easycontrol_adapters/colorization/prep.py            # full dataset
     python easycontrol_adapters/colorization/prep.py --limit 8  # quick QA batch
 
-Via the task runner the four stages are split across two targets (knobs come
-from the ``[staging]`` / ``[preprocess]`` tables of ``configs/easycontrol/
-colorize.toml``)::
+Via the task runner::
 
     make easycontrol-staging    EASYADAPTER=colorize   # stage 1 (mangafy)
-    make easycontrol-preprocess EASYADAPTER=colorize   # stages 2-4 (encode + target + text)
+    make easycontrol-preprocess EASYADAPTER=colorize   # stages 2-4
 """
 
 from __future__ import annotations
@@ -87,13 +59,10 @@ def _stable_seed(name: str) -> int:
 def _save_png_atomic(arr: np.ndarray, out: Path) -> None:
     """Write ``arr`` to ``out`` atomically — temp file in the same dir + os.replace.
 
-    A direct ``Image.save(out)`` that's interrupted (Ctrl-C, OOM, crash) mid-write
-    leaves a *truncated* PNG at the final path; the mangafy skip-check
-    (``out.exists()``) then keeps that corrupt file forever, and it only blows up
-    later at VAE-encode decode time. Writing to a unique temp in the same directory
-    and ``os.replace``-ing it in means the final name only ever appears fully
-    written (replace is atomic on one filesystem). On any failure the temp is
-    removed so no partial file or stray ``.tmp`` survives."""
+    A direct ``Image.save(out)`` interrupted mid-write leaves a truncated PNG
+    that the mangafy skip-check (``out.exists()``) then keeps forever, only
+    blowing up later at VAE-decode time. ``os.replace`` is atomic on one
+    filesystem, so the final name only ever appears fully written."""
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=out.parent, suffix=".tmp.png")
     os.close(fd)
@@ -111,8 +80,8 @@ def _save_png_atomic(arr: np.ndarray, out: Path) -> None:
 def _text_mask_path(mask_dir: Path | None, rel: Path) -> Path | None:
     """Locate the ``{stem}_mask.png`` text mask mirroring ``rel`` under ``mask_dir``.
 
-    Returns ``None`` when masking is off or the page has no mask (most pages don't —
-    only ~1886/2419 carry text), so the caller leaves the screened result untouched."""
+    Returns ``None`` when masking is off or the page has no mask (most
+    pages don't), so the caller leaves the screened result untouched."""
     if mask_dir is None:
         return None
     p = mask_dir / rel.parent / f"{rel.stem}_mask.png"
@@ -122,13 +91,9 @@ def _text_mask_path(mask_dir: Path | None, rel: Path) -> Path | None:
 def _apply_text_mask(
     manga: np.ndarray, img_rgb: np.ndarray, mask_path: Path | None, *, dilate: int
 ) -> np.ndarray:
-    """Paste the source's own grayscale back into the text/speech-bubble regions.
-
-    The MIT text masks (black = text) localize the overlaid text/logo regions;
-    replacing them with a deterministic grayscale of the source sharpens the screened
-    text so it stays pixel-exact. No-op when there's no mask for this stem or masking
-    is disabled. ``dilate`` grows the mask a few px to catch anti-aliased glyph
-    fringes."""
+    """Paste the source's own grayscale back into the text/speech-bubble regions
+    so the screened text stays pixel-exact. No-op without a mask. ``dilate``
+    grows the mask a few px to catch anti-aliased glyph fringes."""
     if mask_path is None:
         return manga
     h, w = manga.shape[:2]
@@ -152,31 +117,27 @@ def _apply_text_mask(
 def _make_screener(engine: str) -> Screener:
     """Resolve ``engine`` to a ``(img, seed) → manga`` callable.
 
-    Imports are deferred so ``cv2`` stays import-light. Takes plain (picklable) args
-    rather than the argparse Namespace so it can be rebuilt inside a worker process."""
+    Imports are deferred so ``cv2`` stays import-light; takes plain
+    (picklable) args so it can be rebuilt inside a worker process."""
     if engine == "cv2":
         import cv2
 
         cv2.setNumThreads(
             1
-        )  # one cv2 thread per worker — the pool gives the parallelism
+        )  # one cv2 thread per worker; the pool parallelizes
         from mangafy import mangafy_array
 
         return lambda img, seed: mangafy_array(img, seed=seed)
 
-    # gpu: same algorithmic screentone as cv2, but the trig screens + XDoG blurs run on
-    # CUDA — one serial GPU pass, no ProcessPool. Structurally identical per seed.
+    # gpu: same algorithm, but trig screens + XDoG blurs run on CUDA, serial (no pool).
     from mangafy_gpu import mangafy_array_gpu
 
     return lambda img, seed: mangafy_array_gpu(img, seed=seed)
 
 
 # ── Worker process state (cv2 engine only) ───────────────────────────────────
-# The screener (a closure over a cv2/numpy module) isn't picklable, so each worker
-# rebuilds it once in its initializer and stashes it — plus the constant paths — in
-# a module global, then maps over image paths. The mangafy math is pure numpy/cv2,
-# so this scales ~linearly with cores; the seeded per-stem jitter keeps every worker
-# bit-identical to the serial path.
+# The screener closure isn't picklable, so each worker rebuilds it once in its
+# initializer and stashes it (plus constant paths) in a module global.
 _WORKER: dict = {}
 
 
@@ -230,11 +191,10 @@ def _mangafy_gpu_overlap(
 ) -> tuple[int, int]:
     """GPU mangafy with CPU/IO overlapped against the GPU.
 
-    The screener holds a single GPU stream, so it stays serial on this (main) thread;
-    the surrounding disk decode and the text-mask + PNG encode + write are pure CPU/IO,
-    so they're farmed to thread pools and overlap the GPU work. ``mangafy_array_gpu``
-    returns a host numpy array, so nothing GPU-bound crosses a thread boundary. The
-    seed is per-stem, so decoding ahead of order is safe — output is identical."""
+    The screener holds a single GPU stream and stays serial on this thread;
+    disk decode and text-mask/PNG write are pure CPU/IO, farmed to thread
+    pools to overlap the GPU work. Per-stem seed makes decoding ahead of
+    order safe — output is identical."""
     screener = _make_screener("gpu")
 
     def _decode(p: Path):
@@ -318,8 +278,8 @@ def stage_mangafy(
     progress = tqdm_progress("Mangafy")
     progress(0, total=len(images))
 
-    # The cv2 engine fans out across processes (``--workers``) when there's more than
-    # one to use; the gpu engine runs one serial GPU stream (handled below).
+    # cv2 fans out across processes when there's more than one worker; gpu runs
+    # one serial GPU stream (handled below).
     if engine == "cv2" and workers > 1 and len(images) > 1:
         written = 0
         with ProcessPoolExecutor(
@@ -334,16 +294,15 @@ def stage_mangafy(
                 text_mask_dilate,
             ),
         ) as ex:
-            # small chunks: each image is ~seconds of cv2 work, so IPC overhead is
-            # negligible and fine-grained chunks load-balance variable image sizes well.
+            # small chunks: IPC overhead is negligible vs each image's cv2 work,
+            # and fine-grained chunks load-balance variable image sizes well.
             for w in ex.map(_worker_process, [str(p) for p in images], chunksize=2):
                 written += w
                 progress(1)
         return len(images), written
 
-    # The gpu engine runs one serial GPU stream, but its disk decode + text-mask + PNG
-    # write are CPU/IO — overlap them across thread pools so the GPU isn't starved
-    # between images (the 0→100 utilization sawtooth).
+    # gpu: overlap the CPU/IO decode+mask+write with the serial GPU stream so
+    # it isn't starved between images.
     if engine == "gpu" and len(images) > 1:
         return _mangafy_gpu_overlap(
             images,
@@ -441,16 +400,11 @@ def stage_target(
 ):
     """White-balance + VAE-encode the color targets into ``target_cache_dir``.
 
-    Scoped to the stems the mangafy stage staged (the paired colorize set). A
-    fast thumbnail pre-pass measures each target's mean HSV saturation: stems
-    below ``drop_sat`` are effectively monochrome/sepia-core — a bad colorize
-    target either raw (it IS the tone drift) or white-balanced (flat gray) — so
-    their cond latents are **deleted** from ``cond_cache_dir``, which pairs
-    them out of training (the loader keeps only cond-paired targets). Deletion
-    re-applies on every run, so an inline re-stage (mangafy → encode → target)
-    always converges to the same pair set. The survivors are encoded with
-    :func:`wb.apply_whitebalance` applied, at native size, same
-    ``{stem}_{WxH}_anima.npz`` naming as the shared cache.
+    Scoped to the stems the mangafy stage staged. A thumbnail pre-pass
+    measures each target's mean HSV saturation; stems below ``drop_sat`` are
+    effectively monochrome and get their cond latents **deleted** from
+    ``cond_cache_dir``, pairing them out of training. Deletion re-applies on
+    every run, so a re-stage always converges to the same pair set.
     """
     import functools
 
@@ -467,8 +421,7 @@ def stage_target(
         p for p in walk_images(src, recursive=recursive) if p.stem in staged_stems
     ]
 
-    # Thumbnail saturation pre-pass (the statistic is scale-stable; decoding
-    # small keeps this a ~seconds pass over thousands of targets).
+    # thumbnail keeps this a ~seconds pass; the saturation statistic is scale-stable
     def _sat(p: Path) -> tuple[str, float]:
         img = Image.open(p).convert("RGB")
         img.thumbnail((256, 256), Image.Resampling.BILINEAR)
@@ -489,8 +442,8 @@ def stage_target(
         f"targets dropped, {len(kept)} kept"
     )
 
-    # Pair the drops out of training: the loader keeps only targets with a
-    # cached cond latent, so deleting the cond npz is the exclusion mechanism.
+    # deleting the cond npz is the exclusion mechanism: the loader only keeps
+    # targets with a cached cond latent
     removed = 0
     if dropped:
         by_stem = discover_latents_by_stem(cond_cache_dir)
@@ -536,35 +489,24 @@ def stage_text(
 ):
     """Cache color-only TE embeddings for the color targets into ``text_cache_dir``.
 
-    Loads Qwen3 + the DiT's LLM adapter (needed to produce ``crossattn_emb``),
-    then runs ``library.preprocess.cache_text_embeddings`` over ``caption_src``
-    with the color-only caption filter. ``caption_src`` (the caption master) is
-    nested identically to ``post_image_dataset/resized``, so the resulting TE
-    paths key-match the colorize loader's resized-rooted lookup.
+    Loads Qwen3 + the DiT's LLM adapter, then runs
+    ``library.preprocess.cache_text_embeddings`` over ``caption_src`` with
+    the color-only caption filter. ``caption_src`` is nested identically to
+    ``post_image_dataset/resized`` so TE paths key-match the colorize
+    loader's lookup.
 
-    When ``staging`` is given (the synthesized cond tree), encoding is scoped to
-    the stems present there — the matched colorize subset the mangafy stage already
-    materialized — so the TE cache mirrors the cond cache instead of re-encoding
-    the whole master. ``None`` / absent / empty staging = encode every caption.
+    When ``staging`` is given, encoding is scoped to its stems (the matched
+    colorize subset) instead of the whole caption master.
 
-    With ``shuffle_variants > 0`` each cache holds v0 (the full color set) plus
-    shuffled variants with ``tag_dropout_rate`` of the color tags dropped. The
-    color filter runs *before* variant generation, and the filtered caption has
-    no ``@artist`` prefix, so every color tag is drop-eligible — this teaches the
-    model to colorize from a *partial* color spec ("pink hair" alone) rather than
-    expecting a complete palette every time.
+    With ``shuffle_variants > 0`` each cache holds v0 (full color set) plus
+    shuffled variants with ``tag_dropout_rate`` of the color tags dropped —
+    teaches the model to colorize from a partial color spec.
 
-    With ``keep_copyright`` (default) the copyright/series tag is kept too and
-    placed *first*, then protected from tag-dropout via ``caption_protect_fn`` —
-    so "genshin impact" survives in every partial-color variant while the colors
-    around it still drop. The manga cond can't encode which series a page is from,
-    so copyright is genuinely-ambiguous text worth binding. Copyright names are
-    matched against ``caption_index`` (defaults to the corpus typed-tag index).
-
-    ``keep_comic`` does the same for comic/panel-format tags (``comic``, ``4koma``,
-    …; matched against the fixed :data:`color_caption.COMIC_TAGS` vocab) — kept in
-    the protected prefix after copyright and immune to dropout, so the adapter
-    learns the ``comic`` tag and a "comic" prompt steers toward panelled output.
+    With ``keep_copyright`` (default) the copyright/series tag is kept and
+    placed first, protected from tag-dropout via ``caption_protect_fn`` (the
+    manga cond can't encode which series a page is from, so it's genuinely
+    ambiguous and worth binding). ``keep_comic`` does the same for
+    comic/panel-format tags, kept in the protected prefix after copyright.
     """
     from color_caption import (
         filter_to_colors,
@@ -595,9 +537,7 @@ def stage_text(
     )
     encoding_strategy = AnimaTextEncodingStrategy()
 
-    # The colorize loader reuses the shared T5("") uncond sidecar for caption
-    # dropout, staged by `make preprocess`; re-stage idempotently in case the
-    # color run is the first to touch it.
+    # re-stage the shared uncond sidecar idempotently in case this run is first
     from library.preprocess.uncond import (
         DEFAULT_UNCOND_DIR,
         stage_uncond_sidecar_with_models,
@@ -613,11 +553,8 @@ def stage_text(
         overwrite=False,
     )
 
-    # Resolve the caption transform. Color tags are always kept; copyright and/or
-    # comic tags optionally ride along as a leading prefix. Inclusion and dropout-
-    # protection are decoupled: comic is the only family protected from dropout —
-    # copyright is kept but droppable (it rides the same tag-dropout as the colors),
-    # so the protect_fn below covers comic alone.
+    # color tags always kept; copyright/comic optionally ride as a leading prefix.
+    # only comic is protected from dropout — copyright rides the same tag-dropout.
     caption_protect_fn = None
     copyright_tags: frozenset[str] = frozenset()
     if keep_copyright:
@@ -644,17 +581,13 @@ def stage_text(
             )
 
         def caption_protect_fn(tag: str) -> bool:
-            # Comic only — copyright is included by the filter but left droppable.
             return keep_comic and is_comic_tag(tag)
     else:
         caption_transform = filter_to_colors
 
-    # Subset selection: the staged cond tree IS the matched colorize set (mangafy
-    # already applied the only/exclude tag filter when it synthesized it), so
-    # restrict TE encoding to those stems rather than re-encoding the whole
-    # caption master. ``staging`` None (or absent/empty) = no filter — encode all.
-    # Note: --limit applies to the mangafy/encode stages only; the text stage
-    # walks caption_src itself and skips already-cached files, so re-runs are cheap.
+    # restrict TE encoding to the staged stems (already tag-filtered by mangafy)
+    # rather than re-encoding the whole caption master; None/empty = encode all.
+    # --limit only applies to the mangafy/encode stages, not this one.
     keep_stems: set[str] | None = None
     if staging is not None and staging.is_dir():
         keep_stems = {p.stem for p in walk_images(staging, recursive=recursive)}
@@ -874,14 +807,8 @@ def main() -> None:
     staging = Path(args.staging)
     cond_cache_dir = Path(args.cond_cache_dir)
 
-    # Select which pages enter the colorize set, by caption tags (matched against the
-    # caption master, --caption_src): net set = only_data_includes − exclude_data_includes.
-    #   • --only_data_includes  — if given, restrict to pages carrying one of these
-    #     tags (empty/omitted = all pages eligible);
-    #   • --exclude_data_includes — then drop pages carrying one of these.
-    # A page filtered out here gets no cond latent, and the train-time loader pairs only
-    # against cached cond latents, so the selection carries through to training with no
-    # second tag scan.
+    # net set = only_data_includes - exclude_data_includes (see --help above); a
+    # filtered-out page gets no cond latent, so the loader pairs it out downstream.
     from library.datasets.dreambooth import stems_with_any_tag
 
     only_stems = (

@@ -1,16 +1,9 @@
 """Target white-balance for the colorize task.
 
-The colorize training-target pool (the shared color corpus) is corpus-wide
-warm/desaturated — median per-image mean HSV saturation 0.182, bright-pixel
-white-point R−B +0.089 on average, 84.7% of targets warm-dominant (measured
-2026-07-09 over the 2,951 staged pairs; see queued.md). With
-``caption_dropout_rate = 0.8`` collapsing most gradient into one shared
-unconditional colorization mode, the adapter faithfully reproduces that
-corpus-mean sepia tone on *every* cond. Tag filtering can't fix it (the tagger
-emits no tone tags for this corpus, and the low-sat tail is 33–94% of the data
-depending on threshold), so the fix is *correction*: neutralize each target's
-white-point at prep time and encode the corrected image into a
-colorize-specific target-latent cache (subset ``latent_cache_dir``).
+The colorize target corpus is corpus-wide warm/desaturated; with high
+caption dropout the adapter reproduces that sepia tone on every cond. Fix:
+neutralize each target's white-point at prep time and encode into a
+colorize-specific target-latent cache.
 
 Pure numpy on uint8 RGB ``(H, W, 3)`` arrays; the prep stage wires these into
 ``library.preprocess.cache_latents``'s ``image_transform`` hook.
@@ -20,19 +13,17 @@ from __future__ import annotations
 
 import numpy as np
 
-# Rec.709 luma weights — matches the vision-side convention elsewhere in the repo.
+# Rec.709 luma weights (matches vision-side convention elsewhere in the repo).
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
-#: Below this mean HSV saturation a target is effectively monochrome/sepia-core:
-#: white-balancing it just yields flat gray — a bad colorize target. The prep
-#: stage drops these (removes their cond latent so the loader pairs them out).
+#: Below this mean HSV saturation a target is effectively monochrome/sepia-core
+#: — white-balancing it just yields flat gray. Prep drops these targets.
 DEFAULT_DROP_SAT = 0.10
 
-#: Per-channel gain clamp. The measured corpus cast needs ~1.1–1.2x; anything
-#: past this is a heavily stylized palette we shouldn't "correct" away.
+#: Per-channel gain clamp; past this we're stylizing rather than correcting.
 DEFAULT_MAX_GAIN = 1.35
 
-#: Luma quantile that defines the bright (paper/highlight) region used to
+#: Luma quantile defining the bright (paper/highlight) region used to
 #: estimate the white-point.
 BRIGHT_QUANTILE = 0.92
 
@@ -47,8 +38,7 @@ MIN_BRIGHT_FRAC = 0.005
 def mean_saturation(img: np.ndarray) -> float:
     """Mean HSV saturation of a uint8 RGB image, in [0, 1].
 
-    Same metric as the 2026-07-09 corpus stats (S = (max−min)/max, 0 where
-    max = 0), so thresholds carry over. Call on a thumbnail for speed — the
+    S = (max−min)/max, 0 where max = 0. Call on a thumbnail for speed — the
     statistic is scale-stable."""
     f = img.astype(np.float32) / 255.0
     mx = f.max(axis=-1)

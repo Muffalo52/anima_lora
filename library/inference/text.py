@@ -3,6 +3,7 @@
 import argparse
 import gc
 import logging
+import re
 from typing import Optional, Tuple, Any, Dict
 
 import torch
@@ -21,9 +22,24 @@ logger = logging.getLogger(__name__)
 MAX_CROSSATTN_TOKENS = 512
 
 
+_ESCAPE_RE = re.compile(r"\\(n|t|r|\\|u[0-9a-fA-F]{4})")
+
+
+def _escape_sub(m: "re.Match[str]") -> str:
+    g = m.group(1)
+    simple = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}.get(g)
+    return simple if simple is not None else chr(int(g[1:], 16))
+
+
 def process_escape(text: str) -> str:
-    """Process escape sequences in text."""
-    return text.encode("utf-8").decode("unicode_escape")
+    """Process escape sequences (\\n, \\t, \\r, \\\\, \\uXXXX) in a prompt.
+
+    Only the escape sequences themselves are rewritten — non-ASCII text passes
+    through untouched. The previous ``encode("utf-8").decode("unicode_escape")``
+    round-trip mojibaked every non-ASCII character (CJK prompts reached the
+    tokenizer as latin-1 garbage).
+    """
+    return _ESCAPE_RE.sub(_escape_sub, text)
 
 
 def ensure_text_strategies(

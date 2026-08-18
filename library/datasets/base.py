@@ -72,11 +72,10 @@ def enable_high_vram():
 def none_or_stack_elements(tensors_list, converter):
     """Stack a list of per-sample tuples element-wise, or return None.
 
-    Each entry of ``tensors_list`` is a per-sample tuple/list of tensors (e.g.
-    the multi-output of a text encoder). Returns a list whose i-th entry stacks
-    the i-th element across all samples (right-padding ragged lengths with
-    zeros), or None when the batch carries no such outputs. Pure helper — closes
-    over nothing, hoisted out of ``BaseDataset.__getitem__``.
+    Each entry of ``tensors_list`` is a per-sample tuple/list of tensors.
+    Returns a list whose i-th entry stacks the i-th element across all
+    samples (right-padding ragged lengths with zeros), or None when the
+    batch carries no such outputs.
     """
     if (
         len(tensors_list) == 0
@@ -131,34 +130,23 @@ def none_or_stack_elements(tensors_list, converter):
 @dataclass
 class SidecarSpec:
     """One per-image sidecar channel: a loader plus its batch collation policy.
-
-    Generalizes the load/append/stack/None dance that used to be hand-copied
-    per feature (inversion runs, BYG tuples, REPA PE). Register via
-    ``BaseDataset.register_sidecar``; ``__getitem__`` then owns the per-sample
-    loop and collation for every registered spec.
+    Register via ``BaseDataset.register_sidecar``.
 
     Policies:
-      - ``"all_or_nothing"``: ``example[out_key]`` is the stacked ``[B, ...]``
-        tensor when every sample in the batch loaded (and, with
-        ``uniform_shape``, all shapes match); ``None`` otherwise.
-      - ``"masked"``: missing samples get zero placeholders and
-        ``example[mask_key]`` carries a ``[B]`` bool validity mask; both keys
-        are ``None`` when no sample loaded.
-      - ``"dict"``: the loader returns a ``dict[str, Tensor]`` per sample;
-        every key present in *all* samples' dicts is stacked into
-        ``example[f"{out_key}{key}"]``. Nothing is emitted (keys absent, not
-        ``None``) unless all samples loaded.
+      - ``"all_or_nothing"``: stacked ``[B, ...]`` tensor when every sample
+        loaded (and, with ``uniform_shape``, all shapes match); else None.
+      - ``"masked"``: missing samples get zero placeholders;
+        ``example[mask_key]`` carries a ``[B]`` bool validity mask.
+      - ``"dict"``: loader returns a per-sample dict; keys present in *all*
+        samples get stacked into ``example[f"{out_key}{key}"]``.
     """
 
     name: str
     loader: Callable[[ImageInfo], Optional[Any]]
     out_key: str
     policy: str = "all_or_nothing"
-    # Name of the dataset attribute gating this channel: truthy → active,
-    # ``None`` → always on. A plain attribute name (not a closure) keeps the
-    # spec picklable so the dataset can be shipped to DataLoader workers under
-    # Windows/`spawn` (a stored lambda raised "Can't get local object
-    # ...<locals>.<lambda>" at first iteration).
+    # Dataset attribute name gating this channel (truthy=active, None=always
+    # on). A plain name, not a closure, keeps the spec picklable for spawn.
     enabled_attr: Optional[str] = None
     mask_key: Optional[str] = None
     uniform_shape: bool = False
@@ -216,15 +204,14 @@ class BaseDataset(torch.utils.data.Dataset):
 
         self.replacements = {}
 
-        # Functional-loss inversion supervision (postfix-func).
-        # Set via `dataset.inversion_dir = ...` after construction; None disables.
+        # Functional-loss inversion supervision (postfix-func). Set via
+        # `dataset.inversion_dir = ...` after construction; None disables.
         self.inversion_dir: Optional[str] = None
         self.inversion_num_runs: int = 3
 
         # BYG unpaired-editing per-image text conditionings. Set via
-        # `dataset.byg_text_dir = ...` after construction; None disables. Loads
-        # <stem>_byg.safetensors holding the 4 role embeddings + masks (built by
-        # scripts/byg/build_edit_tuples.py).
+        # `dataset.byg_text_dir = ...`; None disables. Loads <stem>_byg.safetensors
+        # (4 role embeddings + masks, built by scripts/byg/build_edit_tuples.py).
         self.byg_text_dir: Optional[str] = None
         self._byg_roles = (
             "src_caption",
@@ -234,56 +221,30 @@ class BaseDataset(torch.utils.data.Dataset):
         )
 
         # REPA v2 PE feature loading. Set via `dataset.load_repa_pe = True`
-        # (+ `repa_pe_encoder`) after construction; off disables. Loads the
-        # cached {stem}_anima_{encoder}.safetensors patch tokens into
-        # batch["repa_pe_features"] for REPAMethodAdapter. Sidecar resolution
-        # walks a fallback chain (TE-cache dir → subset latent-cache dir →
-        # image dir) — see _repa_pe_sidecar_candidates.
+        # (+ `repa_pe_encoder`). Loads cached PE safetensors into
+        # batch["repa_pe_features"]; see _repa_pe_sidecar_candidates.
         self.load_repa_pe: bool = False
         self.repa_pe_encoder: str = "pe_spatial"
 
-        # sigma_lowres Phase 1b (σ-conditional low-res training). Set via
-        # ``enable_sigma_demote(native, demote)`` after construction; None
-        # disables. When set, each batch carries ``demoted_latents`` — the
-        # demote-tier sibling latent stored as a ``demoted_{H}x{W}`` key inside
-        # the native npz (``make preprocess-demote``) — and the trainer swaps
-        # it in when the step's σ draw clears the gate. Train-group only; the
-        # validation group stays native so val loss remains arm-comparable.
+        # sigma_lowres: set via enable_sigma_demote(native, demote). Train-group
+        # only — validation must stay native so val loss is arm-comparable.
         self._sigma_demote: Optional[Tuple[int, int]] = None
-        # Warned-route set, NOT a single bool: each route reports its own
-        # missing emit (see ``_demote_warn_once``).
-        self._sigma_demote_warned: set = set()
-        # Secondary demote route (E16 stacked router: e.g. 1024→768 on the
-        # measured window, priority over the primary 1024→896 rule). Set via
-        # ``enable_sigma_demote2``; batches then also carry
-        # ``demoted_latents2``.
+        self._sigma_demote_warned: set = set()  # per-route, not a single bool
+        # Secondary demote route (stacked router, priority over the primary rule).
         self._sigma_demote2: Optional[Tuple[int, int]] = None
-        # One-slot (path, NpzFile) memo shared by both routes' loaders.
-        self._demote_npz_cache = None
+        self._demote_npz_cache = None  # one-slot (path, NpzFile) memo, both routes
 
-        # Soft-tokens contrastive negatives. When a sampler is attached via
-        # ``setup_contrastive_negatives`` each example carries
-        # ``neg_crossattn_emb`` of shape (B, k, S, D): k cached text embeddings
-        # of *unrelated* images, used as InfoNCE negatives. Reuses the
-        # IdentityPairSampler's ``shuffled`` policy (Phase 1). Decoupled from the
-        # VAE target — an unrelated stem's cached feature replaces the target's,
-        # but the swapped feature is the text embedding, not a vision feature. See
-        # docs/proposal/soft_tokens_contrastive.md.
+        # Soft-tokens contrastive negatives; see setup_contrastive_negatives.
         self.contrastive_neg_sampler = None  # IdentityPairSampler | None
         self.contrastive_neg_k: int = 1
         self.contrastive_neg_mode: str = "shuffled"
 
         # Per-image sidecar registry: each spec bundles a loader with its batch
-        # collation policy, so a new sidecar channel is one register_sidecar()
-        # call instead of a hand-copied loop/stack/None dance in __getitem__.
-        # The toggles above (inversion_dir / byg_text_dir / load_repa_pe) stay
-        # the public enable surface; `enabled` closures read them live. The
-        # soft-tokens contrastive negatives stay bespoke — they are drawn by a
-        # sampler from *other* stems, not loaded from a per-image file.
+        # collation policy, so a new channel is one register_sidecar() call
+        # instead of a hand-copied loop/stack/None dance in __getitem__.
         self._sidecar_specs: List[SidecarSpec] = []
-        # Loaders are bound methods (not lambdas) and `enabled_attr` names a
-        # dataset attribute rather than capturing one in a closure, so every
-        # spec pickles cleanly for Windows/`spawn` DataLoader workers.
+        # Loaders are bound methods and enabled_attr names an attribute (not a
+        # closure), so every spec pickles for Windows/`spawn` DataLoader workers.
         self.register_sidecar(
             SidecarSpec(
                 name="inversion_runs",
@@ -309,10 +270,8 @@ class BaseDataset(torch.utils.data.Dataset):
                 loader=self._try_load_demoted_latent,
                 out_key="demoted_latents",
                 policy="all_or_nothing",
-                # Same-bucket samples share (W, H) → same demoted grid, so
-                # uniform shapes are structural; the guard only fires if a
-                # stale emit left mismatched keys, degrading that batch to
-                # native instead of crashing the epoch.
+                # Same-bucket samples share (W,H) -> same demoted grid; guard
+                # only fires on a stale emit, degrading that batch to native.
                 uniform_shape=True,
                 enabled_attr="_sigma_demote",
             )
@@ -333,10 +292,8 @@ class BaseDataset(torch.utils.data.Dataset):
                 loader=self._try_load_repa_pe,
                 out_key="repa_pe_features",
                 policy="all_or_nothing",
-                # All samples in a bucket share the latent resolution → same
-                # aspect → same encoder bucket, so equal token counts are the
-                # norm; the shape guard skips the term on the rare
-                # aspect-rounding edge instead of crashing the epoch.
+                # Bucket-mates share resolution -> equal token counts normally;
+                # guard skips the term on a rare aspect-rounding edge.
                 uniform_shape=True,
                 enabled_attr="load_repa_pe",
             )
@@ -786,13 +743,11 @@ class BaseDataset(torch.utils.data.Dataset):
     ):
         """Assign every image to its nearest bucket resolution.
 
-        Free-fit is the only resize mode: the predefined bucket set is the **union
-        of the distinct on-disk resized sizes** (read here as ``info.image_size``),
-        so each latent exact-matches its own (W, H) and nothing AR-snaps at load.
-        The on-disk caches are the source of truth for which shapes/tiers are
-        present; ``target_res`` is preprocess-only and inert here. The compile
-        token-family budget is derived from the populated buckets (train.py) — all
-        within one tier's band, so ``compile_dynamic_seq`` keeps them at one graph.
+        Free-fit is the only resize mode: the bucket set is the union of the
+        distinct on-disk resized (W, H) sizes, so each latent exact-matches
+        its own shape and nothing AR-snaps at load — the on-disk caches are
+        the source of truth for which shapes/tiers are present; ``target_res``
+        is preprocess-only and inert here.
         """
         logger.info("loading image sizes.")
         for info in tqdm(self.image_data.values()):
@@ -801,8 +756,8 @@ class BaseDataset(torch.utils.data.Dataset):
 
         logger.info("make buckets")
 
-        # Remember the tier set so a later rebuild (e.g. restrict_to_byg_tuples)
-        # re-buckets identically.
+        # Remembered so a later rebuild (e.g. restrict_to_byg_tuples) re-buckets
+        # identically.
         self._target_res = target_res
 
         if self.bucket_manager is None:
@@ -872,10 +827,9 @@ class BaseDataset(torch.utils.data.Dataset):
                 )
 
         if starved:
-            # Free-fit buckets on native (W, H) fragment finely, so a small
-            # dataset can leave several buckets under batch_size. Those round to
-            # zero batches here and are never fetched in ANY epoch (unlike the
-            # len % batch_size tail, which shuffle_buckets() rotates per epoch).
+            # Free-fit buckets fragment finely; small datasets can leave buckets
+            # under batch_size, which round to zero batches and are NEVER
+            # fetched (unlike the len % batch_size tail, rotated per epoch).
             n_lost = sum(count for _, count in starved)
             logger.warning(
                 f"{n_lost} image(s) across {len(starved)} bucket(s) hold fewer "
@@ -898,12 +852,9 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def _preload_alpha_masks(self):
         """Load mask PNGs into memory once as uint8 [H, W] tensors at
-        bucket_reso, so the dataloader hot path doesn't re-decode + resize a
-        PNG on every fetch. Mask files generated by `make mask` are already at
-        post-resize resolution (matches bucket_reso), so no resize is needed
-        in the common case; we only resize as a safety net for stale masks.
-        Skipped for subsets with random_crop=True since image size varies per
-        fetch in that case.
+        bucket_reso, so the dataloader hot path doesn't re-decode + resize on
+        every fetch (resize is only a safety net for stale masks). Skipped for
+        subsets with random_crop=True since image size varies per fetch.
         """
         targets = [
             info
@@ -943,23 +894,12 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def _largest_bucket_first(self):
         """Pin one batch of EACH token-count family to the front of the epoch
-        order, largest-token-first.
-
-        Under native-shape bucketing each distinct token count traces its own
-        ``torch.compile`` block graph. The first time a graph runs it both peaks
-        the caching-allocator activations AND loads its inductor kernel module +
-        cuBLAS/cuDNN/flash workspaces into the CUDA context (the latter is
-        ``nvidia-smi``-visible but invisible to ``torch.cuda.memory_reserved``).
-        Front-loading only the single biggest bucket warms one graph; the others
-        compile lazily as the shuffle reaches them, so context VRAM ramps up
-        ~mid-epoch then plateaus. Warming one batch of every family up front
-        forces all graphs to compile in the first few steps — peak (allocator +
-        context) lands at start, so a too-tight budget fails fast instead of
-        creeping up mid-run. See [[project_compile_context_vram_climb]].
-
-        Equal token count ⟺ equal pixel area (each native bucket exactly fills
-        its count), so distinct areas == distinct graph families. Only the
-        leading batches are reordered; the rest of the epoch stays shuffled.
+        order, largest-token-first. Each token count traces its own
+        torch.compile block graph; warming every family up front forces all
+        graphs (and their CUDA-context VRAM, invisible to
+        ``torch.cuda.memory_reserved``) to compile in the first few steps
+        instead of creeping up mid-epoch. Only the leading batches are
+        reordered; the rest of the epoch stays shuffled.
         """
         if not self.buckets_indices:
             return
@@ -1004,11 +944,8 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def is_latents_cache_complete(self) -> bool:
         """True iff every image already has a valid on-disk latents cache.
-
-        Read-only probe (no model, no GPU) used by the trainer to decide
-        whether the VAE needs loading at all. Mirrors the per-file skip
-        condition inside ``new_cache_latents``; honours ``skip_cache_check``
-        via the strategy's ``is_disk_cached_latents_expected``.
+        Read-only probe used by the trainer to decide whether the VAE needs
+        loading at all; mirrors the skip condition in ``new_cache_latents``.
         """
         caching_strategy = LatentsCachingStrategy.get_strategy()
         if caching_strategy is None or not caching_strategy.cache_to_disk:
@@ -1018,8 +955,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 continue
             subset = self.image_to_subset[info.image_key]
             # latent_cache_dir (when set) redirects only the target-latent
-            # cache — TE/PE still resolve via text_cache_dir/cache_dir. Lets
-            # colorize read prep-corrected (white-balanced) target latents.
+            # cache — TE/PE still resolve via text_cache_dir/cache_dir.
             npz_path = caching_strategy.get_latents_npz_path(
                 info.absolute_path,
                 info.image_size,
@@ -1038,10 +974,8 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def is_text_encoder_outputs_cache_complete(self) -> bool:
         """True iff every image already has a valid on-disk text-encoder cache.
-
-        Read-only probe (no model, no GPU) used by the trainer to decide
-        whether the text encoder needs loading at all. Mirrors the per-file
-        skip condition inside ``new_cache_text_encoder_outputs``.
+        Read-only probe; mirrors the skip condition in
+        ``new_cache_text_encoder_outputs``.
         """
         caching_strategy = TextEncoderOutputsCachingStrategy.get_strategy()
         if caching_strategy is None or not caching_strategy.cache_to_disk:
@@ -1060,12 +994,11 @@ class BaseDataset(torch.utils.data.Dataset):
     def count_repa_pe_sidecars(self) -> Tuple[int, int]:
         """Return ``(present, total)`` REPA PE sidecars for this dataset.
 
-        Read-only probe (no model, no GPU). ``present`` counts images whose
-        ``{stem}_anima_{repa_pe_encoder}.safetensors`` resolves on disk via the
-        same fallback chain ``_try_load_repa_pe`` uses; ``total`` is the image
-        count. The trainer calls this when ``use_repa`` is on to catch a
-        fully-absent / partial PE cache before it silently disables the REPA
-        alignment term. Returns ``(0, 0)`` when PE loading is off.
+        Read-only probe; ``present`` counts images whose PE safetensors
+        resolves via the same fallback chain as ``_try_load_repa_pe``. Lets
+        the trainer catch a fully-absent/partial PE cache before it silently
+        disables the REPA alignment term. Returns ``(0, 0)`` when PE loading
+        is off.
         """
         if not self.load_repa_pe:
             return (0, 0)
@@ -1078,10 +1011,7 @@ class BaseDataset(torch.utils.data.Dataset):
         return (present, total)
 
     def new_cache_latents(self, model: Any, accelerator: Accelerator):
-        r"""
-        a brand new method to cache latents. This method caches latents with caching strategy.
-        normal cache_latents method is used by default, but this method is used when caching strategy is specified.
-        """
+        """Caches latents using a caching strategy (vs. the plain cache_latents)."""
         logger.info("caching latents with caching strategy.")
         caching_strategy = LatentsCachingStrategy.get_strategy()
         image_infos = list(self.image_data.values())
@@ -1137,8 +1067,6 @@ class BaseDataset(torch.utils.data.Dataset):
                     continue
 
                 if caching_strategy.cache_to_disk:
-                    # latent_cache_dir redirects only the target-latent cache
-                    # (see is_latents_cache_complete).
                     info.latents_npz = caching_strategy.get_latents_npz_path(
                         info.absolute_path,
                         info.image_size,
@@ -1160,10 +1088,9 @@ class BaseDataset(torch.utils.data.Dataset):
                     if cache_available:
                         continue
 
-                    # latent_cache_dir is prep-populated with *corrected*
-                    # targets (e.g. white-balanced colorize targets); a latent
-                    # missing here gets encoded from the ORIGINAL image, which
-                    # silently skips the correction. Warn loudly, once per stem.
+                    # latent_cache_dir holds *corrected* targets (e.g. white-
+                    # balanced colorize); a missing latent here silently falls
+                    # back to encoding the ORIGINAL image. Warn loudly.
                     if getattr(subset, "latent_cache_dir", None):
                         logger.warning(
                             f"latent_cache_dir is set but {info.latents_npz} is "
@@ -1297,9 +1224,7 @@ class BaseDataset(torch.utils.data.Dataset):
     def new_cache_text_encoder_outputs(
         self, models: List[Any], accelerator: Accelerator
     ):
-        r"""
-        a brand new method to cache text encoder outputs. This method caches text encoder outputs with caching strategy.
-        """
+        """Caches text encoder outputs using a caching strategy."""
         tokenize_strategy = TokenizeStrategy.get_strategy()
         text_encoding_strategy = TextEncodingStrategy.get_strategy()
         caching_strategy = TextEncoderOutputsCachingStrategy.get_strategy()
@@ -1319,8 +1244,7 @@ class BaseDataset(torch.utils.data.Dataset):
             subset = self.image_to_subset.get(info.image_key)
             if caching_strategy.cache_to_disk:
                 # text_cache_dir (when set) redirects only the TE cache —
-                # latents still resolve under cache_dir. Lets colorization read
-                # re-encoded color-only captions without re-caching latents.
+                # latents still resolve under cache_dir.
                 te_out_npz = caching_strategy.get_outputs_npz_path(
                     info.absolute_path,
                     cache_dir=(
@@ -1473,8 +1397,8 @@ class BaseDataset(torch.utils.data.Dataset):
             batches.append(batch)
 
         logger.info("caching text encoder outputs...")
-        # Note: SD/SDXL/SD3 specific batch caching functions are not included in this stripped version.
-        # Anima uses new_cache_text_encoder_outputs with caching strategy instead.
+        # SD/SDXL/SD3 batch caching not included; Anima uses
+        # new_cache_text_encoder_outputs with a caching strategy instead.
 
     def get_image_size(self, image_path):
         if image_path.endswith(".jxl") or image_path.endswith(".JXL"):
@@ -1513,13 +1437,11 @@ class BaseDataset(torch.utils.data.Dataset):
     def _load_cond_latent(
         self, subset, image_info, flipped: bool
     ) -> Optional[torch.Tensor]:
-        """Load the *condition* latent for cond≠target tasks (e.g. colorization).
+        """Load the *condition* latent for cond!=target tasks (e.g. colorization).
 
-        Resolves a stem-matched ``{stem}_{WxH}_anima.npz`` under
-        ``subset.cond_cache_dir`` (nested under the source subpath, mirroring the
-        target cache). Returns the bucket-matched tensor, flip-aligned to the
-        target, or ``None`` when the subset has no ``cond_cache_dir`` configured
-        (→ caller falls back to the ref==target latent)."""
+        Resolves ``{stem}_{WxH}_anima.npz`` under ``subset.cond_cache_dir``.
+        Returns the bucket-matched tensor, flip-aligned to target, or ``None``
+        when unconfigured (caller falls back to ref==target latent)."""
         cond_dir = getattr(subset, "cond_cache_dir", None)
         if not cond_dir:
             return None
@@ -1529,14 +1451,12 @@ class BaseDataset(torch.utils.data.Dataset):
             cache_dir=str(cond_dir),
             image_dir=subset.image_dir,
         )
-        # The cond is loaded at the target's bucket by default (the common case:
-        # cond and target share a shape). Under free-fit the cond is a paired but
-        # *distinct* image (e.g. the near-twin _tags member) that can land at a
-        # DIFFERENT free-fit shape, so the same-bucket path won't exist — fall back
-        # to the cond filed at its own shape (glob by stem; exactly one cond per
-        # target) and read its reso from the filename. cond≠target shapes are fine
-        # downstream: the EasyControl cond stream encodes at the cond's native token
-        # count, and cond_diff_loss self-skips on a shape mismatch.
+        # Cond loads at the target's bucket by default. Under free-fit the cond
+        # is a distinct paired image that can land at a DIFFERENT free-fit
+        # shape, so the same-bucket path may not exist — fall back to the cond
+        # filed at its own shape (glob by stem) and read reso from the
+        # filename; downstream (EasyControl cond stream, cond_diff_loss)
+        # tolerates cond!=target shapes.
         cond_reso = image_info.bucket_reso
         if not os.path.exists(npz_path):
             suffix = self.latents_caching_strategy.ANIMA_LATENTS_NPZ_SUFFIX
@@ -1568,12 +1488,8 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def _caption_key(self, info: ImageInfo) -> str:
         """Caption-index key for an image (posix relpath under its subset's
-        ``image_dir``, extension stripped — see :func:`library.io.cache.caption_key`).
-
-        Matches the key ``build_caption_index`` writes: the resized subdir tree
-        mirrors the original caption tree, so relativizing this image's path
-        against ``subset.image_dir`` reproduces the same ``subdir/stem`` key and
-        keeps duplicate bare stems across folders (``en/1`` vs ``ew/1``) distinct.
+        ``image_dir``, extension stripped — matches ``build_caption_index``,
+        keeps duplicate bare stems across folders distinct).
         """
         from library.io.cache import caption_key
 
@@ -1593,17 +1509,12 @@ class BaseDataset(torch.utils.data.Dataset):
         cached negative text embeddings (``neg_crossattn_emb``) per example for
         the soft-tokens contrastive objective.
 
-        ``mode`` (docs/proposal/soft_tokens_contrastive.md):
-          - ``shuffled``    — an unrelated image (no character/copyright overlap).
-          - ``jaccard``     — shuffled sourcing + a per-negative tag-overlap
-            weight (``neg_jaccard``) the loss uses to down-weight near-misses.
-          - ``hard``        — a same-artist / different-character sibling (falls
-            back to shuffled for orphan artists).
-          - ``hard_backoff`` — tiered hard negative: same-artist/different-
-            character → same-copyright/different-character → shuffled. The
-            copyright tier rescues most of ``hard``'s ~71% orphan fallback.
+        ``mode`` (see _archive/proposals/soft_tokens_contrastive.md): ``shuffled``
+        (unrelated image), ``jaccard`` (shuffled + tag-overlap weight), ``hard``
+        (same-artist/different-character, falls back to shuffled), ``hard_backoff``
+        (hard, then same-copyright/different-character, then shuffled).
 
-        The candidate pool is restricted to this dataset's registered stems so
+        Candidate pool is restricted to this dataset's registered stems so
         negatives never leak in from another split."""
         if mode not in ("shuffled", "jaccard", "hard", "hard_backoff"):
             raise ValueError(
@@ -1631,11 +1542,9 @@ class BaseDataset(torch.utils.data.Dataset):
                 f"Re-run `make caption-index` if the dataset changed."
             )
 
-        # One-shot hardness diagnostic: tally the negative *level* each registered
-        # stem would draw under this mode (one deterministic draw per stem). Lets
-        # you read the strict-vs-shuffled mix before committing to a run — e.g.
-        # how much of `hard`'s shuffled fallback the `hard_backoff` copyright tier
-        # actually rescues. Skipped for shuffled/jaccard (every draw is shuffled).
+        # One-shot hardness diagnostic: tally the negative level each registered
+        # stem would draw under this mode, to read the strict-vs-shuffled mix
+        # before a run. Skipped for shuffled/jaccard (every draw is shuffled).
         if mode in ("hard", "hard_backoff"):
             from collections import Counter
 
@@ -1658,10 +1567,8 @@ class BaseDataset(torch.utils.data.Dataset):
     def _load_te_for_stem(
         self, stem: str, subset, rel_dir: str
     ) -> Optional[torch.Tensor]:
-        """Load a *negative* stem's cached text embedding (post-LLM-adapter
-        ``crossattn_emb``) by reconstructing its nested cache path
-        (``cache_dir/<rel_dir>/<stem>_anima_te.safetensors``, with a flat
-        fallback). Returns ``(S, D)`` or None."""
+        """Load a *negative* stem's cached ``crossattn_emb`` by reconstructing
+        its nested cache path (with a flat fallback). Returns ``(S, D)``."""
         from safetensors import safe_open
 
         suffix = "_anima_te.safetensors"
@@ -1731,40 +1638,32 @@ class BaseDataset(torch.utils.data.Dataset):
             example[spec.out_key] = torch.stack(values, dim=0) if ok else None
 
     def enable_sigma_demote(self, native_edge: int, demote_edge: int) -> None:
-        """sigma_lowres Phase 1b: activate the σ-demote sidecar channel.
-
-        Every image whose bucket sits in ``native_edge``'s token band gets its
-        demote-tier sibling latent loaded onto the batch (``demoted_latents``);
-        images native to other tiers ride through with ``None`` (their batches
-        always train native). Call on the *train* datasets only.
+        """Activate the sigma-demote sidecar channel: every image in
+        ``native_edge``'s token band gets its demote-tier sibling latent
+        loaded onto the batch (``demoted_latents``); other tiers ride through
+        as ``None`` (train native). Call on the *train* datasets only.
         """
         self._sigma_demote = (int(native_edge), int(demote_edge))
 
     def enable_sigma_demote2(self, native_edge: int, demote_edge: int) -> None:
-        """E16 stacked router: activate the SECONDARY σ-demote sidecar
-        (``demoted_latents2``) for a second, deeper route — the trainer's
-        rule 2 (own gate/window/span, priority over rule 1)."""
+        """Stacked router: activate the SECONDARY sigma-demote sidecar
+        (``demoted_latents2``) — the trainer's rule 2, priority over rule 1."""
         self._sigma_demote2 = (int(native_edge), int(demote_edge))
 
     def _try_load_demoted_latent(self, info: ImageInfo) -> Optional[torch.Tensor]:
-        """σ-demote sibling latent: the ``demoted_{H}x{W}`` key inside the
-        native npz (emitted by ``make preprocess-demote``). None when the image
-        is off the demote route (e.g. a native-896 original on the 1024→896
-        route), latents aren't npz-cached, or the npz predates the emit — the
-        batch then trains native, so a partial emit degrades instead of
-        crashing."""
+        """Sigma-demote sibling latent: the ``demoted_{H}x{W}`` key inside the
+        native npz (emitted by ``make preprocess-demote``). None when off-route,
+        uncached, or the npz predates the emit — degrades to native, no crash."""
         return self._load_demoted_sibling(info, self._sigma_demote)
 
     def _try_load_demoted_latent2(self, info: ImageInfo) -> Optional[torch.Tensor]:
         """Secondary-route sibling (``demoted_latents2``) — same npz, its own
-        ``demoted_{H}x{W}`` key (the two routes' buckets never collide)."""
+        ``demoted_{H}x{W}`` key."""
         return self._load_demoted_sibling(info, self._sigma_demote2)
 
     def _demote_warn_once(self, route: Tuple[int, int], msg: str, *fmt) -> None:
-        """Warn once PER ROUTE. A single shared flag would let a stale image on
-        the primary route swallow the warning for a wholly un-emitted secondary
-        route — the stacked router would then quietly degrade to the primary
-        rule, whose only symptom is a few points of wall-clock."""
+        """Warn once PER ROUTE — a single shared flag would let the primary
+        route swallow the warning for a wholly un-emitted secondary route."""
         if route in self._sigma_demote_warned:
             return
         self._sigma_demote_warned.add(route)
@@ -1810,10 +1709,8 @@ class BaseDataset(torch.utils.data.Dataset):
             return None
 
     def _open_demote_npz(self, path):
-        """One-slot memo over the sample's npz. ``__getitem__`` runs every
-        sidecar loader back-to-back for the same image, so a stacked router
-        would otherwise re-open (and re-read the zip directory of) the same
-        archive once per route."""
+        """One-slot memo over the sample's npz — avoids re-opening the same
+        archive once per sidecar route in a stacked router."""
         cached = self._demote_npz_cache
         if cached is not None and cached[0] == path:
             return cached[1]
@@ -1824,9 +1721,8 @@ class BaseDataset(torch.utils.data.Dataset):
         return npz
 
     def __getstate__(self):
-        # An open NpzFile is not picklable, and the dataset is shipped to
-        # DataLoader workers under Windows/`spawn` — drop the memo (workers
-        # refill it on their first __getitem__).
+        # An open NpzFile isn't picklable (dataset ships to workers under
+        # spawn) — drop the memo; workers refill it on first __getitem__.
         state = self.__dict__.copy()
         state["_demote_npz_cache"] = None
         return state
@@ -1856,17 +1752,10 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def _repa_pe_sidecar_candidates(self, info: ImageInfo) -> List[str]:
         """Candidate paths for the ``{stem}_anima_{encoder}.safetensors``
-        sidecar, in resolution order (issues.md P2.2):
-
-        1. next to the TE cache (the common case — TE and PE caches share
-           ``subset.cache_dir``, and the TE npz path already encodes any
-           nested-subdir mirroring),
-        2. the subset latent-cache dir, replicating the writer's nesting rule
-           (``make preprocess-pe`` resolves via ``resolve_cache_path`` with
-           ``cache_dir``+``image_dir``) — needed when ``text_cache_dir``
-           redirects only the TE cache (colorize) so candidate 1 lands in a
-           directory with no sidecars,
-        3. next to the image (legacy no-cache_dir layout).
+        sidecar, in resolution order: (1) next to the TE cache — the common
+        case; (2) the subset latent-cache dir, needed when ``text_cache_dir``
+        redirects only the TE cache (colorize) so (1) has no sidecars; (3) next
+        to the image (legacy no-cache_dir layout).
         """
         # PE features are tier-independent (semantic), so autoscale tier variants
         # share one sidecar — strip the .as<edge> marker (no-op off autoscale).
@@ -1898,13 +1787,9 @@ class BaseDataset(torch.utils.data.Dataset):
     def _try_load_repa_pe(self, info: ImageInfo) -> Optional[torch.Tensor]:
         """Load cached ``{stem}_anima_{encoder}.safetensors`` patch tokens.
 
-        Returns the ``[T, d_enc]`` feature tensor (CLS still at index 0), or
-        None when loading is off / the sidecar is missing (the adapter then
-        skips the REPA term for that batch). Resolution walks the fallback
-        chain in ``_repa_pe_sidecar_candidates`` because the TE cache can be
-        redirected away from where ``make preprocess-pe`` wrote the sidecar
-        (``text_cache_dir`` — colorize). Mirrors
-        ``library.training.cmmd.resolve_pe_sidecar`` for candidate 1.
+        Returns ``[T, d_enc]`` (CLS still at index 0), or None when loading is
+        off / the sidecar is missing (adapter skips the REPA term for that
+        batch). Resolution walks ``_repa_pe_sidecar_candidates``.
         """
         if not self.load_repa_pe:
             return None
@@ -1921,14 +1806,10 @@ class BaseDataset(torch.utils.data.Dataset):
     def restrict_to_byg_tuples(self) -> tuple[int, int]:
         """Drop images lacking a BYG edit-tuple sidecar, then rebuild buckets.
 
-        ``build_edit_tuples`` only emits a ``<stem>_byg.safetensors`` for captions
-        containing a swappable tag (v1: a color word); images without one carry no
-        BYG training signal. Collation silently omits ``byg_*_emb`` whenever *any*
-        sample in a bucket-batch lacks a tuple (see ``__getitem__``), so the
-        adapter raises mid-epoch the first time such a batch is drawn. Filtering
-        the registry up front guarantees every batch is fully-tupled.
-
-        Returns ``(kept, dropped)`` image counts.
+        Collation silently omits ``byg_*_emb`` whenever *any* sample in a
+        bucket-batch lacks a tuple, so the adapter would raise mid-epoch the
+        first time such a batch is drawn — filtering up front guarantees every
+        batch is fully-tupled. Returns ``(kept, dropped)`` image counts.
         """
         if not self.byg_text_dir:
             return (0, 0)
@@ -1944,8 +1825,6 @@ class BaseDataset(torch.utils.data.Dataset):
         if dropped == 0:
             return (len(kept), 0)
         self.image_data = kept
-        # Keep the repeat-weighted train-image count in sync (matches the
-        # num_repeats * num_images definition in DreamBoothDataset).
         self.num_train_images = sum(info.num_repeats for info in kept.values())
         # bucket_manager.add_image accumulates, so reset before re-bucketing.
         self.bucket_manager = None
@@ -1956,8 +1835,7 @@ class BaseDataset(torch.utils.data.Dataset):
         """Load <stem>_byg.safetensors from self.byg_text_dir.
 
         Returns ``{f"{role}_emb": Tensor[S,D], f"{role}_mask": Tensor[S]}`` for
-        the four edit-tuple roles, or None if the sidecar is missing / malformed
-        (the BYG adapter raises a clear error if a sample lacks its tuple).
+        the four edit-tuple roles, or None if missing/malformed.
         """
         if not self.byg_text_dir:
             return None
@@ -1983,9 +1861,8 @@ class BaseDataset(torch.utils.data.Dataset):
         """Load one sample's pixels-or-latents plus its alpha mask.
 
         Serves from the in-memory or npz latent cache when present, otherwise
-        decodes the image from disk (with crop/resize, color aug, and mask
-        resolution). Honors ``flipped`` throughout and applies the
-        ``preloaded_alpha_mask`` override (mask_dir is the source of truth).
+        decodes from disk. Honors ``flipped`` throughout; ``preloaded_alpha_mask``
+        (mask_dir) overrides any other mask source.
 
         Returns ``(image, latents, alpha_mask, original_size, crop_ltrb)``;
         exactly one of ``image`` / ``latents`` is non-None.
@@ -2090,13 +1967,10 @@ class BaseDataset(torch.utils.data.Dataset):
     def _draw_contrastive_negatives(self, target_stem, subset):
         """Draw k soft-tokens contrastive negatives for one target, or (None, None).
 
-        Draws k unrelated stems and loads their cached text embeddings.
-        Deterministic per target on the rare chance this dataset is used for
-        validation; random in training. Returns ``(neg_crossattn, neg_jaccard)``
-        — a (k, S, D) stack of negative embeddings and, in jaccard mode, a (k,)
-        tag-overlap weight vector. Either is None when no sampler is attached,
-        the target is absent from the index, or k distinct negatives couldn't be
-        reached (the adapter then skips the contrastive forward).
+        Returns ``(neg_crossattn, neg_jaccard)`` — a (k, S, D) stack of negative
+        embeddings and, in jaccard mode, a (k,) tag-overlap weight vector.
+        Either is None when no sampler is attached, the target is absent from
+        the index, or k distinct negatives couldn't be reached.
         """
         neg_sampler = self.contrastive_neg_sampler
         if neg_sampler is None or not neg_sampler.has(target_stem):
@@ -2136,14 +2010,9 @@ class BaseDataset(torch.utils.data.Dataset):
     @staticmethod
     def _guard_item_load(image_info, what: str, thunk):
         """Run a per-item disk load, turning a bare loader exception (corrupt
-        npz, missing/mismatched safetensors key, …) into a clear error that
-        names the offending image and its cache files.
-
-        Without this, a single bad cache raises deep inside safetensors/numpy
-        with no file context; under a Windows DataLoader worker that surfaces
-        as an opaque "training froze at epoch 1" rather than an actionable
-        error. Naming the file makes it debuggable and re-fixable (re-run
-        ``make preprocess-*`` for that image)."""
+        npz, missing/mismatched safetensors key) into a clear error naming
+        the offending image and its cache files — without this a bad cache
+        surfaces as an opaque "training froze" under a Windows worker."""
         try:
             return thunk()
         except Exception as e:
@@ -2329,14 +2198,9 @@ class BaseDataset(torch.utils.data.Dataset):
         neg_crossattn_list,
         neg_jaccard_list,
     ):
-        """Stack the per-sample lists gathered in ``__getitem__`` into one batch.
-
-        Owns the tensor-stacking / None-handling for every channel: pixels,
-        latents, cond latents, alpha masks (ragged-fill), text encoder outputs
-        and input ids (via :func:`none_or_stack_elements`), size/crop metadata,
-        registered sidecars, and soft-tokens contrastive negatives. Returns the
-        ``example`` dict consumed by the collator.
-        """
+        """Stack the per-sample lists gathered in ``__getitem__`` into one batch
+        dict consumed by the collator (pixels, latents, cond latents, alpha
+        masks, text encoder outputs, sidecars, contrastive negatives, etc)."""
         example = {}
         example["custom_attributes"] = custom_attributes
         example["loss_weights"] = torch.FloatTensor(loss_weights)
@@ -2383,12 +2247,9 @@ class BaseDataset(torch.utils.data.Dataset):
         example["latents"] = (
             torch.stack(latents_list) if latents_list[0] is not None else None
         )
-        # Condition latent for cond≠target tasks (colorization / near-twin removal).
-        # Targets in a batch share a bucket, so same-shape conds stack plainly. Under
-        # free-fit a cond can land at a different shape than its target, so conds in
-        # one batch may be ragged — fine at batch_size=1 (the EasyControl default; a
-        # 1-element stack is shape-agnostic). For batch_size>1 a ragged batch can't
-        # stack, so fail with a clear message instead of a cryptic torch error.
+        # Cond latent (cond!=target tasks): under free-fit a cond can land at a
+        # different shape than its target, so a batch can be ragged — fine at
+        # batch_size=1, but fails loudly (not a cryptic torch error) above 1.
         if cond_latents_list and cond_latents_list[0] is not None:
             shapes = {tuple(c.shape) for c in cond_latents_list}
             if len(shapes) > 1:
@@ -2418,32 +2279,24 @@ class BaseDataset(torch.utils.data.Dataset):
             [self.network_multiplier] * len(captions)
         )
 
-        # Registered sidecars: inversion_runs/_mask (masked — placeholder zeros
-        # for absent samples), byg_{role}_emb/_mask (dict — keys absent unless
-        # every sample carries a tuple, so the BYG adapter fails loudly),
-        # repa_pe_features (all-or-nothing + shape guard). See SidecarSpec.
+        # Registered sidecars — see SidecarSpec for the collation policies.
         for spec in self._sidecar_specs:
             self._collate_sidecar(spec, sidecar_values[spec.name], example)
 
-        # Soft-tokens contrastive negatives: (B, k, S, D) cached text embeddings.
-        # All cached crossattn_emb share the padded sequence length, so a plain
-        # stack works. None when no sampler is attached (or any target in the
-        # bucket couldn't reach k distinct negatives).
+        # Soft-tokens contrastive negatives: (B, k, S, D). None when no sampler
+        # is attached or any target couldn't reach k distinct negatives.
         if neg_crossattn_list and all(t is not None for t in neg_crossattn_list):
             example["neg_crossattn_emb"] = torch.stack(neg_crossattn_list, dim=0)
         else:
             example["neg_crossattn_emb"] = None
-        # Per-negative tag-overlap weights (B, k) for jaccard mode; None for
-        # shuffled / hard (the loss then runs plain InfoNCE).
+        # Per-negative tag-overlap weights (B, k) for jaccard mode; None otherwise.
         if neg_jaccard_list and all(t is not None for t in neg_jaccard_list):
             example["neg_jaccard"] = torch.stack(neg_jaccard_list, dim=0)
         else:
             example["neg_jaccard"] = None
 
-        # Per-item identity (image_data keys, i.e. absolute paths). Always
-        # present: the debug walker and the online memorization Δ-gap tracker
-        # (library/training/mem_reweight.py) key their state off these; a
-        # short string list rides the batch like ``captions``.
+        # Per-item identity (absolute paths). Always present: the debug walker
+        # and library/training/mem_reweight.py key state off these.
         example["image_keys"] = bucket[image_index : image_index + self.batch_size]
         return example
 

@@ -1,16 +1,3 @@
-# Turbo Anima — DP-DMD distillation (docs: docs/methods/turbo.md).
-#
-# Read by scripts/distill_turbo/ — NOT by train.py. Schema is bespoke
-# (sections instead of flat kwargs). Don't `python tasks.py print-config METHOD=turbo`.
-#
-# Diversity-Preserved DMD (Wu et al., arXiv:2602.03139) on a frozen Anima DiT:
-# an N-step rollout student whose first step is supervised toward a teacher
-# K-step CFG anchor (diversity) then detached, with DMD refining x_θ over steps
-# 2..N (quality) against a co-trained fake/critic LoRA. Output
-# `output/ckpt/anima_turbo.safetensors` is a normal LoRA — load it through the
-# standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
-# student during distillation).
-
 output_name = "anima_turbo_U"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
@@ -21,14 +8,9 @@ batch_size = 1
 seed = 42
 use_masked_loss = true
 
-channel_scaling_alpha = 0.0 # channel scaling alpha harmed training
+channel_scaling_alpha = 0.0
 compile_dynamic_seq = true
 activation_memory_budget = 0.99
-# partitioner_aggressive_recomputation = true  # further VRAM lever on top of the
-#                                              # budget (the settled one — lets the
-#                                              # default partition recompute banned
-#                                              # op classes). Ignored under --grad_ckpt.
-# partitioner_recompute_views = true           # stop saving view ops (pins bases alive)
 
 base_loss = "dpdmd"
 
@@ -40,7 +22,6 @@ fake_alpha = 192
 attn_mode = "flash"
 
 train_adaln = true
-# fake_adaln = false
 adaln_rank = 16
 adaln_alpha = 90
 fake_tau_banks = 1
@@ -51,38 +32,17 @@ per_step_expert = false
 student_init_weights = "models/extracted/anima_turboV10_delta_r80_asvd_adaln.safetensors"
 fake_init_weights = "models/extracted/anima_turboV10_delta_r80_asvd_adaln.safetensors"
 
-# DMD schedule.
 [dmd]
 student_steps = 4
 teacher_cfg = 4
-# CDM dynamic continuous schedule (arXiv:2605.06376): re-sample the student
-# rollout grid every iteration — N ~ U{2..student_steps} (dpdmd; {1..} for plain
-# dmd), interior anchors continuous-uniform, t1=1 pinned so the DP diversity
-# anchor composes unchanged. Trains v_θ over continuous t instead of only the 4
-# inference points. false → bit-identical legacy fixed-grid loop. Validation
-# renders and inference always use the static flow_shift grid.
 dynamic_schedule = true
-dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
-norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
+dm_x0_norm = true
+norm_floor = 0.05
 grad_step = "random"
 
-# CDM off-trajectory loss (L_CDM, arXiv:2605.06376 §3.3; docs/proposal/cdm.md
-# Phase 1). From the DMD grad step's on-trajectory point, Euler-extrapolate a
-# large random stride to t' ~ U(0,1) and supervise the student's local clean
-# estimate there with the same real-vs-fake delta as the DM branch (variant A:
-# CFG'd real score). Targets truncation drift — the off-manifold states few-step
-# Euler actually traverses, which stay unsupervised even under dynamic_schedule.
-# 0 = off (byte-identical loop, no extra forwards/RNG). Cost when on: +1 student
-# grad forward (unsloth-ckpt'd + backwarded in-branch → peak VRAM ≈ baseline,
-# ~+1 recomputed eager forward), +2 teacher & +1 fake no-grad per iteration
-# (~+50-60% step time with the GAN still on).
-# ENABLEMENT IS GATED on the Phase-0 2k verdict (queued.md) — wired ahead of it,
-# do not flip on before that read lands. Incompatible with per_step_expert,
-# --grad_ckpt, and blocks_to_swap > 0 (refused at config resolve).
 [cdm]
 weight = 0.0
 
-# Optimization.
 [optim]
 student_lr = 5e-5
 fake_lr = 5e-5
@@ -91,69 +51,46 @@ fake_warmup_steps = 200
 weight_decay = 0.0
 grad_clip = 1.0
 
-# DP-DMD diversity anchor. Step 1 of the N-step student rollout is supervised
-# toward a teacher K-step CFG anchor (the diverse landing point) then detached;
-# DMD refines x_θ over steps 2..N. teacher_cfg (above) is the anchor's CFG scale;
-# student_steps is N.
 [dpdmd]
-k_anchor = 6                    # teacher steps rolled to the diversity anchor (their K)
-teacher_anchor_steps = 12        # teacher σ-grid the K is counted against
-div_weight = 0.05               # λ on the first-step diversity MSE
-detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
+k_anchor = 6
+teacher_anchor_steps = 12
+div_weight = 0.05
+detach_after_first = true
 
-# τ sampling distribution for the fake/critic update (+ fake warmup).
 [sampling]
-t_distribution = "uniform"      # "uniform" or "sigmoid"
+t_distribution = "uniform"
 sigmoid_scale = 1.0
-flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
-
-# DMD2 teacher-feature GAN (FastGen idea 1; _archive/proposals/turbo_gan.md).
+flow_shift = 3.0
 
 [gan]
-weight_gen = 0.03               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
-feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
-disc_lr = 1e-5                  # discriminator AdamW LR
-disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2
-disc_head = "pooled"            # "pooled" = one logit per tap (v0) | "token" = LADD-style dense
-                                # per-token logits (same MLP per token — identical params, denser
-                                # real/fake signal; resume bundles load across a switch)
-delay_steps = 0                 # hold generator-side λ at 0 for the first N steps (disc still
-                                # trains) — escape window for a collapsed warm start; the token
-                                # head at full λ from step 0 freezes pose at the init's mode
-warmup_steps = 0                # then ramp λ linearly 0 → weight_gen over N steps (0 = instant)
-r1_weight = 0.0                 # approximate-R1 (APT) disc regularizer weight. 0 = off
-r1_alpha = 0.1                  # perturbation scale for the R1 input
-use_same_t_noise = true         # real disc branch reuses the fake step's (τ, ε) (FastGen default)
-grad_ckpt = true                # checkpoint ONLY the grad-bearing GAN gen forward (reclaims ~3 GB;
-                                # frozen teacher → numerically exact). Independent of global --grad_ckpt.
+weight_gen = 0.03
+feature_block_idx = -1
+disc_lr = 1e-5
+disc_hidden = 0
+disc_head = "pooled"
+delay_steps = 0
+warmup_steps = 0
+r1_weight = 0.0
+r1_alpha = 0.1
+use_same_t_noise = true
+grad_ckpt = true
 
-# f-distill reweighting (FastGen idea 2; stacks on the GAN, ~free).
-#
-# Reweights the DMD signal by an f-divergence weight h = f'(r), where the density
-# ratio r = exp(disc_logits) comes free from the GAN head above. f_div="rkl" ≡
-# uniform h ≡ plain DMD2 (the no-op default). Any other f_div REQUIRES
-# gan.weight_gen > 0. Targets mode-collapse — bench against the DP-DMD diversity
-# anchor (they may not be additive). Numerical care (ports of f_distill.py):
-# ±10 logit clamp, r∈[ratio_lower, ratio_upper], per-τ EMA histogram of r.
 [f_distill]
-f_div = "rkl"                   # rkl|kl|js|sf|neyman|sh|jf ; "rkl" = off (no-op)
+f_div = "rkl"
 ratio_lower = 0.1
 ratio_upper = 20.0
-ratio_ema_rate = 0.0            # per-τ histogram EMA decay (0 = instantaneous per-bin)
+ratio_ema_rate = 0.0
 bin_num = 10
-ratio_normalization = true      # per-τ histogram normalization of r
-
-# Soft-rank caption-discrimination auxiliary (turbo_caption_ranking.md Phase 1).
+ratio_normalization = true
 
 [softrank]
-weight = 0.0                    # λ on the soft-rank loss. 0 = off; first live value 0.05
-k = 2                           # shuffled-caption negatives per firing (chance 1/3 at k=2)
-every_n = 4                     # fire every N student steps (amortization; ≈ +k/N no_grad fwd/step)
-softness = 0.1                  # soft-rank temperature τ (smaller = closer to the hard integer rank)
-pool_size = 2                 # cross-step caption pool capacity (≈ pool_size MiB VRAM); must be >= k
-warmup_ratio = 1.0              # fill this fraction of the pool before firing (1.0 = full; ≈ pool_size steps @ B=1)
+weight = 0.0
+k = 2
+every_n = 4
+softness = 0.1
+pool_size = 2
+warmup_ratio = 1.0
 
-# Logging / checkpoints.
 [io]
 save_every = 500
 log_interval = 5

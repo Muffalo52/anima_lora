@@ -11,11 +11,31 @@ by other tests that legitimately import torch):
   moment a heavy import sneaks back into the ``gui.app`` chain, regardless of
   how fast the machine is.
 * ``test_gui_launch_under_budget`` — end-to-end wall clock: import ``gui.app``,
-  build and show ``MainWindow`` offscreen. Budget is generous vs. the ~1.4s
+  build and show ``MainWindow`` offscreen. Budget is generous vs. the ~1.35s
   measured warm launch (Config/Preprocess eager, everything else behind
   ``LazyTabHolder``) so a loaded machine doesn't flake it, while a
   torch-sized regression — or eager-building the lazy tabs again — still
   trips.
+
+  Imports are NOT the usual suspect when this trips: they are ~0.18s of the
+  total, and construction is the rest. Split it before profiling imports::
+
+      t0 → import gui.app → QApplication() → MainWindow() → show()
+
+  Known construction costs, in case a future regression needs a baseline
+  (measured 2026-08-17, warm, offscreen):
+
+  * ``PreprocessingTab._refresh_status`` ~0.39s — stats the whole dataset
+    (``_filtered_files`` + ``count_preprocess_caches`` + ``_count_resized``,
+    ~26k ``stat`` calls). Scales with dataset size, so a big corpus makes this
+    the dominant term.
+  * ``tensorboard._refresh_runs`` ~0.26s — builds one row widget per run under
+    ``output/logs`` (661 of them here) for a panel that starts hidden. Scales
+    with run count.
+  * ~0.45s of genuine Qt widget-tree construction (``addWidget``).
+
+  Both scans are eager and could be deferred, but they feed UI the user sees
+  immediately; neither has been moved.
 """
 
 from __future__ import annotations
@@ -27,7 +47,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-LAUNCH_BUDGET_S = 2.0
+# Warm launch is ~1.35s; the headroom absorbs a loaded CI box and a dataset /
+# run-log tree larger than this checkout's (both scans above scale with it).
+LAUNCH_BUDGET_S = 2.5
 
 # Heavyweight modules that must never load in the GUI process.
 _FORBIDDEN = ("torch", "cv2")

@@ -1,14 +1,9 @@
-# ChimeraHydra: dual-pool additive MoE with TWO Cayley A's per Linear.
-#
-# Two independent HydraLoRAs (Tian et al., NeurIPS'24; arXiv:2404.19245) glued
-# at the residual — that's the chimera. The content half routes K_c B-heads
-# off the pooled post-LLM-adapter ``crossattn_emb`` (prompt content) via the
-# network-level ContentRouter. The frequency half routes K_f B-heads off the
-# network-level FreqRouter fed FEI of z_t (FeRA, arXiv:2511.17979). T-LoRA's
-# rank mask (Liu et al.; TimeStep Master, arXiv:2503.07416) modulates the
-# content half only — the freq half stays full-rank at every t, giving an
-# asymmetric "core expert always on" / "context expert rank-modulated" split
-# inspired by TimeStep Master's asymmetric mixture.
+# ChimeraHydra: dual-pool additive MoE with TWO Cayley A's per Linear — content
+# pool (K_c B-heads, routed by pooled crossattn_emb via the network-level
+# ContentRouter) + freq pool (K_f B-heads, routed by FEI(z_t) via the
+# network-level FreqRouter). T-LoRA's rank mask hits the content branch only
+# — the freq branch stays full-rank at every t (TimeStep Master-style
+# asymmetric mixture). See networks/CLAUDE.md and docs/experimental/chimera-hydra.md.
 #
 # Per Linear:
 #
@@ -21,21 +16,18 @@
 #     Δy = Σ_c π_c[c] · B_c[c] (A_c x · λ_c · mask_t(σ))     ◄ content branch
 #        + Σ_f π_f[f] · B_f[f] (A_f x · λ_f)                  ◄ freq    branch
 #
-# SVD partition gives free orthogonality on BOTH sides:
-#   * Top 2r right-singular vectors of W: first r → Q_basis_c, next r →
-#     Q_basis_f. Q_basis_c.row_space ⊥ Q_basis_f.row_space.
-#   * Top (K_c+K_f)·r left-singular vectors of W: first K_c·r partitioned
-#     into (K_c, out, r) → P_bases_c, next K_f·r partitioned into
-#     (K_f, out, r) → P_bases_f. Every P_bases_c[k].col_space ⊥ every
-#     P_bases_f[j].col_space.
+# SVD partition gives free orthogonality on BOTH sides: top 2r right-singular
+# vectors of W split r/r into Q_basis_c / Q_basis_f (row-spaces orthogonal);
+# top (K_c+K_f)·r left-singular vectors split K_c·r / K_f·r into P_bases_c /
+# P_bases_f (every expert's col-space orthogonal to every other's, within and
+# across pools).
 #
 # Both pools are network-routed and centered-gate by construction (the only
-# shipped configuration): each pool's gate is recentered to ``π − 1/K`` in the
-# forward and λ_c/λ_f start at ``lambda_init`` (>0). ΔW = 0 at init (base
-# preserved exactly) while each pool's disjoint per-expert P-subspaces still
-# feed its router a nonzero step-0 gradient. Both routers live at the network
-# level (``ContentRouter`` / ``FreqRouter`` in ``LoRANetwork``) and write π_c /
-# π_f into the slot-assigned buffers below; there is no per-Linear router.
+# shipped configuration): each pool's gate is recentered to ``π − 1/K`` and
+# λ_c/λ_f start at ``lambda_init`` (>0), so ΔW=0 at init while each pool's
+# disjoint per-expert P-subspaces still feed its router a nonzero step-0
+# gradient. No per-Linear router — ``ContentRouter``/``FreqRouter`` live on
+# ``LoRANetwork`` and write π_c/π_f into the slot-assigned buffers below.
 
 import logging
 from typing import Dict, List, Optional
@@ -53,18 +45,14 @@ class _ChimeraRoutingMixin:
     """Shared dual-pool routing plumbing for the train + inference modules.
 
     Both chimera classes carry two gate buffers — ``_content_routing_weights``
-    (π_c, written by the network-level ContentRouter) and
-    ``_freq_routing_weights`` (π_f, written by the network-level FreqRouter) —
-    and combine the two pools' up-projections identically. The slot-assign
-    contract (NO ``.detach()``, NO ``.copy_()`` — the buffer must carry the
-    router's ``grad_fn`` so ``∂L/∂π`` reaches the router parameters) lives here
-    once, mirroring ``router_state._set_routing_weights`` and the matching
-    methods on ``HydraLoRAModule``.
+    (π_c) and ``_freq_routing_weights`` (π_f) — slot-assigned (NO
+    ``.detach()``, NO ``.copy_()``) so the buffer keeps the router's
+    ``grad_fn`` and ``∂L/∂π`` reaches the router parameters. Mirrors
+    ``router_state._set_routing_weights`` / ``HydraLoRAModule``.
     """
 
     def _register_routing_buffers(self, K_c: int, K_f: int) -> None:
-        # Uniform 1/K placeholders, slot-assigned per-step by the network-level
-        # routers. Non-persistent — re-derived on construction.
+        # Uniform 1/K placeholders, non-persistent (re-derived on construction).
         self.register_buffer(
             "_content_routing_weights",
             torch.full((1, K_c), 1.0 / max(K_c, 1), dtype=torch.float32),
@@ -75,9 +63,7 @@ class _ChimeraRoutingMixin:
             torch.full((1, K_f), 1.0 / max(K_f, 1), dtype=torch.float32),
             persistent=False,
         )
-        # Cached (B, K_c+K_f) gate read by ``LoRANetwork._get_chimera_balance_
-        # loss`` (slices at K_c into independent per-pool Switch losses).
-        self._last_gate = None
+        self._last_gate = None  # (B, K_c+K_f), read by LoRANetwork's balance loss
 
     def set_freq_routing_weights(self, weights: torch.Tensor) -> None:
         """Slot-assign the freq pool's gates (preserves grad_fn)."""
@@ -163,32 +149,19 @@ class _ChimeraRoutingMixin:
 
 class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
     """ChimeraHydra training-time module: two Cayley A's, two B-pools, both
-    network-routed (content via ContentRouter, freq via FreqRouter).
-
-    Concretely two HydraLoRAs in parallel — same shape on each side, the
-    content half routed by the pooled ``crossattn_emb`` and the freq half by
-    FEI(z_t). T-LoRA's rank mask is folded into the content branch's effective
-    P only — the freq branch keeps full rank at every t (TimeStep Master-style
-    asymmetric pool).
-
-    The shared SVD of the base weight gives both pools their bases: distinct
-    singular-vector slices on each side ⇒ A_c.row_space ⊥ A_f.row_space and
-    B_c[*].col_space ⊥ B_f[*].col_space, structurally, at step 0. Cayley
-    rotates each within its assigned subspace.
+    network-routed (content via ContentRouter, freq via FreqRouter). See the
+    module header for the shape/formula summary.
 
     ``use_ortho_init=True`` swaps each pool's frozen-basis + Cayley
     parameterization for **trainable** fp32 SVD-seeded bases (``Q_basis_*`` /
-    ``P_bases_*`` become Parameters, ``S_*`` and the Cayley solve drop out). ΔW
-    is then uncapped — it can leave the principal 2r-subspace, the fix for
-    "chimera-ortho feels weak" — while keeping the W₀-aligned warm start.
-    Pool orthogonality holds at init and is free to drift thereafter. ΔW=0 at
-    init is unaffected (it comes from the centered uniform gate, not the basis).
+    ``P_bases_*`` become Parameters, ``S_*``/Cayley drop out) — ΔW can then
+    leave the principal 2r-subspace while keeping the W₀-aligned warm start;
+    ΔW=0 at init still holds (comes from the centered gate, not the basis).
 
-    Save distills Cayley → free-form per pool (see
-    :meth:`distill_save_state_dict` / :meth:`build_moe_state_dict` below); the
-    OrthoInit path is the same distill with R = I. Either way load rebuilds a
-    ``ChimeraHydraInferenceModule`` rather than re-instantiating this class —
-    the on-disk ``*_chimera.safetensors`` layout is identical.
+    Save distills Cayley → free-form per pool (:meth:`distill_save_state_dict`
+    / :meth:`build_moe_state_dict`; OrthoInit is the same distill with R = I).
+    Either way load rebuilds a ``ChimeraHydraInferenceModule`` — the on-disk
+    ``*_chimera.safetensors`` layout is identical.
     """
 
     def __init__(
@@ -239,31 +212,23 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
 
         self.use_ortho_init = bool(use_ortho_init)
 
-        # Per-expert capability levers (frozen-Cayley path only — the
-        # orthogonality-preserving alternative to ``use_ortho_init``, which
-        # frees the bases entirely and lets experts drift into the same
-        # subspace = "averaged network"). Both distill into the standard
-        # ``(K, out, r)`` up-stack, so on-disk / inference layout is unchanged.
-        #   * ``expert_basis_mult`` (m ≥ 1): each expert gets an over-complete
-        #     ``(out, M=m·r)`` frozen pool carved from a DISJOINT U-slice plus
-        #     an ``M×M`` Cayley rotation; the forward selects the first r
-        #     columns (a Stiefel(M, r) point). The rotation now genuinely
-        #     moves the expert's r-dim colspace WITHIN its private m·r pool —
-        #     cross-expert orthogonality stays invariant (disjoint pools), so
-        #     experts gain depth without being able to collapse together.
-        #   * ``expert_diag``: a per-expert ``(K, r)`` trainable diagonal σ
-        #     (init 1) folded into the up-projection — the learnable singular
-        #     spectrum the orthogonal-only frozen path otherwise lacks.
-        # Neither is meaningful under ortho-init (bases already free), so they
-        # are forced off there.
+        # Per-expert capability levers (frozen-Cayley path only; forced off
+        # under ortho-init since its bases are already free). Both distill
+        # into the standard (K, out, r) up-stack — on-disk layout unchanged.
+        #   * expert_basis_mult (m>=1): each expert gets an over-complete
+        #     (out, M=m*r) frozen pool from a disjoint U-slice + an M×M Cayley
+        #     rotation; forward selects the first r columns (Stiefel(M, r)) —
+        #     depth without breaking cross-expert orthogonality.
+        #   * expert_diag: per-expert (K, r) trainable diagonal σ (init 1)
+        #     folded into the up-projection — the singular-spectrum DOF the
+        #     orthogonal-only frozen path otherwise lacks.
         m_mult = 1 if self.use_ortho_init else max(1, int(expert_basis_mult))
         self._expert_diag = bool(expert_diag) and not self.use_ortho_init
 
-        # SVD partition. Each pool wants:
-        #   * its own r right-singular vectors → Q_basis_{c,f} (r, in)
-        #   * its own pool-size·M left-singular vectors → P_bases_{c,f}
-        #     (K_*, out, M)   [M = m·r; m=1 is the canonical r-slice]
-        # Take a single low-rank SVD with q big enough to cover both pools.
+        # SVD partition: each pool wants its own r right-singular vectors
+        # (Q_basis_{c,f}, (r, in)) and its own K_*·M left-singular vectors
+        # (P_bases_{c,f}, (K_*, out, M) where M=m*r). One low-rank SVD with q
+        # big enough to cover both pools.
         init_device = "cuda" if torch.cuda.is_available() else "cpu"
         W = org_module.weight.data.float().to(init_device)
         M = r * m_mult
@@ -288,20 +253,17 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         U, _S_vals, V = torch.svd_lowrank(W, q=q, niter=2)
 
         if disjoint:
-            # Right-singular split: V has shape (in, q). Top r → content,
-            # next r → freq. Both are subsets of the same SVD basis so
-            # V[:, :r].T @ V[:, r:2r] = 0 (orthonormal columns).
+            # Right-singular split: V is (in, q). Top r → content, next r →
+            # freq — subsets of the same SVD basis, so orthonormal columns.
             Q_basis_c = V[:, :r].T.clone().contiguous()  # (r, in)
             Q_basis_f = V[:, r : 2 * r].T.clone().contiguous()  # (r, in)
 
-            # Left-singular split: U has shape (out, q). First K_c·M →
-            # content P stack, next K_f·M → freq P stack. Within each
-            # stack columns are reshape-partitioned into pool-size disjoint
-            # M-wide slices — same trick OrthoHydra uses (see ortho.py
-            # docstring), giving B_c[k].col_space ⊥ B_c[k'].col_space for k≠k'
-            # and B_f[j] ⊥ B_f[j']. Across pools, B_c[k] ⊥ B_f[j] by SVD ortho.
-            # With m>1 each slice is an m·r-dim *pool*; the Stiefel selector
-            # picks an r-dim subspace within it at forward time.
+            # Left-singular split: U is (out, q). First K_c*M -> content P
+            # stack, next K_f*M -> freq P stack, each reshape-partitioned into
+            # disjoint M-wide per-expert slices (same trick as OrthoHydra) —
+            # every expert's col-space orthogonal to every other's, within and
+            # across pools. With m>1 each slice is an m*r pool; the Stiefel
+            # selector picks an r-dim subspace within it at forward time.
             U_c = U[:, : K_c * M].reshape(out_dim, K_c, M)
             P_bases_c_init = U_c.permute(1, 0, 2).clone().contiguous()
             U_f = U[:, K_c * M : (K_c + K_f) * M].reshape(out_dim, K_f, M)
@@ -326,13 +288,11 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         self._disjoint_basis = disjoint
 
         if self.use_ortho_init:
-            # OrthoInit: the SVD bases become TRAINABLE fp32 parameters (no
-            # frozen buffer, no Cayley). ΔW can leave the principal 2r-subspace
-            # — the fix for "chimera-ortho feels weak" (the Cayley path caps
-            # colspace(ΔW) ⊆ top-2r(W₀)) — while keeping the W₀-aligned warm
-            # start. ΔW=0 at init still holds via the centered uniform gate
-            # (so λ_c/λ_f need not be 0). Pool orthogonality holds at init and
-            # is then free to drift, exactly as OrthoInitLoRAModule intends.
+            # OrthoInit: SVD bases become TRAINABLE fp32 parameters (no frozen
+            # buffer, no Cayley) — ΔW can leave the principal 2r-subspace while
+            # keeping the W₀-aligned warm start. ΔW=0 at init still holds via
+            # the centered gate. Pool orthogonality holds at init, free to
+            # drift thereafter (as OrthoInitLoRAModule intends).
             self.Q_basis_c = torch.nn.Parameter(Q_basis_c.cpu().float())
             self.Q_basis_f = torch.nn.Parameter(Q_basis_f.cpu().float())
             self.P_bases_c = torch.nn.Parameter(P_bases_c_init.cpu().float())
@@ -344,9 +304,9 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             self.register_buffer("P_bases_c", P_bases_c_init.cpu())  # (K_c, out, M)
             self.register_buffer("P_bases_f", P_bases_f_init.cpu())  # (K_f, out, M)
 
-            # Cayley(0) = I → at init each effective basis equals its frozen
-            # buffer. Per-pool S parameters are independent. The P-side skew is
-            # M×M (rotates within each expert's m·r pool); the A-side stays r×r.
+            # Cayley(0)=I -> at init each effective basis equals its frozen
+            # buffer. P-side skew is M×M (rotates within each expert's m·r
+            # pool); A-side stays r×r.
             self.S_q_c = torch.nn.Parameter(torch.zeros(r, r))
             self.S_q_f = torch.nn.Parameter(torch.zeros(r, r))
             self.S_p_c = torch.nn.Parameter(torch.zeros(K_c, M, M))
@@ -358,42 +318,38 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
                 self.sigma_c = torch.nn.Parameter(torch.ones(K_c, r))
                 self.sigma_f = torch.nn.Parameter(torch.ones(K_f, r))
 
-        # Per-pool λ: independent magnitudes through training (no shared
-        # scaling). Centered-gate starts λ at ``lambda_init`` (>0): the
-        # recentered gate keeps ΔW=0 at init while feeding both routers a
-        # step-0 gradient.
+        # Per-pool λ, independent magnitudes. Centered-gate starts λ at
+        # lambda_init (>0): the recentered gate keeps ΔW=0 at init while
+        # feeding both routers a step-0 gradient.
         lam0 = float(lambda_init)
         self.lambda_c = torch.nn.Parameter(torch.full((1, r), lam0))
         self.lambda_f = torch.nn.Parameter(torch.full((1, r), lam0))
 
-        # Channel-scale absorption: SmoothQuant-style x rebalance happens
-        # ONCE at the input (via inv_scale), then both A_c and A_f need
-        # their input columns pre-scaled to compensate. _register_channel_
-        # _scale handles Q_basis_c + registers inv_scale; we then manually
-        # apply the same column-scale to Q_basis_f.
+        # Channel-scale rebalance happens once at the input (via inv_scale);
+        # both A_c and A_f need their input columns pre-scaled to compensate.
+        # _register_channel_scale handles Q_basis_c + registers inv_scale;
+        # Q_basis_f gets the same column-scale applied manually.
         if channel_scale is not None:
-            # ``.data`` for the OrthoInit Parameters (in-place column rescale);
-            # the buffers in the frozen path pass through directly.
+            # .data for OrthoInit Parameters (in-place rescale); frozen-path
+            # buffers pass through directly.
             q_c = self.Q_basis_c.data if self.use_ortho_init else self.Q_basis_c
             q_f = self.Q_basis_f.data if self.use_ortho_init else self.Q_basis_f
             self._register_channel_scale(q_c, channel_scale)
             _absorb_channel_scale(q_f, channel_scale)
 
         if not self.use_ortho_init:
-            # Frozen bases → bf16 (saved-for-backward halved). Cayley solve
-            # stays fp32 (orthogonality invariant: R^T R = I to ~1e-7 fp32 vs
-            # ~1e-2 bf16 per OrthoLoRA rationale). OrthoInit keeps the fp32
-            # master (Adam state precision) — the bases are trained directly.
+            # Frozen bases -> bf16 (saved-for-backward halved). Cayley solve
+            # stays fp32 (R^T R = I to ~1e-7 in fp32 vs ~1e-2 in bf16).
+            # OrthoInit keeps the fp32 master since bases are trained directly.
             self.Q_basis_c = self.Q_basis_c.to(torch.bfloat16)
             self.Q_basis_f = self.Q_basis_f.to(torch.bfloat16)
             self.P_bases_c = self.P_bases_c.to(torch.bfloat16)
             self.P_bases_f = self.P_bases_f.to(torch.bfloat16)
 
-        # Pre-allocated identity for the batched Cayley solve. (E_c + E_f
-        # + 2) skew-symmetric matrices share one fp32 LU+TRSM call. OrthoInit
-        # has no Cayley solve, so the buffer is skipped entirely. When the
-        # P-side is over-complete (M>r), the A's (size r) and the B-pools
-        # (size M) solve separately, so we keep a second M-sized identity.
+        # Pre-allocated identity for the batched Cayley solve — (K_c+K_f+2)
+        # skew-symmetric matrices share one fp32 LU+TRSM call. Skipped under
+        # OrthoInit (no Cayley solve). When M>r, the A's (size r) and B-pools
+        # (size M) solve separately, so a second M-sized identity is kept.
         if not self.use_ortho_init:
             self.register_buffer(
                 "_eye_r",
@@ -434,9 +390,8 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
 
         K_c = self.num_experts_content
         K_f = self.num_experts_freq
-        # bf16 for the Cayley (frozen-basis) path; fp32 for OrthoInit, whose
-        # trainable bases are the fp32 master (mantissa-precise bottleneck,
-        # mirroring OrthoInitLoRAModule).
+        # bf16 for Cayley (frozen-basis); fp32 for OrthoInit (trainable bases
+        # are the fp32 master, mirroring OrthoInitLoRAModule).
         work = self.P_bases_c.dtype
         r = self.lora_dim
 
@@ -486,24 +441,17 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             Q_eff_c = R_q_c @ self.Q_basis_c  # (r, in)
             Q_eff_f = R_q_f @ self.Q_basis_f  # (r, in)
 
-        # Single rank-cat down-projection for both pools. The two pools share
-        # the same input ``x`` but have distinct ``Q_eff``; running them as
-        # two separate matmuls makes backward materialize TWO ``(B, L, in)``
-        # ``grad_x`` tensors that autograd then sums. On wide-input Linears
-        # (``mlp.layer2``, in=8192) that doubled transient cost ~31 MiB/module
-        # → ~0.9 GiB across 28 blocks. Concatenating ``Q_eff`` along the rank
-        # axis computes ``grad_x`` ONCE; the split is a free view. Bit-identical
-        # to the per-pool calls — see
-        # ``test_chimera_down_proj_rank_cat_matches_separate``.
+        # Single rank-cat down-projection for both pools: running Q_eff_c and
+        # Q_eff_f as two separate matmuls makes backward materialize TWO
+        # (B, L, in) grad_x tensors that autograd then sums (~0.9 GiB extra
+        # across 28 blocks on wide-input Linears). Concatenating Q_eff along
+        # the rank axis computes grad_x once; the split below is a free view.
+        # Bit-identical to the per-pool calls — see
+        # test_chimera_down_proj_rank_cat_matches_separate.
         #
-        # GEMMs run in the adapter compute dtype (``work``: bf16 for the Cayley
-        # frozen-basis path, fp32 for OrthoInit's trainable master bases) — NOT
-        # ``x.dtype``. ``x`` arrives fp32 from the AdaLN LayerNorm under
-        # autocast(bf16), so keying off it upcast the down GEMM + ``_rebalance``
-        # activation (``inv_scale``) to fp32 and OOMed; autocast re-casts the
-        # GEMM to bf16 regardless. Bit-identical to the retired fp32-bottleneck
-        # path under autocast (see bench/lora_fp32_bottleneck); OrthoInit still
-        # gets its intended fp32 bottleneck via ``work``.
+        # GEMMs run in the adapter compute dtype (work), not x.dtype — same
+        # rationale as base.py's forward(); OrthoInit gets its fp32 bottleneck
+        # via work.
         comp = work
         Q_eff_cat = torch.cat([Q_eff_c, Q_eff_f], dim=0)  # (2r, in)
         x_lora = self._rebalance(x.to(comp))
@@ -511,9 +459,8 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         lx_c = lx_down_cat[..., :r]
         lx_f = lx_down_cat[..., r:]
 
-        # Content gate: broadcast π_c from the network-level ContentRouter
-        # (slot-assigned with grad_fn intact). Cache the RAW (uncentered)
-        # simplex for the per-pool balance loss BEFORE recentering.
+        # Cache the RAW (uncentered) simplex for the balance loss before
+        # recentering.
         pi_c = self._content_gate_raw(lx_c.shape[0])  # (B, K_c) fp32
         if self.training:
             # Plain STORE_ATTR — see HydraLoRAModule.forward for the rationale;
@@ -522,10 +469,8 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             self._last_gate = self._full_gate(pi_c)
         pi_c = self._center(pi_c, K_c)
 
-        # λ application + T-LoRA mask (content only). Freq branch keeps
-        # full rank at every t — by construction the freq pool's job is
-        # coarse-stage / high-σ refinement which T-LoRA's argument says
-        # WANTS the full rank (TimeStep Master-style asymmetric mixture).
+        # λ + T-LoRA mask (content only) — freq branch keeps full rank at
+        # every t (TimeStep Master-style asymmetric mixture).
         lx_c = lx_c * self.lambda_c.to(work) * self._timestep_mask.to(work)
         lx_f = lx_f * self.lambda_f.to(work)
 
@@ -536,9 +481,8 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         lx_c, scale_c = self._apply_rank_dropout(lx_c)
         lx_f, scale_f = self._apply_rank_dropout(lx_f)
 
-        # Per-pool gate-weighted P_combined; one bmm per pool over the
-        # B/L axis. Cast π at the einsum boundary so bf16 × fp32 doesn't
-        # promote P_combined back to fp32 (would inflate saved activation).
+        # Cast π at the einsum boundary so bf16 × fp32 doesn't promote
+        # P_combined back to fp32 (would inflate the saved activation).
         if self.use_ortho_init:
             P_eff_c = self.P_bases_c  # (K_c, out, r)
             P_eff_f = self.P_bases_f  # (K_f, out, r)
@@ -589,21 +533,17 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         """Chimera training-form → free-form per-pool (Cayley → lora_{down,up}).
 
         Mutates ``state_dict`` in place. Discriminator: co-located
-        ``.S_q_c`` + ``.S_q_f`` keys (chimera is the only variant with
-        per-pool ``_c`` / ``_f`` suffixes — never collides with the other
-        ortho converters). Runs FIRST in the save pipeline so subsequent
-        converters see a chimera-free state_dict.
+        ``.Q_basis_c``/``.Q_basis_f`` keys — the ``_c``/``_f`` suffix pair is
+        chimera-only (OrthoLoRA fallbacks use a bare ``.Q_basis``), covering
+        both the Cayley path (frozen buffers + ``.S_q_c``) and OrthoInit
+        (trainable bases, no ``S_*``). Must run FIRST in the save pipeline so
+        subsequent converters see a chimera-free state_dict.
 
         Per pool, distill the Cayley-rotated SVD layout into free-form
-        (``.lora_down_{c,f}.weight``, ``.lora_up_{c,f}_weight``). The MoE
-        writer in :meth:`build_moe_state_dict` then expands the stacked
-        per-pool ups into per-expert ``.lora_ups_{c,f}.{i}.weight`` keys
-        and per-component q/k/v splits.
+        (``.lora_down_{c,f}.weight``, ``.lora_up_{c,f}_weight``);
+        :meth:`build_moe_state_dict` then expands the stacked ups into
+        per-expert ``.lora_ups_{c,f}.{i}.weight`` keys and q/k/v splits.
         """
-        # Discriminator: co-located ``.Q_basis_c`` + ``.Q_basis_f`` (the ``_c``/
-        # ``_f`` suffix pair is chimera-only — OrthoLoRA fallbacks use a bare
-        # ``.Q_basis``). Covers BOTH the Cayley path (frozen bf16 buffers +
-        # ``.S_q_c``) and the OrthoInit path (trainable fp32 bases, no ``S_*``).
         prefixes = set()
         for key in list(state_dict.keys()):
             if not key.endswith(".Q_basis_c"):
@@ -707,29 +647,19 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
     ) -> Dict[str, torch.Tensor]:
         """Build the ``*_chimera.safetensors`` payload.
 
-        Expects :meth:`distill_save_state_dict` to have already run.
+        Expects :meth:`distill_save_state_dict` to have already run. Two
+        transforms: (1) expand stacked ``.lora_up_{c,f}_weight`` into
+        per-expert ``.lora_ups_{c,f}.{i}.weight``; (2) per-pool fused-qkv
+        defuse on attention prefixes (both pools share the prefix, so a
+        fused frag splits both pools' down+ups per component; ``alpha``/
+        ``inv_scale`` clone into each). ``content_router.*``/``freq_router.*``
+        keys pass through untouched.
 
-        Two transforms:
-          1. Expand stacked ``.lora_up_c_weight (K_c, out, r)`` →
-             per-expert ``.lora_ups_c.{i}.weight``; same for ``_f``.
-          2. Per-pool fused-qkv defuse on attention prefixes. Both pools
-             share the prefix (chimera = one module per Linear), so when
-             the prefix ends in a fused frag we split BOTH pools'
-             (lora_down + ups stack) per component. ``alpha`` / ``inv_scale``
-             clone into each split component.
-
-        Top-level ``content_router.*`` / ``freq_router.*`` keys pass through
-        untouched (they don't carry a ``lora_unet_*`` prefix and don't match
-        any fused frag suffix).
-
-        After the per-pool split, the remaining fused-qkv prefixes are
-        the OrthoLoRA fallbacks for attention projections excluded
-        from ``router_targets`` (already distilled to plain LoRA by
-        :meth:`OrthoLoRAModule.distill_save_state_dict`). Run them
-        through the shared :func:`defuse_standard_qkv` so they emerge
-        in the split q/k/v layout that ComfyUI's cosmos backbone
-        expects — otherwise they surface as ``lora key not loaded``
-        warnings at load time.
+        Remaining fused-qkv prefixes after the per-pool split are the
+        OrthoLoRA attention fallbacks (excluded from ``router_targets``,
+        already distilled to plain LoRA) — run through the shared
+        :func:`defuse_standard_qkv` so they land in the split q/k/v layout
+        ComfyUI's cosmos backbone expects.
         """
         sd: Dict[str, torch.Tensor] = {}
         for k, v in state_dict.items():
@@ -818,28 +748,14 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
 
 class ChimeraHydraInferenceModule(_ChimeraRoutingMixin, BaseLoRAModule):
     """Free-form inference form of ChimeraHydra, loaded from a distilled
-    ``*_chimera.safetensors``.
+    ``*_chimera.safetensors`` — explicit per-pool (lora_down, stacked lora_up)
+    instead of Cayley-rotated SVD bases, produced by
+    :meth:`ChimeraHydraLoRAModule.distill_save_state_dict` at save time.
 
-    Mirrors the training class's per-Linear shape but with explicit
-    per-pool (lora_down, stacked lora_up) instead of Cayley-rotated SVD
-    bases — produced by :meth:`ChimeraHydraLoRAModule.distill_save_state_dict`
-    at save time.
-
-    Buffer / parameter inventory:
-      * ``lora_down_c.weight`` (r, in)        — content A
-      * ``lora_up_c_weight``  (K_c, out, r)   — content B stack
-      * ``lora_down_f.weight`` (r, in)        — freq A
-      * ``lora_up_f_weight``  (K_f, out, r)   — freq B stack
-      * ``_content_routing_weights`` (1, K_c) buffer — slot-written by the
-        network-level ContentRouter
-      * ``_freq_routing_weights`` (1, K_f) buffer    — slot-written by the
-        network-level FreqRouter
-
-    Both pools' gates are recentered to ``π − 1/K`` before the combine
-    (λ is folded symmetrically into the saved ups, so the centered combine
-    reproduces the trained forward exactly). No T-LoRA mask is applied at
-    inference (consistent with all other LoRA-family inference modules — see
-    ``[[project_tlora_inference_full_rank]]``).
+    Both pools' gates are recentered to ``π − 1/K`` before the combine (λ is
+    folded symmetrically into the saved ups, so this reproduces the trained
+    forward exactly). No T-LoRA mask at inference, consistent with the rest
+    of the LoRA family — see ``[[project_tlora_inference_full_rank]]``.
     """
 
     def __init__(

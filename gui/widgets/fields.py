@@ -35,9 +35,7 @@ def _widget(v: Any, key: str = "") -> QWidget:
     if key == "sample_prompts":
         return _SamplePromptsLauncher(v)
     if key == "sample_ratio":
-        # Data-scope quick-pick: the common ratios (the CLI [half]/[quarter]/
-        # [tenth] presets set the same key) plus free-typed values. Still one
-        # flat float key — _read's QComboBox branch coerces via the float orig.
+        # Quick-pick combo; _read's QComboBox branch coerces back via the float orig.
         w = QComboBox()
         w.setEditable(True)
         w.addItems(["1.0", "0.5", "0.25", "0.1"])
@@ -54,10 +52,8 @@ def _widget(v: Any, key: str = "") -> QWidget:
             w.setCurrentIndex(idx)
         return _no_wheel(w)
     if key == "sample_decode_inline":
-        # Tri-state: stored as the literal string "auto" / "true" / "false"
-        # (all three are accepted by library.config.cli_args._optional_bool).
-        # Must precede the bool branch below so a bool value gets the combo,
-        # not a plain checkbox that can't express "auto".
+        # Tri-state "auto"/"true"/"false"; must precede the bool branch below
+        # so a bool value gets this combo, not a checkbox that can't express "auto".
         w = QComboBox()
         w.addItems(["auto", "true", "false"])
         if v is None:
@@ -78,9 +74,9 @@ def _widget(v: Any, key: str = "") -> QWidget:
         return w
     if isinstance(v, int):
         w = QSpinBox()
-        # 10k default cap guards against typos; per-key overrides for fields that legitimately exceed it.
+        # 10k default cap guards against typos; overridden for fields that legitimately exceed it.
         if key == "min_pixels":
-            w.setRange(0, 100_000_000)  # 100MP — covers any real image
+            w.setRange(0, 100_000_000)
         else:
             w.setRange(0, 10000)
         w.setValue(v)
@@ -98,7 +94,6 @@ def _read(w: QWidget, orig: Any = None) -> Any:
     if isinstance(w, _SamplePromptsLauncher):
         return w.value()
     if isinstance(w, QPlainTextEdit):
-        # sample_prompts box → list of non-empty, non-comment lines.
         return [
             ln.strip()
             for ln in w.toPlainText().splitlines()
@@ -106,8 +101,8 @@ def _read(w: QWidget, orig: Any = None) -> Any:
         ]
     if isinstance(w, QComboBox):
         txt = w.currentText()
-        # Editable numeric combos (sample_ratio) round-trip as their orig type;
-        # plain string combos (attn_mode, …) have string origs and fall through.
+        # Editable numeric combos round-trip as their orig type; plain string
+        # combos (attn_mode, …) have string origs and fall through.
         if isinstance(orig, float):
             try:
                 return float(txt)
@@ -129,18 +124,15 @@ def _read(w: QWidget, orig: Any = None) -> Any:
             return json.loads(txt)
         except (json.JSONDecodeError, ValueError):
             pass
-    # Normalize pasted Windows backslashes — forward slashes work everywhere and dodge TOML escape errors (e.g. "C:\Users" → \U is invalid).
+    # Normalize pasted Windows backslashes — TOML escapes them (e.g. \U is invalid).
     if "\\" in txt:
         txt = txt.replace("\\", "/")
     return txt
 
 
 class ClickableLabel(QLabel):
-    """QLabel that emits `clicked` on left-click.
-
-    The config-style tabs use it for field labels: clicking the label routes
-    that field's help text into the explanation panel.
-    """
+    """QLabel that emits `clicked` on left-click (field labels route into the
+    explanation panel)."""
 
     clicked = Signal()
 
@@ -154,12 +146,9 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(ev)
 
 
-# Long single-line tooltips render as one screen-wide strip because Qt only
-# word-wraps tooltip text it recognizes as rich text — and the rich-text paths
-# (a width-bound table / a wrapping <div>) clip CJK at the right edge instead
-# of reflowing. So we wrap to *plain* text with explicit newlines, measuring
-# each line in display columns (CJK glyphs count as 2) so ko/ja/cn lines stay
-# bounded and nothing is ever clipped.
+# Qt only word-wraps tooltips it recognizes as rich text, and that path clips
+# CJK at the right edge instead of reflowing — so we wrap to plain text with
+# explicit newlines ourselves, measuring in display columns (CJK glyphs = 2).
 TOOLTIP_WRAP_COLS = 56
 _TOOLTIP_WRAP_MIN_LEN = 80
 # Cheap "is this already HTML?" probe (PySide6 doesn't expose Qt.mightBeRichText).
@@ -172,7 +161,7 @@ def _display_width(s: str) -> int:
 
 
 def _wrap_plain(text: str, cols: int) -> str:
-    """Greedy word-wrap to *cols* display columns; hard-break runs with no
+    """Greedy word-wrap to *cols* display columns; hard-breaks tokens with no
     spaces (CJK / long paths) so a single token can't overflow."""
     lines: list[str] = []
     cur = ""
@@ -203,14 +192,11 @@ def _wrap_plain(text: str, cols: int) -> str:
 def wrap_tooltip(text: str | None) -> str | None:
     """Wrap a long, plain tooltip to multiple display-bounded lines.
 
-    Returns *text* unchanged when it is empty, already short, already
-    multi-line, or already rich text (an author-formatted tooltip is left
-    alone). Otherwise returns plain text with explicit newlines wrapped at
-    :data:`TOOLTIP_WRAP_COLS` display columns — Qt shows it as a multi-line
-    box with no right-edge clipping."""
+    Leaves *text* unchanged if empty, short, multi-line, or rich text
+    (author-formatted); otherwise wraps at :data:`TOOLTIP_WRAP_COLS`."""
     if not text or "\n" in text or len(text) <= _TOOLTIP_WRAP_MIN_LEN:
         return text
-    if _LOOKS_RICH.search(text):  # author-formatted tooltip — leave it alone
+    if _LOOKS_RICH.search(text):
         return text
     return _wrap_plain(text, TOOLTIP_WRAP_COLS)
 
@@ -222,12 +208,7 @@ def make_field_label(
     tooltip: str | None = None,
     on_click=None,
 ) -> ClickableLabel:
-    """Build a form field's :class:`ClickableLabel` (style + tooltip + click wire).
-
-    Centralises the label half of the per-row form boilerplate the tabs share;
-    each caller still builds its own editor widget and supplies its own click
-    handler (a zero-arg callable, usually a lambda closing over the field key).
-    """
+    """Build a form field's :class:`ClickableLabel` (style + tooltip + click wire)."""
     lbl = ClickableLabel(text)
     if style:
         lbl.setStyleSheet(style)
@@ -239,11 +220,7 @@ def make_field_label(
 
 
 def hint_label(text: str = "") -> QLabel:
-    """A secondary/hint :class:`QLabel` in the theme's dim text color.
-
-    Replaces the recurring ``QLabel(...)`` + ``setStyleSheet(f"color:{tok('text_dim')}")``
-    pair scattered across the tabs. Reads the token at build time, so it follows
-    the active theme (call sites are rebuilt on a theme switch)."""
+    """A secondary/hint :class:`QLabel` in the theme's dim text color."""
     lbl = QLabel(text)
     lbl.setStyleSheet(f"color:{tok('text_dim')};")
     return lbl

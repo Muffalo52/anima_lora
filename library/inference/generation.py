@@ -40,9 +40,8 @@ logger = logging.getLogger(__name__)
 def _build_cns_recolorer(args):
     """Build a CNS noise recolorer from ``--cns`` (path or "auto"), or None.
 
-    Only meaningful on the stochastic ``er_sde`` path — on euler/lcm there is no
-    injected noise to recolor, so the recolorer (even if loaded) is a no-op. We
-    still gate on the flag here and let the sampler ignore it otherwise.
+    Only meaningful on the stochastic ``er_sde`` path — on euler/lcm there is
+    no injected noise to recolor.
     """
     spec = getattr(args, "cns", None)
     if not spec:
@@ -63,18 +62,11 @@ def _build_cns_recolorer(args):
     return recolorer
 
 
-# Spectrum runner registry. The spectrum implementation lives in
-# networks/spectrum.py (or a downstream package); it self-registers on import.
-# generation.py never imports it directly so the dep edge can point inward
-# from a downstream inference package without inverting.
+# Runner registries: networks/spectrum.py, networks/spd.py, networks/foveated.py
+# self-register on import (generation.py never imports them directly, so the
+# dep edge can point inward from a downstream package without inverting).
 _SPECTRUM_RUNNER = None
-
-# SPD (Spectral Progressive Diffusion) runner registry — same pattern as
-# Spectrum. networks/spd.py self-registers on import; --spd dispatches to it.
 _SPD_RUNNER = None
-
-# Deferred-foveated merge runner registry — same pattern. networks/foveated.py
-# self-registers on import; --fovea_sigma_c > 0 dispatches to it.
 _FOVEATED_RUNNER = None
 
 
@@ -142,39 +134,24 @@ def _parse_spectrum_delta(raw):
 
 
 def register_spectrum_runner(fn):
-    """Plug in a spectrum_denoise implementation.
-
-    The runner must match networks.spectrum.spectrum_denoise's signature: the
-    core positional args, a ``SamplerSideChannels`` (see
-    ``library.inference.sampler_context``) carrying the shared SMC-CFG /
-    soft-tokens / P-GRAFT / pooled-text channels, then the spectrum-specific
-    keyword knobs. Called by networks/spectrum.py at import time, or by a
-    downstream inference package that ships its own spectrum module.
+    """Plug in a spectrum_denoise implementation (networks.spectrum's signature:
+    core positional args + a ``SamplerSideChannels`` + spectrum keyword knobs).
+    Called by networks/spectrum.py at import time.
     """
     global _SPECTRUM_RUNNER
     _SPECTRUM_RUNNER = fn
 
 
 def register_spd_runner(fn):
-    """Plug in an spd_denoise implementation (Spectral Progressive Diffusion).
-
-    The runner must match networks.spd.spd_denoise's signature: the core
-    positional args, a ``SamplerSideChannels`` (shared side-channels), then the
-    SPD-specific keyword knobs. Called by networks/spd.py at import time,
-    mirroring register_spectrum_runner.
-    """
+    """Plug in an spd_denoise implementation. Mirrors register_spectrum_runner;
+    called by networks/spd.py at import time."""
     global _SPD_RUNNER
     _SPD_RUNNER = fn
 
 
 def register_foveated_runner(fn):
-    """Plug in a foveated_denoise implementation (deferred-foveated merge).
-
-    The runner must match networks.foveated.foveated_denoise's signature: the
-    core positional args, a ``SamplerSideChannels`` (shared side-channels),
-    then the foveation-specific keyword knobs. Called by networks/foveated.py
-    at import time, mirroring register_spectrum_runner.
-    """
+    """Plug in a foveated_denoise implementation. Mirrors
+    register_spectrum_runner; called by networks/foveated.py at import time."""
     global _FOVEATED_RUNNER
     _FOVEATED_RUNNER = fn
 
@@ -203,18 +180,14 @@ def _resolve_spd_schedule(args) -> Tuple[List[float], List[float]]:
 
 
 class GenerationSettings:
-    # ``dit_weight_dtype`` was dropped 2026-05-24: it was vestigial — the model
-    # is forced to bf16 in ``load_dit_model`` regardless, so the field never
-    # influenced anything. The DiT runs in bf16 for inference.
+    # DiT always runs bf16 for inference (forced in load_dit_model).
     def __init__(self, device: torch.device):
         self.device = device
 
 
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
-    # ``inference.parse_args`` defaults ``--device`` to None and resolves it in
-    # main()'s body, but programmatic callers (GenerationRequest.to_args(), bench
-    # probes) skip that block. Resolve the cuda-else-cpu default here so the one
-    # chokepoint every caller funnels through can't see ``args.device is None``.
+    # programmatic callers (GenerationRequest.to_args(), bench probes) skip
+    # parse_args' device-resolution block, so resolve cuda-else-cpu here too
     dev = getattr(args, "device", None) or (
         "cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -226,10 +199,8 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
 def resolve_seed(args: argparse.Namespace) -> int:
     """Return the seed to use: ``args.seed`` if set, else a fresh random one.
 
-    Pure — does **not** mutate ``args``. Callers that need ``args.seed`` set for
-    downstream saving (filename / metadata) should assign the return value
-    themselves. ``generate()`` resolves a seed this way per call without writing
-    back to the namespace, so one namespace is safe to reuse across calls.
+    Pure — does **not** mutate ``args``. Callers that need ``args.seed`` set
+    for downstream saving should assign the return value themselves.
     """
     return args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
 
@@ -316,7 +287,7 @@ def generate_body_tiled(
         context_null = context
     negative_embed = context_null["embed"][0].to(device, dtype=torch.bfloat16)
 
-    # Soft tokens — see generate_body() for the long-form comment.
+    # soft tokens — see generate_body() for details
     soft_tokens_net = _setup_soft_tokens(args, anima, device)
     soft_tokens_embed_seqlens = (
         _seqlens_from_context(context, device) if soft_tokens_net is not None else None
@@ -357,8 +328,7 @@ def generate_body_tiled(
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 
-    # Create sampler. Variable kept named `er_sde` for historic minimum-diff
-    # reasons; both ERSDESampler and LCMSampler share the same .step interface.
+    # `er_sde` also holds an LCMSampler when selected; both share .step()
     cns = _build_cns_recolorer(args)
     er_sde = None
     if args.sampler == "er_sde":
@@ -377,14 +347,12 @@ def generate_body_tiled(
         if do_cfg and getattr(args, "smc_cfg", False)
         else None
     )
-    # --traj_stats: passive per-step recorder (post-blend, pre-sampler-step).
     traj_stats = TrajStatsRecorder.from_args(args, seed=getattr(args, "seed", None))
 
     pgraft_network = getattr(anima, "_pgraft_network", None)
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
 
-    # --xattn_boost: cond-forward-only cross-attn gain at σ ≥ band (mirrors
-    # generate_body; applied per tile, reset before each uncond tile pass).
+    # xattn_boost: cond-forward-only cross-attn gain at σ ≥ band, per tile
     _boost_raw = float(getattr(args, "xattn_boost", 1.0) or 1.0)
     xattn_boost = _boost_raw if _boost_raw != 1.0 else None
     xattn_boost_band = float(getattr(args, "xattn_boost_band", 0.85))
@@ -406,11 +374,8 @@ def generate_body_tiled(
                 t_expand = t.expand(latents.shape[0])
                 set_hydra_sigma(anima, t_expand)
                 set_step_expert_index(anima, i)
-                # FEI router input — computed on the full latent (pre-tile)
-                # so every tile in this step sees the same per-sample FEI.
-                # Drives both the per-Linear FEI router (FEI-on-Hydra) and
-                # the network-level GlobalRouter (FeRA / stacked_experts);
-                # no-op when no FEI router is attached.
+                # computed on the full latent (pre-tile) so every tile sees the
+                # same per-sample FEI; no-op when no FEI router is attached
                 compute_and_set_hydra_fei(anima, latents)
 
                 noise_acc = torch.zeros_like(latents)
@@ -442,9 +407,7 @@ def generate_body_tiled(
 
                     if anima.blocks_to_swap:
                         anima.prepare_block_swap_before_forward()
-                    # Caption-dependent routers (chimera ContentRouter and the
-                    # crossattn-emb GlobalRouter) — gates depend on the caption,
-                    # so fire separately for cond vs uncond. No-op otherwise.
+                    # caption-dependent routers; fire separately for cond vs uncond
                     set_hydra_content(anima, embed)
                     set_hydra_crossattn(anima, embed)
                     if soft_tokens_net is not None:
@@ -555,42 +518,22 @@ def generate_body(
     """Core denoising loop for Anima generation.
 
     Args:
-        args: Generation arguments (image_size, infer_steps, guidance_scale, etc.)
-        anima: Loaded DiT model.
-        context: Dict with "embed" key containing text encoder outputs.
-        context_null: Dict with negative prompt embeddings (or None for unconditional).
-        device: Target device.
-        seed: Single seed or list of seeds (for batch generation).
-        latents: Optional pre-created latent noise tensor.  When provided, the
-            batch dimension is taken from this tensor and seed is ignored for
-            noise creation.  This enables callers (e.g. batch mode) to construct
-            multi-seed batched latents externally.
-        context_alt: Optional alternate *conditional* context (same shape as
-            ``context``). Used together with ``tag_drop_sigma`` to drive the
-            commitment-σ probe: above the cutoff the conditional pass uses
-            ``context``; at-or-below it swaps to ``context_alt``. This is the
-            tag-level generalization of the ``ANIMA_TEXT_KNOCKOUT_SIGMA`` hook
-            below (which swaps the guided prediction to *null* below a cutoff) —
-            here we swap the conditional *embedding* to an alternate caption
-            (e.g. the same caption with one tag dropped) so we can read *when*
-            in the schedule a single prompt feature commits. No-op when either
-            ``context_alt`` or ``tag_drop_sigma`` is None.
-        tag_drop_sigma: σ cutoff for the ``context_alt``/``tag_boost_scale``
-            swap (see above). Below it the conditional pass uses the alternate
-            (dropped or boosted) embedding; at or above it, the full caption.
-        tag_boost_scale: Optional cross-attn-drive BOOST probe. When set (with
-            ``context_alt`` = the tag-dropped caption), below ``tag_drop_sigma``
-            the conditional embedding is extrapolated to
-            ``embed_alt + scale·(embed − embed_alt)`` — i.e. ``(embed − embed_alt)``
-            is the tag's embedding-space delta, ``scale>1`` amplifies just that
-            tag's contribution in the low-σ regime (``scale=1`` is the full
-            caption; ``scale=0`` reduces to the plain drop). This is the no-train
-            falsification of the "sustain cross-attn at later σ" lever: it tests
-            whether MORE text drive for one tag below the front-loaded cutoff adds
-            localized structure or just rescales magnitude (a global tone shift).
-            Extrapolation can push the embedding off-manifold at large scale —
-            that's intentional; the harness reads it via region concentration +
-            seed instability. No-op when ``context_alt``/``tag_drop_sigma`` None.
+        args: generation arguments (image_size, infer_steps, guidance_scale, etc).
+        anima: loaded DiT model.
+        context: dict with "embed" key containing text encoder outputs.
+        context_null: negative-prompt embeddings dict, or None for unconditional.
+        device: target device.
+        seed: single seed or list of seeds (batch generation).
+        latents: optional pre-created noise tensor; when given, batch size
+            comes from it and ``seed`` is ignored for noise creation.
+        context_alt / tag_drop_sigma / tag_boost_scale: commitment-σ probe —
+            below ``tag_drop_sigma`` the conditional pass swaps from
+            ``context`` to ``context_alt`` (e.g. the same caption with one tag
+            dropped), or, with ``tag_boost_scale`` set, to an amplified
+            ``embed_alt + scale·(embed − embed_alt)`` extrapolation — testing
+            when/whether a dropped tag's contribution is localized structure
+            vs. a global tone shift. No-op unless ``context_alt`` and
+            ``tag_drop_sigma`` are both set.
 
     Returns:
         Denoised latent tensor (batch dimension preserved).
@@ -636,14 +579,13 @@ def generate_body(
         context_null = context  # dummy for unconditional
     negative_embed = context_null["embed"][0].to(device, dtype=torch.bfloat16)
 
-    # Optional pooled-text override for modulation guidance (left unset here;
-    # downstream guards on ``is not None``).
+    # optional pooled-text override for modulation guidance; downstream guards
+    # on `is not None`
     _pooled_text_pos = None
     _pooled_text_neg = None
 
-    # Soft tokens: build + apply the monkey-patches once. The per-step
-    # append_postfix(..., timesteps=t) call fires inside the loop below — and
-    # is mirrored in the Spectrum runner for the --spectrum path.
+    # soft tokens: monkey-patches built once; per-step append_postfix() fires
+    # in the loop below (and is mirrored in the Spectrum runner)
     soft_tokens_net = _setup_soft_tokens(args, anima, device)
     soft_tokens_embed_seqlens = (
         _seqlens_from_context(context, device) if soft_tokens_net is not None else None
@@ -670,10 +612,9 @@ def generate_body(
     embed = embed.to(torch.bfloat16)
     negative_embed = negative_embed.to(torch.bfloat16)
 
-    # Commitment-σ probe: alternate conditional embedding swapped in below
-    # ``tag_drop_sigma`` (see generate_body docstring). Prepared with the same
-    # batch-expand + bf16 cast as ``embed``; text encoder outputs are max-padded
-    # so the alt caption shares the sequence length (the padding-sink invariant).
+    # commitment-σ probe alt embedding (see docstring). Text encoder outputs
+    # are max-padded, so this shares embed's sequence length (padding-sink
+    # invariant — trimming would produce black images).
     embed_alt = None
     embed_boost = None
     if context_alt is not None and tag_drop_sigma is not None:
@@ -682,10 +623,8 @@ def generate_body(
             embed_alt = embed_alt.expand(bs, -1, -1)
         embed_alt = embed_alt.to(torch.bfloat16)
         if tag_boost_scale is not None:
-            # Boost probe: amplify the tag's embedding-space contribution below
-            # the cutoff instead of dropping it. ``embed_alt`` is the tag-dropped
-            # caption, so ``(embed − embed_alt)`` is the tag's delta; extrapolate
-            # in fp32 (scale>1 amplifies, so minimize rounding) then cast back.
+            # amplify the tag's embedding delta (embed - embed_alt) in fp32
+            # before casting back, to minimize rounding at scale>1
             embed_boost = (
                 embed_alt.float()
                 + float(tag_boost_scale) * (embed.float() - embed_alt.float())
@@ -699,8 +638,7 @@ def generate_body(
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 
-    # Create sampler. Variable kept named `er_sde` for historic minimum-diff
-    # reasons; both ERSDESampler and LCMSampler share the same .step interface.
+    # `er_sde` also holds an LCMSampler when selected; both share .step()
     cns = _build_cns_recolorer(args)
     er_sde = None
     if args.sampler == "er_sde":
@@ -720,10 +658,8 @@ def generate_body(
         else None
     )
 
-    # FSG pre-step latent calibration. CFG-only (the operator needs the
-    # cond/uncond gap). Composes with --spectrum (the spectrum runner reads
-    # ctx.fsg and forces calibrated steps to actual forwards). Still ignored
-    # under --spd (it grows resolution along the trajectory — FSG×SPD is v2).
+    # FSG pre-step latent calibration. CFG-only (needs the cond/uncond gap).
+    # Composes with --spectrum; ignored under --spd (FSG×SPD is a v2 item).
     fsg = None
     if getattr(args, "fsg", False):
         if not do_cfg:
@@ -742,15 +678,11 @@ def generate_body(
                 gamma=getattr(args, "fsg_gamma", None),
             )
 
-    # CFG++ substrate (paper App A.2 / Algorithm 1 lines 9-12). Implemented as a
-    # σ-scheduled guidance REWEIGHT (CFG++ differs from CFG solely in strength
-    # scheduling), so it's a pure change to the cond/uncond combine and integrates
-    # unchanged under Euler AND er_sde/lcm — the substrate FSG is defined on, now
-    # production-sampler-ready. It threads through the spectrum runner as a
-    # side-channel (the runner applies the same reweight in its CFG-combine), so
-    # faithful FSG = CFG++ + foresight composes under --spectrum. Still refused
-    # under --smc_cfg (an alternative combine, mutually exclusive) and --spd
-    # (mid-loop σ re-spacing — CFG++ not wired there, a v2 item).
+    # CFG++ substrate (paper App A.2): a σ-scheduled guidance REWEIGHT, so it's
+    # a pure change to the cond/uncond combine and works unchanged under Euler
+    # and er_sde/lcm, and (via the side-channel) under --spectrum. Mutually
+    # exclusive with --smc_cfg (alternative combine) and unsupported under
+    # --spd (mid-loop σ re-spacing; a v2 item).
     cfgpp_lambda = None
     if getattr(args, "cfgpp", False):
         if not do_cfg:
@@ -777,13 +709,12 @@ def generate_body(
     pgraft_network = getattr(anima, "_pgraft_network", None)
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
 
-    # --traj_stats: passive per-step trajectory recorder (pure observation —
-    # _archive/proposals/traj_latent_stats.md Phase 0). Threaded through the side
-    # channels so the spectrum runner records too; flushed once before return.
+    # passive per-step trajectory recorder; threaded through the side channels
+    # so the spectrum runner records too, flushed once before return
     traj_stats = TrajStatsRecorder.from_args(args, seed=seed)
 
-    # Shared conditioning side-channels handed to whichever loop runner is active
-    # (spectrum / spd). The standard inline loop below reads the locals directly.
+    # handed to whichever loop runner is active (spectrum / spd); the standard
+    # inline loop below reads the locals directly instead
     _side_channels = SamplerSideChannels.from_args(
         args,
         pgraft_network=pgraft_network,
@@ -893,11 +824,9 @@ def generate_body(
         )
     else:
         cfg_delta_probe = CfgDeltaProbe.maybe_create()
-        # --xattn_boost: cross-attn residual gain on the cond forward for
-        # σ ≥ band (see SamplerSideChannels). Set before / reset right after
-        # the cond forward so the uncond pass (and FSG's internal forwards)
-        # always run at identity; the finally below guarantees no gain leaks
-        # into subsequent generations.
+        # cross-attn residual gain on the cond forward for σ ≥ band; reset
+        # right after so uncond (and FSG's internal forwards) run at identity —
+        # the finally below guarantees no gain leaks into later generations
         xattn_boost = _side_channels.xattn_boost
         xattn_boost_band = _side_channels.xattn_boost_band
         xattn_renorm = _side_channels.xattn_boost_renorm
@@ -913,20 +842,15 @@ def generate_body(
                 f"({_renorm_desc})"
                 + ("" if do_cfg else " (CFG 1.0 — boosting the single forward)")
             )
-        # Capability probe (ANIMA_TEXT_KNOCKOUT_SIGMA=<cutoff>): below the cutoff
-        # sigma, continue unconditionally (noise_pred = uncond) so the prompt has
-        # zero effect there. Measures how much late-sigma text still steers the
-        # output. Off (None) => normal generation.
+        # ANIMA_TEXT_KNOCKOUT_SIGMA=<cutoff>: below it, continue unconditionally
+        # (noise_pred = uncond) to measure how much late-σ text still steers
+        # the output. Off (None) => normal generation.
         _knockout_env = os.environ.get("ANIMA_TEXT_KNOCKOUT_SIGMA")
         text_knockout_sigma = float(_knockout_env) if _knockout_env else None
-        # Guidance-direction freeze (ANIMA_FREEZE_GUIDANCE_SIGMA=<cutoff>): the
-        # faithful "keep pushing the same direction" probe. Below the cutoff we
-        # keep the per-step guidance MAGNITUDE (which naturally decays with σ)
-        # but lock its DIRECTION to the unit delta captured at the first
-        # sub-cutoff step — removing only the per-step seed-dependent re-rotation
-        # of the text-driven component, while leaving the base (uncond) path to
-        # refine. Tests whether late cross-attn *re-tweaking* (not its presence)
-        # is what injects the tag-region wangle. Off (None) => normal CFG.
+        # ANIMA_FREEZE_GUIDANCE_SIGMA=<cutoff>: below it, keep the per-step
+        # guidance magnitude but lock its direction to the unit delta captured
+        # at the first sub-cutoff step — tests whether late cross-attn
+        # re-tweaking (not its presence) drives the tag-region effect.
         _freeze_env = os.environ.get("ANIMA_FREEZE_GUIDANCE_SIGMA")
         freeze_guidance_sigma = float(_freeze_env) if _freeze_env else None
         _frozen_guidance_dir = None  # unit delta, captured once below the cutoff
@@ -945,9 +869,8 @@ def generate_body(
                         )
 
                     t_expand = t.expand(latents.shape[0])
-                    # FSG: pre-step latent calibration toward the golden path.
-                    # Mutates `latents` before the real forward; the hydra/FEI
-                    # setters below then recompute on the calibrated latent.
+                    # mutates `latents` before the real forward; hydra/FEI
+                    # setters below recompute on the calibrated latent
                     if fsg is not None and fsg.scheduled(float(sigmas[i])):
                         latents = fsg.calibrate(
                             anima,
@@ -965,10 +888,7 @@ def generate_body(
                     set_step_expert_index(anima, i)
                     compute_and_set_hydra_fei(anima, latents)
 
-                    # Commitment-σ / boost probe: below the cutoff, drive the
-                    # conditional pass with the alternate embedding — the boosted
-                    # one when ``tag_boost_scale`` is set (amplified tag delta),
-                    # else the plain dropped caption. ``embed`` everywhere else.
+                    # below cutoff: alternate (or boosted) embedding; else embed
                     if embed_alt is not None and float(sigmas[i]) < tag_drop_sigma:
                         cond_embed = (
                             embed_boost if embed_boost is not None else embed_alt
@@ -1031,19 +951,14 @@ def generate_body(
                                 **_neg_kw,
                             )
                         if cfg_delta_probe is not None:
-                            # Tier-0 cross-attn-drive probe: log the text-driven
-                            # velocity component before the combine overwrites
-                            # noise_pred (still the conditional prediction here).
+                            # log text-driven velocity before the combine
+                            # overwrites noise_pred (still conditional here)
                             cfg_delta_probe.record(
                                 i, float(sigmas[i]), noise_pred, uncond_noise_pred
                             )
                         if cfgpp_lambda is not None:
-                            # CFG++ substrate as a σ-scheduled guidance reweight
-                            # (App A.2): noise_pred = v^u + w_eff·(v^c − v^u). Pure
-                            # change to the combine — `denoised` and the downstream
-                            # step/er_sde consume it unchanged, so this composes with
-                            # er_sde. Bit-identical to the Euler calibrate-then-step
-                            # form; see sampling.cfgpp_guidance_weight.
+                            # noise_pred = v^u + w_eff·(v^c − v^u); see
+                            # sampling.cfgpp_guidance_weight
                             w_eff = inference_utils.cfgpp_guidance_weight(
                                 float(sigmas[i]), float(sigmas[i + 1]), cfgpp_lambda
                             )
@@ -1060,14 +975,13 @@ def generate_body(
                                 freeze_guidance_sigma is not None
                                 and float(sigmas[i]) < freeze_guidance_sigma
                             ):
-                                # Keep the per-step magnitude, lock the direction.
-                                # Per-sample L2 over all non-batch dims (5D latent).
+                                # keep magnitude, lock direction; per-sample L2
+                                # over all non-batch dims (5D latent)
                                 flat = delta.float().reshape(delta.shape[0], -1)
                                 mag = flat.norm(dim=1).clamp_min(1e-12)
                                 unit = (flat / mag[:, None]).reshape(delta.shape)
                                 if _frozen_guidance_dir is None:
-                                    # Capture the unit delta once at the first
-                                    # sub-cutoff step (identity on that step).
+                                    # capture once, at the first sub-cutoff step
                                     _frozen_guidance_dir = unit
                                 mag_shape = (delta.shape[0],) + (1,) * (delta.dim() - 1)
                                 delta = _frozen_guidance_dir.to(
@@ -1079,8 +993,6 @@ def generate_body(
                             text_knockout_sigma is not None
                             and float(sigmas[i]) < text_knockout_sigma
                         ):
-                            # Text knocked out below the cutoff: drop the guided
-                            # prediction and continue on the unconditional path.
                             noise_pred = uncond_noise_pred
 
                     if traj_stats is not None:
@@ -1113,10 +1025,8 @@ def generate_body(
             if pgraft_network is not None and lora_cutoff_step is not None:
                 pgraft_network.set_enabled(True)
 
-    # Single flush point for every branch (inline / spectrum / spd / foveated
-    # — runners record via the side channel but never flush). Idempotent, so a
-    # runner that flushed early is harmless; an exception mid-loop drops the
-    # partial trace by design.
+    # single flush point for every branch (runners record but never flush);
+    # idempotent, so flushing early is harmless
     if traj_stats is not None:
         traj_stats.flush()
     return latents
@@ -1134,14 +1044,9 @@ def generate(
         torch.Tensor: generated latent
     """
     device = gen_settings.device
-
-    # Resolve the seed for this call without mutating ``args`` (callers that
-    # save by ``args.seed`` resolve it themselves — see ``resolve_seed`` /
-    # ``GenerationRequest`` docs).
-    seed = resolve_seed(args)
+    seed = resolve_seed(args)  # doesn't mutate args — see resolve_seed docstring
 
     if shared_models is None or "model" not in shared_models:
-        # load DiT model (bf16 — see GenerationSettings note)
         anima = load_dit_model(args, device, torch.bfloat16)
 
         if shared_models is not None:
@@ -1168,14 +1073,11 @@ def generate(
     else:
         anima.reset_mod_guidance()
 
-    # EasyControl: load + apply network, VAE-encode reference image, run cond
-    # pre-pass to prime per-block (K_c, V_c). Phase 1 — recomputed every step
-    # at training; at inference we run it once here (no KV cache yet).
     _setup_easycontrol(args, anima, device, shared_models)
 
-    # DAVE: arm the per-block DC-attenuation hooks (training-free diversity edit).
-    # Hooks must be removed after generation — the model is shared across seeds,
-    # so a stacked hook set would compound the attenuation. See dave.py.
+    # DAVE: per-block DC-attenuation hooks (training-free diversity edit). Must
+    # be removed after generation — the model is shared across seeds, so a
+    # stacked hook set would compound the attenuation. See dave.py.
     dave_hooks = None
     if getattr(args, "dave", None):
         from library.inference.corrections.dave import setup_dave
@@ -1195,11 +1097,10 @@ def generate(
 def _setup_easycontrol(args, anima, device, shared_models):
     """Load EasyControl weights, VAE-encode the reference image, prime cond KV cache.
 
-    The cond stream is deterministic across denoising steps (cond_temb at t=0,
-    no dependence on noisy target, frozen DiT + frozen LoRA), so we run it
-    once via ``network.precompute_cond_kv()`` and reuse the per-block
-    (K_c, V_c) tensors for every step and every CFG branch — the patched
-    Block.forward then bypasses the cond stream entirely.
+    The cond stream is deterministic across denoising steps (frozen DiT +
+    frozen LoRA, no dependence on the noisy target), so it's run once via
+    ``network.precompute_cond_kv()`` and the (K_c, V_c) tensors are reused
+    for every step and CFG branch.
     """
     ec_weight = getattr(args, "easycontrol_weight", None)
     ec_image = getattr(args, "easycontrol_image", None)
@@ -1226,9 +1127,7 @@ def _setup_easycontrol(args, anima, device, shared_models):
 
         with Image.open(ec_image) as _ref_for_size:
             _rw, _rh = _ref_for_size.size
-        # Free-fit the reference's native aspect into the canonical 1024 tier band
-        # (the old path snapped to the nearest discrete CONSTANT_TOKEN_BUCKETS;
-        # free-fit preserves aspect with sub-patch crop).
+        # free-fit the reference's native aspect into the canonical 1024 tier band
         _edge = choose_edge(_rw, _rh, [1024])
         _bw, _bh = freefit_bucket(_rw, _rh, freefit_band_for_edge(_edge))
         args.image_size = [_bh, _bw]
@@ -1250,8 +1149,7 @@ def _setup_easycontrol(args, anima, device, shared_models):
         **create_kwargs,
     )
     network.load_weights(ec_weight)
-    # b_cond is a live logit bias (not baked into the KV cache), so an additive
-    # offset after load_weights shifts cond softmax mass ~e× per unit. Must run
+    # b_cond is a live logit bias, not baked into the KV cache — must offset
     # before apply_to/precompute so every block's closure captures the shifted
     # Parameter. Mirrors scripts/edit.py.
     b_offset = getattr(args, "easycontrol_b_offset", None)
@@ -1263,8 +1161,7 @@ def _setup_easycontrol(args, anima, device, shared_models):
     network.to(device, dtype=torch.bfloat16)
     network.apply_to(text_encoders=None, unet=anima)
 
-    # VAE-encode the reference image -> 4D latent.
-    # Resize to args.image_size first so the cond bucket matches the target.
+    # resize to args.image_size first so the cond bucket matches the target
     h_pix, w_pix = args.image_size
     img = Image.open(ec_image).convert("RGB").resize((w_pix, h_pix), Image.LANCZOS)
     tfm = transforms.Compose(
@@ -1299,9 +1196,6 @@ def _setup_easycontrol(args, anima, device, shared_models):
         torch.cuda.empty_cache()
 
     network.set_cond(cond_latent.to(device, dtype=torch.bfloat16))
-    # KV cache: walk the cond stream once and pin per-block (K_c, V_c). Every
-    # subsequent denoising step (and CFG branch) feeds these into target's
-    # extended self-attention without re-running the cond stream.
     network.precompute_cond_kv()
     logger.info(
         f"EasyControl: loaded {ec_weight} "

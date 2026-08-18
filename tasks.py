@@ -291,6 +291,21 @@ COMMANDS = {
         "Build the typed-tag caption index (character/copyright/artist groups) "
         "at post_image_dataset/captions/caption_index.json. Pure data, no GPU.",
     ),
+    "caption-autotag": (
+        preprocess.cmd_caption_autotag,
+        "Auto-tag the dataset with the Anima Tagger and write .txt caption "
+        'sidecars. ARGS="--mode missing|merge|overwrite" (default missing = '
+        'only uncaptioned images). Dry-run by default; ARGS="--apply" writes, '
+        "then `make preprocess-te` is REQUIRED.",
+    ),
+    "caption-position": (
+        preprocess.cmd_caption_position,
+        "Append position-aware clauses ('On the left, <tags>. ...') to "
+        "multi-subject captions via SAM3 + Anima Tagger. Writes the resized "
+        "captions (post_image_dataset/), never the image_dataset/ master. "
+        'Dry-run by default; ARGS="--apply" writes, then `make preprocess-te` '
+        "is REQUIRED.",
+    ),
     # ── Curation ──────────────────────────────────────────────────────
     "curate-group": (
         curate.cmd_curate_group,
@@ -424,6 +439,24 @@ COMMANDS = {
         exp_training.cmd_byg_data,
         "[experimental] Build BYG edit-tuple sidecars (tag-swap) into "
         "post_image_dataset/byg/. Usage: exp-byg-data [--limit N --overwrite].",
+    ),
+    "exp-cjk-cache": (
+        exp_training.cmd_cjk_cache,
+        "[experimental] Stage the CJK distillation cache (Qwen hidden states + "
+        "frozen-teacher adapter outputs) from post_image_dataset/cjk_distill/"
+        "pairs.jsonl. Reused by every exp-distill-cjk arm.",
+    ),
+    "exp-distill-cjk": (
+        exp_training.cmd_distill_cjk,
+        "[experimental] Distill the extended CJK T5-vocab rows against the "
+        "en-translation teacher. Gates in order: ARGS='--mode oracle' → "
+        "'--mode capacity' → '--mode train'. Emits a vocab pack, not a LoRA.",
+    ),
+    "exp-cjk-gates": (
+        exp_training.cmd_cjk_gates,
+        "[experimental] CJK Phase-2b closing gates: G3 (teacher ceiling per "
+        "register — is the 2c cos>=0.6 gate even the right number?) and G4 "
+        "(corpus health + trust ablation). ARGS='--gates g3,g4a,g4b'.",
     ),
     "exp-test-soft": (
         exp_inference.cmd_test_soft,

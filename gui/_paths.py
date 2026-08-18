@@ -1,8 +1,7 @@
 """Shared path constants for the GUI package.
 
-Foundation module — imported by every other ``gui`` submodule and by
-``gui/__init__.py``. Deliberately dependency-free (no Qt, no other ``gui``
-imports) so it can be imported first without risking a cycle.
+Imported by every ``gui`` submodule; deliberately dependency-free (no Qt,
+no other ``gui`` imports) to avoid import cycles.
 """
 
 from __future__ import annotations
@@ -14,25 +13,20 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = ROOT / "configs"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
-# Persistent UI state (language, update-check cache, preprocess knobs, and the
-# generic preferences below). Separate from configs/ so it survives a config
-# reset. The same file the i18n / system-dialog / preprocess modules read.
+# Persistent UI state (language, update-check cache, preprocess knobs, prefs).
+# Separate from configs/ so it survives a config reset.
 GUI_SETTINGS_FILE = Path(__file__).resolve().parent / "gui_settings.json"
 
-# Default autotagger probability floor applied on top of the model's per-tag
-# F1 thresholds (see AnimaTagger.predict_caption min_confidence).
+# Autotagger probability floor on top of the model's per-tag F1 thresholds.
 DEFAULT_AUTOTAG_CONFIDENCE = 0.5
 DEFAULT_CAPTION_INSERT_NO_ARTIST = True
 DEFAULT_CAPTION_VALIDATE_ARTIST_TAGS = False
-# Defaults for the Dataset-tab grouping run (`curate-group`). Mirror the
-# library values (library.datasets.grouping.DEFAULT_*) so the GUI stays
-# torch-free; higher = tighter groups. See SettingsDialog + ImageViewerTab.
+# Dataset-tab grouping defaults (`curate-group`); mirrors
+# library.datasets.grouping.DEFAULT_* so the GUI stays torch-free.
 DEFAULT_GROUP_MATCH_FRAC_MIN = 0.25
 DEFAULT_GROUP_CELL_MATCH_MIN = 0.93
-# Kept for backward compat; the live accent now comes from the active theme (gui/theme.py).
-DEFAULT_THEME_COLOR = "#3c78c8"
-# Default named theme (see gui/theme.py THEMES). One of "dark" / "light" / "sepia".
-DEFAULT_THEME = "dark"
+DEFAULT_THEME_COLOR = "#3c78c8"  # backward compat; live accent comes from gui/theme.py
+DEFAULT_THEME = "dark"  # one of "dark" / "light" / "sepia" (gui/theme.py THEMES)
 
 
 def read_gui_settings() -> dict:

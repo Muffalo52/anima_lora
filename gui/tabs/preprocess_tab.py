@@ -1,23 +1,13 @@
 """PreprocessingTab — caption shuffle/dropout + SAM3/MIT mask config.
 
-Layout mirrors ConfigTab:
-- Top action bar (refresh + per-step Run buttons + Save + Stop)
-- Horizontal split: form on left (clickable labels show help on the right),
-  explanation panel on the right
-- Log panel below in a vertical splitter
+Layout mirrors ConfigTab: top action bar, form+explain split, log panel.
+Surfaces the knobs the bare ``make preprocess`` / ``make mask`` paths hardcode.
 
-Surfaces the knobs that the bare ``make preprocess`` / ``make mask`` paths
-hardcode: caption shuffle variant count, per-tag dropout rate, SAM prompt
-list / threshold / dilate, MIT text-threshold / dilate.
-
-Settings persist to:
-- the selected ``configs/gui-methods/<variant>.toml`` ``[variant]`` table —
-  GUI-profile preprocess knobs such as preprocess path filter, target_res,
-  low-res filtering, caption shuffle/dropout, and mask settings.
-- ``configs/sam_mask.yaml`` — SAM prompts / threshold / dilate (existing
-  canonical CLI fallback, read directly by ``scripts/preprocess/generate_masks.py``).
-  GUI Save no longer writes this file; direct terminal ``make mask`` will not
-  see GUI-profile mask settings unless the user edits the YAML manually.
+Settings persist to the selected ``configs/gui-methods/<variant>.toml``
+``[variant]`` table. SAM prompts/threshold/dilate persist to
+``configs/sam_mask.yaml`` instead (the CLI fallback) — GUI Save no longer
+writes there, so a terminal ``make mask`` won't see GUI mask settings unless
+the YAML is edited by hand.
 """
 
 from __future__ import annotations
@@ -103,8 +93,7 @@ SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
 PREPROCESS_TOML = ROOT / "configs" / "preprocess.toml"
 
 # Defaults match the historical hardcoded values in scripts/tasks/preprocess.py
-# and scripts/preprocess/generate_masks_mit.py so a freshly installed GUI runs the
-# same pipeline as the bare CLI.
+# and generate_masks_mit.py, so a fresh GUI runs the same pipeline as the bare CLI.
 DEFAULT_SOURCE_IMAGE_DIR = "image_dataset"
 DEFAULT_PREPROCESS_PATH_PATTERN = "*"
 DEFAULT_DROP_LOWRES_IMAGES = True
@@ -118,6 +107,13 @@ DEFAULT_CAPTION_CORRECT_ORDER = False
 DEFAULT_CAPTION_INSERT_NO_ARTIST = False
 DEFAULT_CAPTION_TRIGGER_WORD = ""
 DEFAULT_CAPTION_TRIGGER_AT_FRONT = False
+DEFAULT_CAPTION_POSITION_CLAUSES = False
+DEFAULT_CAPTION_AUTOTAG = False
+# Mirrors library.preprocess.autotag.MODES — kept as a literal so the Qt-side
+# module doesn't drag in the PIL/torch import chain (see gui/CLAUDE.md).
+CAPTION_AUTOTAG_MODES = ("missing", "merge", "overwrite")
+DEFAULT_CAPTION_AUTOTAG_MODE = "missing"
+DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE = 0.0
 DEFAULT_SAM_PROMPTS = ("speech bubble", "text bubble")
 DEFAULT_SAM_THRESHOLD = 0.5
 DEFAULT_SAM_DILATE = 5
@@ -144,6 +140,10 @@ _GUI_PREPROCESS_KEYS = {
     "caption_insert_no_artist",
     "caption_trigger_word",
     "caption_trigger_at_front",
+    "caption_position_clauses",
+    "caption_autotag",
+    "caption_autotag_mode",
+    "caption_autotag_min_confidence",
     "run_sam_mask",
     "run_mit_mask",
     "mask_path_pattern",
@@ -152,10 +152,8 @@ _GUI_PREPROCESS_KEYS = {
     "mit_dilate",
 }
 
-# Default cache/output dirs — sourced from base.toml (the canonical path keys
-# the trainer reads) via gui.config_io so the Preprocess tab can't drift from
-# the Config/EasyControl tabs or training. Used only as the fallback when the
-# active variant's merged config doesn't override the path.
+# Sourced from base.toml via gui.config_io so this tab can't drift from the
+# Config/EasyControl tabs; fallback only, when the variant doesn't override the path.
 RESIZED_DIR = default_resized_dir()
 LORA_CACHE_DIR = default_lora_cache_dir()
 MASK_DIR = default_mask_dir()
@@ -218,16 +216,27 @@ class _ResizeCropAnchorWidget(QWidget):
 
 
 def _load_preprocess_toml() -> dict:
-    """Read configs/preprocess.toml (the preprocess-only knobs split out of
-    base.toml). Returns {} if absent/unparseable so callers fall back to
-    defaults. The GUI uses this only as the CLI-default fallback; GUI edits are
-    stored on the selected gui-method variant."""
+    """Read configs/preprocess.toml, {} if absent/unparseable. CLI-default
+    fallback only; GUI edits are stored on the selected gui-method variant."""
     if not PREPROCESS_TOML.exists():
         return {}
     try:
         return toml.loads(PREPROCESS_TOML.read_text(encoding="utf-8"))
     except (OSError, toml.TomlDecodeError):
         return {}
+
+
+def _pp_default(key: str, fallback):
+    """Effective default for a knob ``configs/preprocess.toml`` can own. Load
+    into the widget *and* compare against when persisting (only a real
+    divergence gets written to the variant).
+
+    Load-bearing for the caption-master stages: this tab **always** exports
+    their env var, which the CLI resolves above the TOML — so a checkbox left
+    at the hardcoded default would export ``0`` and silently override a `true`
+    the user set in the (user-owned) TOML."""
+    value = _load_preprocess_toml().get(key)
+    return fallback if value is None else value
 
 
 def _load_sam_yaml() -> dict:
@@ -240,12 +249,9 @@ def _load_sam_yaml() -> dict:
 
 
 def _load_rules(sam_yaml: dict) -> list[dict]:
-    """Normalize either schema into a list of per-card rule dicts.
-
-    A ``rules:`` array is returned card-for-card (per-rule threshold/dilate
-    fall back to the top-level values). A flat config (no ``rules:`` key)
-    collapses to one catch-all card carrying the top-level prompts.
-    """
+    """Normalize either schema into a list of per-card rule dicts: a ``rules:``
+    array returns card-for-card (missing threshold/dilate fall back to
+    top-level); a flat config collapses to one catch-all card."""
     default_threshold = float(sam_yaml.get("threshold", DEFAULT_SAM_THRESHOLD))
     default_dilate = int(sam_yaml.get("dilate", DEFAULT_SAM_DILATE))
     raw = sam_yaml.get("rules")
@@ -284,7 +290,7 @@ def _filtered_files(root: Path, pattern: str | None, predicate) -> list[Path]:
 def _count_masks(mask_dir: Path, path_pattern: str | None = None) -> int:
     if not mask_dir.is_dir():
         return 0
-    # rglob picks up the nested `<rel>/` subtrees produced by `make mask`; legacy flat trees still count correctly.
+    # rglob picks up nested `<rel>/` subtrees from `make mask`; flat trees still count correctly.
     return len(
         _filtered_files(
             mask_dir,
@@ -297,7 +303,7 @@ def _count_masks(mask_dir: Path, path_pattern: str | None = None) -> int:
 def _count_resized(resized_dir: Path, path_pattern: str | None = None) -> int:
     if not resized_dir.is_dir():
         return 0
-    # rglob picks up the nested `<rel>/` subtrees produced by recursive resize_images.py; flat trees still count correctly.
+    # rglob picks up nested `<rel>/` subtrees from resize_images.py; flat trees still count correctly.
     return len(
         _filtered_files(
             resized_dir,
@@ -319,8 +325,7 @@ class _RuleCard(QGroupBox):
     """One SAM mask rule editor: path_pattern + prompts/focus + threshold/dilate.
 
     ``prompts`` mask OUT (ignored in the loss); ``focus_prompts`` keep ONLY
-    that subject (reversed polarity). An empty / ``*`` path_pattern is a
-    catch-all. Emits ``removed(self)`` when its Remove button is clicked.
+    that subject (reversed polarity). Empty/``*`` path_pattern is a catch-all.
     """
 
     removed = Signal(object)
@@ -383,7 +388,6 @@ class _RuleCard(QGroupBox):
         form.addRow("", self.remove_btn)
 
     def _label(self, key: str, text: str) -> ClickableLabel:
-        """Clickable field label that routes this field's help to the panel."""
         help_text = preprocess_field_help(key)
         return make_field_label(
             text,
@@ -392,7 +396,7 @@ class _RuleCard(QGroupBox):
         )
 
     def to_dict(self) -> dict:
-        """Serialize to a rule dict. Raises ValueError on an unparseable threshold."""
+        """Raises ValueError on an unparseable threshold."""
         text = self.threshold_edit.text().strip()
         try:
             threshold = float(text)
@@ -424,7 +428,8 @@ class _RuleCard(QGroupBox):
 class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget):
     def __init__(self):
         super().__init__()
-        # Daemon-backed preprocessing (mirrors ConfigTab's Train button): each Run submits a detached "command" job to the local daemon so it survives the GUI closing and shares the daemon's serial single-GPU queue with training.
+        # Each Run submits a detached daemon "command" job (mirrors ConfigTab's
+        # Train button) so it survives the GUI closing and queues behind training.
         self._init_job_observer()
         self._run_buttons: list[QToolButton] = []
         # Kept alive here because setStyle() does not take ownership.
@@ -437,9 +442,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
 
         top = QHBoxLayout()
 
-        # Split buttons keep a per-widget stylesheet (the global [variant] rule
-        # bypasses SplitButtonStyle and miscentres the label) — colour from the
-        # central ACTION_COLORS "info" via action_button_qss.
+        # Split buttons need a per-widget stylesheet (a global [variant] rule
+        # bypasses SplitButtonStyle and miscentres the label).
         run_step_style = action_button_qss("info")
 
         self._method_label = QLabel("Method")
@@ -473,7 +477,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         )
         top.addWidget(self.run_te_btn)
 
-        # Standalone PE (vision-encoder) caching, letting the user refresh PE sidecars without re-running the whole VAE+text pass; encoder follows the variant's repa_encoder.
+        # Standalone PE (vision-encoder) caching — refresh PE sidecars without
+        # re-running VAE+text; encoder follows the variant's repa_encoder.
         self.run_pe_btn = self._make_run_button(
             t("preprocess_run_pe"), run_step_style, self._run_pe
         )
@@ -526,7 +531,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         sam_rules = _load_rules(sam_yaml)
         mask_path_pattern = sam_yaml.get("path_pattern") or DEFAULT_MASK_PATH_PATTERN
 
-        # GUI cache knobs are stored on the selected gui-method variant; configs/preprocess.toml remains the CLI default/fallback.
         img_box = QGroupBox(t("preprocess_image_prep"))
         img_form = QFormLayout()
 
@@ -582,11 +586,12 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.min_pixels_spin,
         )
 
-        # Dual-use: preprocess resizes to these tiers and train.py reads the same value back (via load_method_preset) to size the compile cache — this widget is the single source of truth.
+        # Dual-use: preprocess resizes to these tiers, and train.py reads the same
+        # value back to size the compile cache — this widget is the source of truth.
         self.target_res_widget = _TargetResWidget(
             pp_cfg.get("target_res", DEFAULT_TARGET_RES)
         )
-        # Mark dirty on every toggle so the Config tab's Train auto-chain doesn't preprocess at the stale tier when the user changed tiers without clicking Save.
+        # Mark dirty on every toggle so Train auto-chain doesn't preprocess at a stale tier.
         self.target_res_widget.changed.connect(self.persist_target_res)
         img_form.addRow(
             self._field_label("target_res", t("preprocess_target_res")),
@@ -623,9 +628,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             margins_row,
         )
 
-        # Free-fit is the only resize mode: images keep their native aspect and the
-        # patch-grid token count lands anywhere inside the tier's band (no discrete
-        # (W, H) bucket snap). Only the max-ratio clamp is user-tunable.
+        # Free-fit is the only resize mode; only the max-ratio clamp is user-tunable.
         self.freefit_max_ratio_spin = QDoubleSpinBox()
         self.freefit_max_ratio_spin.setRange(1.0, 4.0)
         self.freefit_max_ratio_spin.setSingleStep(0.25)
@@ -671,6 +674,78 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.dropout_edit,
         )
 
+        text_box.setLayout(text_form)
+        form_layout.addWidget(text_box)
+
+        # Auto-tagging runs first and is the only stage that can create a caption
+        # from nothing; the caption-rewriting box below edits text that already exists.
+        autotag_box = QGroupBox(t("preprocess_caption_autotag_box"))
+        autotag_form = QFormLayout()
+
+        self.caption_autotag_chk = QCheckBox(t("preprocess_caption_autotag"))
+        self.caption_autotag_chk.setToolTip(t("preprocess_caption_autotag_tip"))
+        self.caption_autotag_chk.setChecked(
+            bool(pp_cfg.get("caption_autotag", DEFAULT_CAPTION_AUTOTAG))
+        )
+        autotag_form.addRow(
+            self._field_label("caption_autotag", t("preprocess_caption_autotag")),
+            self.caption_autotag_chk,
+        )
+
+        # Item data carries the untranslated mode name so a language switch can't change what runs.
+        self.caption_autotag_mode_combo = QComboBox()
+        for mode in CAPTION_AUTOTAG_MODES:
+            self.caption_autotag_mode_combo.addItem(
+                t(f"preprocess_caption_autotag_mode_{mode}"), mode
+            )
+        self.caption_autotag_mode_combo.setToolTip(
+            t("preprocess_caption_autotag_mode_tip")
+        )
+        self._set_autotag_mode(
+            str(pp_cfg.get("caption_autotag_mode", DEFAULT_CAPTION_AUTOTAG_MODE))
+        )
+        autotag_form.addRow(
+            self._field_label(
+                "caption_autotag_mode", t("preprocess_caption_autotag_mode")
+            ),
+            self.caption_autotag_mode_combo,
+        )
+
+        self.caption_autotag_confidence_spin = QDoubleSpinBox()
+        self.caption_autotag_confidence_spin.setRange(0.0, 1.0)
+        self.caption_autotag_confidence_spin.setSingleStep(0.05)
+        self.caption_autotag_confidence_spin.setDecimals(2)
+        self.caption_autotag_confidence_spin.setValue(
+            float(
+                pp_cfg.get(
+                    "caption_autotag_min_confidence",
+                    DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE,
+                )
+            )
+        )
+        self.caption_autotag_confidence_spin.wheelEvent = lambda e: e.ignore()
+        self.caption_autotag_confidence_spin.setToolTip(
+            t("preprocess_caption_autotag_min_confidence_tip")
+        )
+        autotag_form.addRow(
+            self._field_label(
+                "caption_autotag_min_confidence",
+                t("preprocess_caption_autotag_min_confidence"),
+            ),
+            self.caption_autotag_confidence_spin,
+        )
+
+        self.caption_autotag_chk.toggled.connect(self._sync_autotag_enabled)
+        self._sync_autotag_enabled(self.caption_autotag_chk.isChecked())
+
+        autotag_box.setLayout(autotag_form)
+        form_layout.addWidget(autotag_box)
+
+        # Order follows the pipeline: position clauses rewrite the resized caption
+        # first, then correction reorders the bag around them and slots the trigger word.
+        caption_box = QGroupBox(t("preprocess_caption_editing"))
+        caption_form = QFormLayout()
+
         self.caption_correct_order_chk = QCheckBox(
             t("preprocess_caption_correct_order")
         )
@@ -678,7 +753,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_correct_order_tip")
         )
         self.caption_correct_order_chk.setChecked(DEFAULT_CAPTION_CORRECT_ORDER)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_correct_order",
                 t("preprocess_caption_correct_order"),
@@ -693,7 +768,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_insert_no_artist_tip")
         )
         self.caption_insert_no_artist_chk.setChecked(DEFAULT_CAPTION_INSERT_NO_ARTIST)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_insert_no_artist",
                 t("preprocess_caption_insert_no_artist"),
@@ -706,7 +781,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self.caption_trigger_word_edit.setToolTip(
             t("preprocess_caption_trigger_word_tip")
         )
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_trigger_word",
                 t("preprocess_caption_trigger_word"),
@@ -721,15 +796,37 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             t("preprocess_caption_trigger_at_front_tip")
         )
         self.caption_trigger_at_front_chk.setChecked(DEFAULT_CAPTION_TRIGGER_AT_FRONT)
-        text_form.addRow(
+        caption_form.addRow(
             self._field_label(
                 "caption_trigger_at_front",
                 t("preprocess_caption_trigger_at_front"),
             ),
             self.caption_trigger_at_front_chk,
         )
-        text_box.setLayout(text_form)
-        form_layout.addWidget(text_box)
+
+        # Unlike its neighbours this is a GPU stage (SAM3 + tagger) that rewrites
+        # the caption master in place, so it's off by default. See _pp_default.
+        self.caption_position_clauses_chk = QCheckBox(
+            t("preprocess_caption_position_clauses")
+        )
+        self.caption_position_clauses_chk.setToolTip(
+            t("preprocess_caption_position_clauses_tip")
+        )
+        self.caption_position_clauses_chk.setChecked(
+            bool(
+                pp_cfg.get("caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES)
+            )
+        )
+        caption_form.addRow(
+            self._field_label(
+                "caption_position_clauses",
+                t("preprocess_caption_position_clauses"),
+            ),
+            self.caption_position_clauses_chk,
+        )
+
+        caption_box.setLayout(caption_form)
+        form_layout.addWidget(caption_box)
 
         sam_box = QGroupBox(t("preprocess_masking_sam"))
         sam_outer = QVBoxLayout()
@@ -744,8 +841,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self._field_label("run_sam_mask", t("preprocess_run_sam_mask")),
             self.run_sam_mask_chk,
         )
-        # Stored in sam_mask.yaml but scopes BOTH backends — masking.py reads
-        # it and forwards --path-pattern to SAM and MIT alike.
+        # Stored in sam_mask.yaml but scopes BOTH backends (SAM and MIT alike).
         self.mask_path_pattern_edit = QLineEdit(mask_path_pattern)
         self.mask_path_pattern_edit.setPlaceholderText("*")
         self.mask_path_pattern_edit.setToolTip(t("preprocess_mask_path_pattern_tip"))
@@ -755,7 +851,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         )
         sam_outer.addLayout(sam_form)
 
-        # One card per rule: routes a subset of images (by path_pattern) to its own prompt set; matching rules compose.
+        # One card per rule: routes a subset of images to its own prompt set; matching rules compose.
         self._rule_cards: list[_RuleCard] = []
         self._rules_layout = QVBoxLayout()
         self._rules_layout.setContentsMargins(0, 0, 0, 0)
@@ -808,7 +904,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         scroll.setWidget(form_host)
         hsplit.addWidget(scroll)
 
-        # Same QTextBrowser style as ConfigTab's explain panel so the look matches across tabs.
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
@@ -836,7 +931,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
 
     def _lazy_init(self) -> None:
         self._refresh_status()
-        # Re-bind to a preprocess/mask job still running from a previous GUI session or the CLI so closing+reopening re-attaches.
         self._try_reattach()
 
     def _refresh_variant_row(self, method: str) -> None:
@@ -882,7 +976,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         settings = read_gui_settings()
         pp_cfg = _load_preprocess_toml()
 
-        # path_scope is layered on top at submit time by _gui_scoped_paths, so this field shows/edits the *unscoped* root, not the scoped run path.
+        # path_scope is layered on top at submit time by _gui_scoped_paths, so
+        # this field shows/edits the *unscoped* root, not the scoped run path.
         source_dir = meta.get(
             "source_image_dir",
             pp_cfg.get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR),
@@ -938,6 +1033,25 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         caption_trigger_at_front = meta.get(
             "caption_trigger_at_front", DEFAULT_CAPTION_TRIGGER_AT_FRONT
         )
+        # Falls back to preprocess.toml, not the hardcoded default (see _pp_default).
+        caption_position_clauses = meta.get(
+            "caption_position_clauses",
+            pp_cfg.get("caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES),
+        )
+        caption_autotag = meta.get(
+            "caption_autotag", pp_cfg.get("caption_autotag", DEFAULT_CAPTION_AUTOTAG)
+        )
+        caption_autotag_mode = meta.get(
+            "caption_autotag_mode",
+            pp_cfg.get("caption_autotag_mode", DEFAULT_CAPTION_AUTOTAG_MODE),
+        )
+        caption_autotag_min_confidence = meta.get(
+            "caption_autotag_min_confidence",
+            pp_cfg.get(
+                "caption_autotag_min_confidence",
+                DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE,
+            ),
+        )
         run_sam_mask = meta.get(
             "run_sam_mask",
             settings.get("run_sam_mask", DEFAULT_RUN_SAM_MASK),
@@ -981,6 +1095,13 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.caption_insert_no_artist_chk.setChecked(bool(caption_insert_no_artist))
             self.caption_trigger_word_edit.setText(str(caption_trigger_word or ""))
             self.caption_trigger_at_front_chk.setChecked(bool(caption_trigger_at_front))
+            self.caption_position_clauses_chk.setChecked(bool(caption_position_clauses))
+            self.caption_autotag_chk.setChecked(bool(caption_autotag))
+            self._set_autotag_mode(str(caption_autotag_mode))
+            self.caption_autotag_confidence_spin.setValue(
+                float(caption_autotag_min_confidence)
+            )
+            self._sync_autotag_enabled(self.caption_autotag_chk.isChecked())
             self.run_sam_mask_chk.setChecked(bool(run_sam_mask))
             self.mask_path_pattern_edit.setText(str(mask_path_pattern or "*"))
             self._set_rule_cards(mask_rules)
@@ -1026,13 +1147,12 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         spin.setDecimals(1)
         spin.setSingleStep(1.0)
         spin.setSuffix("%")
-        # Tighter arrow zone than the global theme so the compact field stays snug.
         spin.setStyleSheet(
             "QDoubleSpinBox { padding-right: 4px; }"
             "QDoubleSpinBox::up-button { width: 16px; }"
             "QDoubleSpinBox::down-button { width: 16px; margin-right: 16px; }"
         )
-        # Right-align on the line-edit, after the stylesheet (setAlignment on the spinbox doesn't survive the styled rebuild).
+        # After the stylesheet: setAlignment on the spinbox doesn't survive the styled rebuild.
         line_edit = spin.lineEdit()
         line_edit.setTextMargins(0, 0, 0, 0)
         spin.setFixedWidth(84)
@@ -1069,7 +1189,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self._add_rule_card(rule)
         self._update_remove_buttons()
 
-    # _update_save_button is overridden below because the Save button has a different name + localized label.
     def _connect_dirty_signals(self) -> None:
         for widget in (
             self.source_dir_edit,
@@ -1090,6 +1209,10 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.caption_insert_no_artist_chk,
             self.caption_trigger_word_edit,
             self.caption_trigger_at_front_chk,
+            self.caption_position_clauses_chk,
+            self.caption_autotag_chk,
+            self.caption_autotag_mode_combo,
+            self.caption_autotag_confidence_spin,
             self.run_sam_mask_chk,
             self.mask_path_pattern_edit,
             self.run_mit_mask_chk,
@@ -1110,8 +1233,28 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             apply_variant(self.save_btn, None)
             self.save_btn.setToolTip(t("preprocess_save_settings_tip"))
 
+    def _set_autotag_mode(self, mode: str) -> None:
+        """Select the combo entry whose item *data* is ``mode`` (not its label)."""
+        index = self.caption_autotag_mode_combo.findData(
+            str(mode or DEFAULT_CAPTION_AUTOTAG_MODE)
+        )
+        if index < 0:
+            index = self.caption_autotag_mode_combo.findData(
+                DEFAULT_CAPTION_AUTOTAG_MODE
+            )
+        self.caption_autotag_mode_combo.setCurrentIndex(max(index, 0))
+
+    def _autotag_mode(self) -> str:
+        return str(
+            self.caption_autotag_mode_combo.currentData()
+            or DEFAULT_CAPTION_AUTOTAG_MODE
+        )
+
+    def _sync_autotag_enabled(self, enabled: bool) -> None:
+        self.caption_autotag_mode_combo.setEnabled(bool(enabled))
+        self.caption_autotag_confidence_spin.setEnabled(bool(enabled))
+
     def _field_label(self, key: str, text_str: str) -> ClickableLabel:
-        """Build a ClickableLabel that shows this field's help when clicked."""
         help_text = preprocess_field_help(key)
         return make_field_label(
             text_str,
@@ -1354,14 +1497,11 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
     def preprocess_env(self) -> dict[str, str]:
         """Environment values consumed by ``tasks.py preprocess``.
 
-        The geometry/filter knobs (``DROP_LOWRES_IMAGES`` / ``MIN_PIXELS`` /
-        ``TARGET_RES`` / ``FREEFIT_MAX_RATIO``) ride as env — not just the config
-        snapshot — because the ConfigTab Train auto-chain hands preprocess a
-        CONFIG_FILE snapshot with the preprocess-only keys stripped (they must not
-        leak into the chained training config). Env wins over the snapshot in
-        ``tasks.py`` (mirrors ``PREPROCESS_PATH_PATTERN``), so the auto-chain
-        honors the unchecked low-res filter / selected tiers. Harmlessly redundant
-        on the standalone Preprocess Run (snapshot already carries them)."""
+        The geometry/filter knobs ride as env, not just the config snapshot,
+        because the Train auto-chain hands preprocess a snapshot with the
+        preprocess-only keys stripped (they must not leak into the chained
+        training config); env wins over the snapshot in ``tasks.py``. Harmlessly
+        redundant on a standalone Preprocess Run."""
         return {
             "DROP_LOWRES_IMAGES": "1" if self.drop_lowres_chk.isChecked() else "0",
             "MIN_PIXELS": str(int(self.min_pixels_spin.value())),
@@ -1379,6 +1519,16 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "CAPTION_TRIGGER_AT_FRONT": (
                 "1" if self.caption_trigger_at_front_chk.isChecked() else "0"
             ),
+            # Gates the SAM3+tagger stage before caption/TE (rewrites the caption master those read).
+            "CAPTION_POSITION_CLAUSES": (
+                "1" if self.caption_position_clauses_chk.isChecked() else "0"
+            ),
+            # Gates the Anima Tagger stage right after resize (*creates* the caption master).
+            "CAPTION_AUTOTAG": "1" if self.caption_autotag_chk.isChecked() else "0",
+            "CAPTION_AUTOTAG_MODE": self._autotag_mode(),
+            "CAPTION_AUTOTAG_MIN_CONFIDENCE": (
+                f"{float(self.caption_autotag_confidence_spin.value()):g}"
+            ),
             "PREPROCESS_PATH_PATTERN": (
                 self.preprocess_path_pattern_edit.text().strip()
                 or DEFAULT_PREPROCESS_PATH_PATTERN
@@ -1394,26 +1544,28 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "resize_bucket_resos": self.target_res_widget.bucket_resos(),
             "resize_crop_anchor": self.resize_crop_anchor_widget.value(),
             "resize_crop_margins": self._resize_crop_margins(),
-            # Free-fit is the only resize mode; only the max-ratio clamp is tunable.
             "freefit_max_ratio": float(self.freefit_max_ratio_spin.value()),
             "caption_correct_order": self.caption_correct_order_chk.isChecked(),
             "caption_insert_no_artist": self.caption_insert_no_artist_chk.isChecked(),
             "caption_trigger_word": self.caption_trigger_word_edit.text().strip(),
             "caption_trigger_at_front": self.caption_trigger_at_front_chk.isChecked(),
+            "caption_position_clauses": self.caption_position_clauses_chk.isChecked(),
+            "caption_autotag": self.caption_autotag_chk.isChecked(),
+            "caption_autotag_mode": self._autotag_mode(),
+            "caption_autotag_min_confidence": float(
+                self.caption_autotag_confidence_spin.value()
+            ),
         }
 
     def preprocess_config_snapshot(self) -> dict[str, object]:
-        """Full preprocess config snapshot captured at GUI submit time.
-
-        The concrete paths come from the selected GUI method plus ``path_scope``.
-        ``preprocess_path_pattern`` is not written into the flat config because
-        training should not see that GUI-only preprocess filter; it is forwarded
-        to tasks.py via ``PREPROCESS_PATH_PATTERN`` instead.
-        """
+        """Full preprocess config snapshot captured at GUI submit time. Paths
+        come from the selected GUI method plus ``path_scope``.
+        ``preprocess_path_pattern`` is not written into the flat config (training
+        must not see this GUI-only filter) — forwarded via ``PREPROCESS_PATH_PATTERN`` instead."""
         variant = self._variant or "lora"
         merged, _ = merged_gui_variant_preset(variant, "default")
-        # Seed the base source dir from the (editable) field before scoping so
-        # path_scope is appended onto the user-chosen root, not the hard default.
+        # Seed source dir from the editable field before scoping, so path_scope
+        # appends onto the user-chosen root, not the hard default.
         source_dir = self.source_dir_edit.text().strip()
         if source_dir:
             merged["source_image_dir"] = source_dir
@@ -1448,21 +1600,16 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         return _clean(snapshot)
 
     def persist_target_res(self) -> None:
-        """Mark the GUI profile dirty when the tier selection changes.
-
-        ConfigTab auto-chain/queue calls ``persist_preprocess_inputs`` before it
-        submits, so it still captures the latest tiers without silently saving
-        them while the user is editing.
-        """
+        """Mark dirty on tier change; ConfigTab's auto-chain/queue calls
+        ``persist_preprocess_inputs`` before submit to capture the latest tiers
+        without silently saving mid-edit."""
         if not self._loading_variant:
             self._mark_dirty()
 
     def persist_preprocess_inputs(self) -> bool:
-        """Persist cache-building inputs used by ConfigTab's auto-chain/queue.
-
-        This intentionally excludes mask-only settings so an invalid mask
-        threshold cannot block a plain cache build.
-        """
+        """Persist cache-building inputs for ConfigTab's auto-chain/queue.
+        Excludes mask-only settings so an invalid mask threshold can't block a
+        plain cache build."""
         return self._save_variant_preprocess_meta(validate_dropout=True)
 
     def _save_variant_preprocess_meta(
@@ -1497,7 +1644,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         if not isinstance(meta, dict):
             meta = {}
 
-        # Persist on the variant only when it diverges from the preprocess.toml default, so a plain checkout keeps an empty meta.
+        # Persist only when it diverges from the preprocess.toml default, so a plain checkout keeps an empty meta.
         pp_default = str(
             _load_preprocess_toml().get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR)
         )
@@ -1537,7 +1684,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             meta["min_pixels"] = min_pixels
 
         target_res = self.target_res_widget.value()
-        # Kept explicit even when it matches the default: it also affects train-time compile-cache sizing, so the GUI profile must show the exact tiers it will use.
+        # Kept explicit even at the default: it also sizes the train-time compile
+        # cache, so the GUI profile must show the exact tiers it will use.
         meta["target_res"] = target_res
 
         bucket_resos = self.target_res_widget.bucket_resos()
@@ -1558,8 +1706,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         else:
             meta.pop("resize_crop_margins", None)
 
-        # Free-fit is the only resize mode; max_ratio is preprocess-only and
-        # persisted only when it differs from the default.
         freefit_max_ratio = float(self.freefit_max_ratio_spin.value())
         if freefit_max_ratio != float(DEFAULT_FREEFIT_MAX_RATIO):
             meta["freefit_max_ratio"] = freefit_max_ratio
@@ -1601,6 +1747,41 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         else:
             meta["caption_trigger_at_front"] = trigger_at_front
 
+        # These four compare against the preprocess.toml-resolved default (see
+        # _pp_default), not the hardcoded one, or an unchecked box wouldn't stick.
+        position_clauses = self.caption_position_clauses_chk.isChecked()
+        if position_clauses == bool(
+            _pp_default("caption_position_clauses", DEFAULT_CAPTION_POSITION_CLAUSES)
+        ):
+            meta.pop("caption_position_clauses", None)
+        else:
+            meta["caption_position_clauses"] = position_clauses
+
+        autotag = self.caption_autotag_chk.isChecked()
+        if autotag == bool(_pp_default("caption_autotag", DEFAULT_CAPTION_AUTOTAG)):
+            meta.pop("caption_autotag", None)
+        else:
+            meta["caption_autotag"] = autotag
+
+        autotag_mode = self._autotag_mode()
+        if autotag_mode == str(
+            _pp_default("caption_autotag_mode", DEFAULT_CAPTION_AUTOTAG_MODE)
+        ):
+            meta.pop("caption_autotag_mode", None)
+        else:
+            meta["caption_autotag_mode"] = autotag_mode
+
+        autotag_confidence = float(self.caption_autotag_confidence_spin.value())
+        if autotag_confidence == float(
+            _pp_default(
+                "caption_autotag_min_confidence",
+                DEFAULT_CAPTION_AUTOTAG_MIN_CONFIDENCE,
+            )
+        ):
+            meta.pop("caption_autotag_min_confidence", None)
+        else:
+            meta["caption_autotag_min_confidence"] = autotag_confidence
+
         if include_mask:
             mask_path_pattern = (
                 self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
@@ -1640,7 +1821,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         if rules is None:
             return False
 
-        # The mask path pattern is read + persisted inside _save_variant_preprocess_meta (include_mask=True); nothing to pass here.
         if not self._save_variant_preprocess_meta(
             validate_dropout=False,
             include_mask=True,
@@ -1659,13 +1839,10 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         return self._job_id is not None
 
     def _make_run_button(self, label: str, style: str, run_cb) -> QToolButton:
-        """Build a split Run button: main action runs now, dropdown queues it.
-
-        ``run_cb`` is a ``_run_*`` handler taking a keyword-only ``queue`` flag;
-        the dropdown calls it with ``queue=True`` (submit without attaching).
-        """
+        """Split Run button: main action runs now, dropdown queues it
+        (``run_cb(queue=True)``, submit without attaching)."""
         btn = QToolButton()
-        # SplitButtonStyle (set before the stylesheet) widens the dropdown indicator + paints its divider/tint. The style must outlive the button, so stash a ref.
+        # SplitButtonStyle must outlive the button (setStyle doesn't take ownership), so stash a ref.
         split_style = SplitButtonStyle()
         self._split_styles.append(split_style)
         btn.setStyle(split_style)
@@ -1682,7 +1859,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         return btn
 
     def _run_te(self, *, queue: bool = False) -> None:
-        # Unified caching step — `tasks.py preprocess` chains resize → VAE-latent cache → text-embedding cache. Only the TE knobs (shuffle/dropout) are GUI-tunable, so the form stays TE-only.
+        # `tasks.py preprocess` chains resize → VAE-latent cache → text-embedding cache.
         if not self._save_all():
             return
         snapshot = self.preprocess_config_snapshot()
@@ -1695,7 +1872,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         )
 
     def _run_pe(self, *, queue: bool = False) -> None:
-        # Cache vision-encoder (PE) features; the encoder follows the variant's `repa_encoder` (pe_spatial default; `pe` = PE-Core for CMMD) so the button matches whatever a use_repa run reads.
+        # Encoder follows the variant's `repa_encoder` (pe_spatial default; `pe` = PE-Core for CMMD).
         if not self._save_all():
             return
         variant = self._variant or "lora"
@@ -1714,7 +1891,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         )
 
     def _run_mask(self, *, queue: bool = False) -> None:
-        # GUI mask settings ride as env snapshots so queued jobs keep their queued-with values; direct CLI usage still falls back to ``configs/sam_mask.yaml``.
         if not self._save_all():
             return
         rules = self._collect_rules()
@@ -1728,7 +1904,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         if not (run_sam or run_mit):
             QMessageBox.warning(self, t("error"), t("preprocess_mask_nothing_enabled"))
             return
-        # Carry the scoped paths so masking only scans the configured subfolder — without the snapshot the task falls back to the unscoped resized/ and re-masks every group each run.
+        # Without the snapshot, masking falls back to the unscoped resized/ and re-masks every group each run.
         snapshot = self.preprocess_config_snapshot()
         # Masking reads the resized images; with none on disk the task exits
         # with an opaque "no images to mask". Surface the real cause first.
@@ -1765,22 +1941,17 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         config_snapshot: dict | None = None,
         attach: bool = True,
     ) -> None:
-        """Submit a preprocess/mask job to the daemon.
-
-        The daemon spawns ``python <argv>`` detached and serializes it behind
-        any running training job (single GPU). Pre-launch validation
-        (``_save_all`` + per-step gating) is the caller's job.
-
-        With ``attach=True`` (the main Run action) this tab takes over its
-        log/bar and blocks the Run buttons until the job finishes. With
-        ``attach=False`` (the "add to queue" dropdown) the job is submitted
-        silently — the Run buttons stay live so the next step / variant can be
-        queued, and the job is watched from the Queue tab."""
+        """Submit a preprocess/mask job to the daemon (spawns ``python <argv>``
+        detached, serialized behind any running training job). Pre-launch
+        validation is the caller's job. ``attach=True`` (main Run) takes over
+        the log/bar and blocks Run until the job finishes; ``attach=False``
+        ("add to queue") submits silently and the job is watched from the
+        Queue tab."""
         if attach and self._is_running():
             QMessageBox.information(self, "", t("preprocess_already_running"))
             return
         if attach:
-            # Busy UI + repaint before submit so the tab stays responsive during the daemon auto-start + /health wait on a cold start.
+            # Repaint before submit so the tab stays responsive during a cold-start daemon /health wait.
             for btn in self._run_buttons:
                 btn.setEnabled(False)
             self.save_btn.setEnabled(False)
@@ -1799,7 +1970,6 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
                 argv=argv,
                 extra_env=extra_env,
                 config_snapshot=config_snapshot,
-                # Main Run starts now; the "add to queue" dropdown holds it paused until the Queue tab's "Start Queue".
                 start=attach,
             ),
             on_fail=(self._restore_idle_ui if attach else None),
@@ -1813,18 +1983,16 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             self.log.appendPlainText(t("preprocess_queued", label=label, job_id=job_id))
 
     def _try_reattach(self) -> None:
-        """Bind to a preprocess/mask job still running when the tab first opens.
-
-        Makes "close GUI mid-preprocess → reopen → re-attach" work. Skips a
-        training job (that one belongs to the ConfigTab) and stays idle when the
-        daemon is down."""
+        """Bind to a preprocess/mask job still running when the tab first opens
+        (so close-mid-preprocess → reopen re-attaches). Skips a training job
+        (belongs to ConfigTab) and stays idle when the daemon is down."""
         try:
             job_id = gui_daemon.active_job_id()
         except Exception:  # noqa: BLE001 — daemon unreachable → nothing to attach
             return
         if not job_id or gui_daemon.read_job_kind(job_id) != "command":
             return
-        # An auto-chain preprocess (tagged ANIMA_CHAIN_TRAIN) belongs to the ConfigTab, which re-claims it so the chain into training stays there. Leave it alone here.
+        # An auto-chain preprocess belongs to ConfigTab, which re-claims it so the chain into training stays there.
         if gui_daemon.read_job_chain_variant(job_id):
             return
         self.log.clear()
@@ -1836,10 +2004,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
 
     def _attach_to_job(self, job_id: str, *, replay_log: bool) -> None:
         """Point the log + bar at a daemon job's on-disk files and start polling.
-
-        ``replay_log`` reads ``stdout.log`` from the top (re-attach after a GUI
-        restart); otherwise pre-existing output is skipped so a fresh launch
-        shows only new lines."""
+        ``replay_log`` reads ``stdout.log`` from the top (re-attach case);
+        otherwise a fresh launch shows only new lines."""
         for btn in self._run_buttons:
             btn.setEnabled(False)
         self.save_btn.setEnabled(False)
@@ -1848,7 +2014,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
 
     def _on_job_finished(self, state: str | None) -> None:
         self._job_timer.stop()
-        # Drain trailing stdout before the finish banner; a half-written tqdm fragment is dropped (the bar already reflected it).
+        # A half-written tqdm fragment is dropped here; the bar already reflected it.
         self._drain_job_stdout()
         if self._stdout_buf and not TQDM_RE.search(self._stdout_buf):
             self.log.appendPlainText(self._stdout_buf)
@@ -1868,11 +2034,10 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self.stop_btn.setEnabled(False)
 
     def _stop(self) -> None:
-        # Abort the daemon job; the poll loop observes 'stopped' and restores the UI. The daemon stays up and advances its queue.
         self._stop_job()
 
     def cleanup_subprocess(self) -> None:
-        """App-shutdown hook. Stops observing but deliberately leaves the daemon
-        job alive — it runs detached so a cache build / mask pass survives the
-        GUI closing (re-attached on next launch)."""
+        """App-shutdown hook. Stops observing but leaves the daemon job alive —
+        it runs detached, so a cache build / mask pass survives GUI close
+        (re-attached on next launch)."""
         self._job_timer.stop()

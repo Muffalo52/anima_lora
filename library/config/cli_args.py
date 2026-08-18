@@ -544,7 +544,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "logit(CENTER)]) is SigMa's boundary gate. No second σ-threshold — "
         "the gate lives inside the rope schedule; native steps are untouched. "
         "ON BY DEFAULT whenever --sigma_lowres is set, at the probe's "
-        "operating point (1,4,0.35,2) — it is part of the shipped combo "
+        "operating point (1,4,0.35,2) — it is part of the shipped "
         "recipe. Pass ALPHA,BETA,CENTER,GAMMA to move the operating point, or "
         "`off` to disable it. Applies to PRIMARY-rule demotes only.",
     )
@@ -597,7 +597,9 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "FRAC of train steps, late = last FRAC, spread = seed-keyed per-step "
         "coin with p=FRAC (deterministic in --seed + step index, touches no "
         "RNG stream — CRN pairing holds). FRAC defaults to 0.5. Steps outside "
-        "the span train native; the σ draw itself is untouched.",
+        "the span train native; the σ draw itself is untouched. NB configs/"
+        "base.toml ships this ON at late:0.75 (the combolate recipe) — pass an "
+        "empty string to clear it back to the unscheduled combo arm.",
     )
     parser.add_argument(
         "--deterministic",

@@ -1,27 +1,17 @@
-# StackedExpertsLoRAModule: FeRA-style independent-A multi-LoRA experts.
+# StackedExpertsLoRAModule: FeRA-style independent-A multi-LoRA experts (see
+# networks/CLAUDE.md § LoRA variants). Each expert owns its own
+# (lora_down, lora_up) — distinct from Hydra's shared-A layout. Carries no
+# router; gates arrive via `_routing_weights` from the network-level
+# GlobalRouter (cfg.route_per_layer=False).
 #
-# Each expert owns its own (lora_down, lora_up) — distinct from Hydra's
-# shared-A layout. Independent-A is the defining trait of the FeRA paper
-# (Yin et al., arXiv:2511.17979): experts specialize on disjoint sub-features
-# rather than compete inside a shared pooled subspace.
+# Modes: free (ortho=False) is plain per-expert Kaiming-down/zero-up; ortho
+# (ortho=True) is PSOFT-style — frozen P_basis/Q_basis from top-r SVD +
+# per-expert Cayley-rotated S_q/S_p + zero-init lambda_layer, symmetry-broken
+# by small random S init (`ortho_init_std`) so the router gets signal from
+# step 0.
 #
-# This module carries no router; gates arrive via `_routing_weights`. Owner
-# is the network-level GlobalRouter (cfg.route_per_layer=False).
-#
-# Modes:
-#   * Free (ortho=False): lora_down_weight (E, r, in) Kaiming, lora_up_weight
-#     (E, out, r) zero-init.
-#   * Ortho (ortho=True): PSOFT-style — frozen P_basis (out, r) + Q_basis
-#     (r, in) from top-r SVD; per-expert S_q, S_p (E, r, r) Cayley-rotated;
-#     per-expert lambda_layer (E, r) zero-init. Effective ΔW for expert e is
-#     `P_basis @ cayley(S_p_e) @ diag(λ_e) @ cayley(S_q_e) @ Q_basis`. Symmetry
-#     broken by small random S init (`ortho_init_std`) so the global router
-#     has gradient signal from step 0.
-#
-# Activation-memory: stacked Parameters + two einsum boundaries save one
-# (..., E, r) activation for backward instead of E × (..., out) from a
-# per-expert ModuleList — ~50× less per-Linear autograd memory at (E, r)=(3, 8)
-# on Anima MLP shapes.
+# Stacked Parameters + two einsum boundaries save one (..., E, r) activation
+# for backward instead of E × (..., out) from a per-expert ModuleList.
 
 import math
 from typing import Dict, List, Optional
@@ -44,14 +34,11 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
     P_basis (out, r) and Q_basis (r, in); _eye_r for batched Cayley solve.
 
     Both modes register a (1, E) `_routing_weights` placeholder rebound to
-    (B, E) by `LoRANetwork.set_routing_weights`.
-
-    T-LoRA composes via the inherited `_timestep_mask` (1, r), broadcast over
-    the expert axis. `rank_dropout` is unsupported here — the base helper
-    expects 2D/3D/4D lx; this forward produces 4D (B, L, E, r).
+    (B, E) by `LoRANetwork.set_routing_weights`. `rank_dropout` is
+    unsupported — this forward produces 4D (B, L, E, r), not the 2D/3D/4D the
+    base helper expects.
     """
 
-    # Anima's adapted targets are projection Linears.
     supports_conv2d = False
 
     def __init__(
@@ -100,10 +87,8 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
             self.register_buffer("P_basis", P_init.cpu())
             self.register_buffer("Q_basis", Q_init.cpu())
 
-            # Random S init: zero-init with deterministic SVD basis would
-            # leave every expert bit-identical (zero λ → zero gradient signal
-            # for the router). ortho_init_std controls how far each expert
-            # starts from identity rotation.
+            # Random (not zero) S init — zero-init here would leave every
+            # expert bit-identical since the SVD basis is deterministic.
             self.S_p = torch.nn.Parameter(
                 torch.randn(self.num_experts, self.lora_dim, self.lora_dim)
                 * self.ortho_init_std
@@ -128,8 +113,7 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
             if channel_scale is not None:
                 self._register_channel_scale(self.Q_basis, channel_scale)
         else:
-            # One stacked Parameter per side; expert axis leads. See file
-            # header for the activation-memory rationale.
+            # One stacked Parameter per side; expert axis leads.
             self.lora_down_weight = torch.nn.Parameter(
                 torch.empty(self.num_experts, self.lora_dim, in_dim)
             )
@@ -139,8 +123,7 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
             for k in range(self.num_experts):
                 torch.nn.init.kaiming_uniform_(self.lora_down_weight[k], a=math.sqrt(5))
 
-            # Same rebalance per slice — experts share input space. Repeat
-            # _register_channel_scale calls are idempotent (same inv_scale).
+            # Experts share input space; repeated calls are idempotent.
             if channel_scale is not None:
                 for k in range(self.num_experts):
                     self._register_channel_scale(
@@ -150,9 +133,8 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
         _register_routing_weights_buffer(self, self.num_experts)
 
     # set_routing_weights / clear_routing_weights inherited from
-    # RouterStateMixin (always-on here — ``_routing_weights`` is registered
-    # unconditionally above, so the mixin's ``hasattr`` guard never trips).
-    # set_sigma / set_fei are inherited too but no-op (no σ/FEI buffers).
+    # RouterStateMixin (always-on here). set_sigma / set_fei inherited too
+    # but no-op (no σ/FEI buffers).
 
     def _cayley_rotations(self):
         """Stacked S_q + S_p → one (2E, r, r) solve. Returns R_q, R_p (E, r, r)."""
@@ -202,12 +184,9 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
             mid = torch.einsum("ejr,...er->...j", R_p, lx)
             adapter = torch.nn.functional.linear(mid, self.P_basis)
         else:
-            # Compute in the model dtype (``org_forwarded.dtype`` = the frozen
-            # base's output = the autocast/model dtype), not fp32. ``x`` arrives
-            # fp32 from the AdaLN LayerNorm under autocast(bf16); the old
-            # ``.float()`` operands materialized a full fp32 activation + weight
-            # copies (autocast re-cast the einsum to bf16 anyway) and OOMed. The
-            # expert weights are fp32 master, so cast x + weights DOWN here.
+            # Compute in the model dtype (org_forwarded.dtype), not fp32 — see
+            # the dtype-policy note in base.py's forward(); the old .float()
+            # operands OOMed for zero numeric gain under autocast.
             compute_dtype = org_forwarded.dtype
             x_lora = self._rebalance(x.to(compute_dtype))
 
@@ -244,12 +223,10 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
         zero = torch.tensor(0.0, device=device)
         return zero, zero
 
-    # Save-pipeline hooks. The ortho variant lives in the runtime as
-    # ``S_p`` / ``S_q`` / ``P_basis`` / ``Q_basis`` / ``lambda_layer`` —
-    # distilled to free per-expert ``lora_down_weight (E, r, in)`` +
-    # ``lora_up_weight (E, out, r)`` here so the on-disk file matches
-    # the free-StackedExperts shape and either runtime mode can load it.
-    # The MoE writer then expands to per-expert ``.lora_{ups,downs}.{i}``.
+    # Save-pipeline hooks: the ortho variant distills to free per-expert
+    # lora_down_weight/lora_up_weight here so the on-disk file matches
+    # free-StackedExperts and either runtime mode can load it; the MoE writer
+    # then expands to per-expert .lora_{ups,downs}.{i}.
 
     @classmethod
     def distill_save_state_dict(
@@ -260,9 +237,9 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
         """Ortho StackedExperts → free StackedExperts (per-expert down/up).
 
         Mutates ``state_dict`` in place. Discriminator: ``.S_p`` AND ``.S_q``
-        both 3-D ``(E, r, r)`` for the same prefix. OrthoHydra's ``S_q`` is
-        2-D, so its dimensionality is the only thing that separates the two
-        ortho-flavored MoE variants; this method must run BEFORE
+        both 3-D ``(E, r, r)`` — OrthoHydra's ``S_q`` is 2-D, and that
+        dimensionality is the only thing separating the two ortho-flavored
+        MoE variants, so this method must run BEFORE
         :meth:`OrthoHydraLoRAModule.distill_save_state_dict`.
         """
         prefixes = set()
@@ -286,9 +263,7 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
             alpha = state_dict.get(f"{prefix}.alpha")
             save_dtype = dtype if dtype is not None else P_basis.dtype
 
-            # Batched Cayley over S_p and S_q for every expert. Same
-            # parameter-free transform as ``_cayley_rotations`` but in fp32
-            # here for save-time stability.
+            # Same transform as _cayley_rotations, in fp32 for save-time stability.
             E, r, _ = S_p.shape
             skew = torch.cat([S_q.float(), S_p.float()], dim=0)  # (2E, r, r)
             A = skew - skew.transpose(-2, -1)
@@ -339,13 +314,10 @@ class StackedExpertsLoRAModule(RouterStateMixin, BaseLoRAModule):
         """Build the StackedExperts ``_moe.safetensors`` payload.
 
         Independent-A counterpart to :meth:`HydraLoRAModule.build_moe_state_dict`:
-        BOTH ``lora_up_weight (E, out, r)`` AND ``lora_down_weight (E, r, in)``
-        are expanded per-expert (``.lora_ups.{i}.weight`` /
-        ``.lora_downs.{i}.weight``), then fused attention prefixes are split
-        per-expert per-component so q/k/v keys land on separate components.
-
-        No router / sigma_mlp / inv_scale handling here — the GlobalRouter
-        lives at network top-level (``global_router.*``), not per-Linear.
+        both ``lora_up_weight`` and ``lora_down_weight`` are expanded per-expert,
+        then fused attention prefixes are split per-expert per-component so
+        q/k/v keys land separately. No router handling — GlobalRouter lives at
+        network top-level (``global_router.*``), not per-Linear.
         """
         sd: Dict[str, torch.Tensor] = {}
         for k, v in state_dict.items():

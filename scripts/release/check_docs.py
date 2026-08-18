@@ -121,10 +121,15 @@ Issue = namedtuple("Issue", "level path line kind token message")
 def _git(*args: str) -> str:
     # ``core.quotepath=false`` keeps non-ASCII paths (translated guidebooks)
     # as raw UTF-8, not C-style escapes — else they're unopenable + skipped.
+    # Decoding is pinned to UTF-8 for the same reason: `text=True` alone uses the
+    # locale encoding, so on a non-UTF-8 Windows box (cp949, cp932 …) those very
+    # paths raise UnicodeDecodeError inside the reader thread — which surfaces
+    # only as a `None` stdout here, i.e. an AttributeError far from the cause.
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), "-c", "core.quotepath=false", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     ).stdout
 
@@ -202,6 +207,13 @@ def _check_path(tok: str, top: set[str], base: Path | None = None) -> str | None
     tok = tok.strip().rstrip(".")
     if not tok or tok.startswith(("http", "..", "/", "~", "mailto")):
         return None
+    # ``_archive/`` is retired material: docs cite it as provenance ("the design
+    # lives at _archive/proposals/x.md"), and the archive is pruned on its own
+    # schedule. A dangling archive citation is history, not drift — never an
+    # ERROR. Archived docs are already excluded as *sources* (`doc_files`); this
+    # is the same call applied to them as *targets*.
+    if tok.startswith("_archive/"):
+        return None
     if "/" not in tok and "." not in tok:
         return None
     first = tok.split("/", 1)[0]
@@ -215,6 +227,24 @@ def _check_path(tok: str, top: set[str], base: Path | None = None) -> str | None
         if (root / f"{tok}.py").exists():
             return None
     return tok
+
+
+def _anchor_family_ref(tok: str, next_char: str) -> str | None:
+    """The path token to verify, or ``None`` when there is nothing to verify.
+
+    A glob prefix (``results/20260607-*``) or a brace expansion
+    (``results/20260816-16{18,34}-2c-*``) is a *family* reference, not a literal
+    path claim — and :data:`_MULTI_RE` truncates it at the ``*`` / ``{``, so the
+    partial stem would read as a broken path. Anchor on the parent directory
+    instead: the family ref still verifies its root, while the stem is left
+    alone. A family with no parent (``foo*``) has nothing to anchor on and is
+    skipped. (The make-target check does the same for
+    ``make preprocess-{resize,vae,…}``.)
+    """
+    if next_char not in ("*", "{"):
+        return tok
+    head, sep, _ = tok.rpartition("/")
+    return head + "/" if sep else None
 
 
 def _code_fragments(line: str, in_fence: bool) -> list[str]:
@@ -252,16 +282,9 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
             seen: set[str] = set()
             for rx in (_MULTI_RE, _SINGLE_RE):
                 for m in rx.finditer(line):
-                    tok = m.group(0)
-                    # A glob prefix (`results/20260607-*`) isn't a literal path
-                    # claim — the regex truncates at the '*'. Anchor on the parent
-                    # directory instead so the family ref still verifies its root
-                    # but the partial stem doesn't read as a broken path.
-                    if line[m.end() : m.end() + 1] == "*":
-                        head, sep, _ = tok.rpartition("/")
-                        if not sep:
-                            continue  # bare glob (`foo*`) — nothing to anchor
-                        tok = head + "/"
+                    tok = _anchor_family_ref(m.group(0), line[m.end() : m.end() + 1])
+                    if tok is None:
+                        continue
                     bad = _check_path(tok, top, base=doc.parent)
                     if bad and bad not in seen:
                         seen.add(bad)

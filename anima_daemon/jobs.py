@@ -1,13 +1,9 @@
 """The ``Job`` record + its on-disk persistence.
 
-One JSON file per job under ``output/daemon/jobs/<id>/job.json`` so the daemon
-survives a restart and can show history. The in-memory job table is the
-authority while running; ``persist()`` mirrors each state change to disk, and
-``load_all()`` rebuilds the table on boot for the reconciliation sweep.
-
-History is bounded, not infinite: ``prune_jobs()`` runs at boot (before
-``load_all()``) and drops the dirs of long-finished jobs — see its docstring for
-the candidate rules and ``config.JOB_RETENTION_*`` for the knobs.
+One JSON file per job under ``output/daemon/jobs/<id>/job.json``. The
+in-memory table is authoritative while running; ``persist()`` mirrors each
+state change to disk, and ``load_all()`` rebuilds it on boot. See
+``anima_daemon/README.md`` for the job lifecycle and retention policy.
 """
 
 from __future__ import annotations
@@ -30,7 +26,7 @@ STATE_ERROR = "error"
 STATE_STOPPED = "stopped"
 TERMINAL_STATES = frozenset({STATE_DONE, STATE_ERROR, STATE_STOPPED})
 # The job holds its VRAM slot and blocks the queue in both states — the worker
-# is parked in the monitor loop for it, running or frozen (Phase 2a).
+# stays parked in the monitor loop for it, running or frozen.
 ACTIVE_STATES = frozenset({STATE_RUNNING, STATE_PAUSED})
 
 
@@ -52,53 +48,47 @@ class Job:
     extra: list[str] = field(default_factory=list)
 
     # "train" (accelerate launch train.py) or "command" (plain ``python <argv>``
-    # — preprocess/mask, carrying own argv+env, finalized on exit code with no
-    # progress.jsonl wiring). ``method`` doubles as the command's display label.
-    # Defaulting to "train" keeps pre-field legacy job.json records loading.
+    # — preprocess/mask, finalized on exit code with no progress.jsonl wiring).
+    # Default "train" keeps pre-field legacy job.json records loading.
     kind: str = "train"
     argv: list[str] = field(default_factory=list)
     extra_env: dict = field(default_factory=dict)
 
-    # Whitelisted env snapshot of the SUBMITTER's shell (Phase 0b), layered
-    # under the daemon's boot env and above nothing but its own defaults at
-    # spawn (daemon-env ← captured_env ← extra_env). Empty for legacy jobs.
+    # Whitelisted env snapshot of the submitter's shell (config.capture_env),
+    # layered daemon-env ← captured_env ← extra_env at spawn. See README.
     captured_env: dict = field(default_factory=dict)
 
-    # Auto-chain: a command job carrying a ``chain_train`` spec ({method, preset,
-    # methods_subdir}) makes the manager enqueue that train job on success, so a
-    # GUI-initiated "preprocess → train" survives the GUI closing (the chain
-    # lives in the daemon). ``chained_job_id`` records the follow-on it spawned.
+    # Auto-chain: a command job carrying a chain_train spec ({method, preset,
+    # methods_subdir}) makes the manager enqueue that train job on success, so
+    # "preprocess → train" survives the GUI closing. chained_job_id records the
+    # follow-on it spawned.
     chain_train: Optional[dict] = None
     chained_job_id: Optional[str] = None
 
-    # Per-job stall-watchdog budget in seconds, overriding the per-kind default
-    # (config.CMD_STALL_TIMEOUT / JOB_STALL_TIMEOUT). 0 disables the watchdog for
-    # this job; None means "use the default". Quiet-but-alive is the normal shape
-    # of an embed/eval loop, so a submitter that knows its loop goes silent for
-    # minutes sets this instead of hand-rolling a stdout heartbeat.
+    # Per-job stall-watchdog budget in seconds, overriding the per-kind default.
+    # 0 disables the watchdog for this job; None means "use the default".
     stall_timeout: Optional[float] = None
 
-    # Set on a chain-spawned follow-on train job → skip the pre-launch GPU guard:
-    # the daemon just ran the preceding step on this same serial queue, so
-    # guarding here only races the just-exited step's not-yet-released VRAM.
+    # Set on a chain-spawned follow-on train job to skip the pre-launch GPU
+    # guard: the daemon just ran the preceding step on this same serial queue,
+    # so guarding here would only race that step's not-yet-released VRAM.
     from_chain: bool = False
 
     state: str = STATE_QUEUED
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
-    # Wall-clock of the last `running → paused` tree-freeze (Phase 2a); cleared
-    # on resume. Observability only — the freeze itself is the process state.
+    # Wall-clock of the last running->paused tree-freeze; cleared on resume.
+    # Observability only — the freeze itself is the process state.
     paused_at: Optional[float] = None
 
-    # Whether the train tree was spawned under `accelerate launch` (multi-GPU /
-    # distributed). Set at launch from the built command. Pause refuses these: a
-    # frozen NCCL rank trips the collective heartbeat timeout. Command jobs and
-    # the single-GPU direct-invoke fast path are False.
+    # Whether the train tree was spawned under `accelerate launch` (multi-GPU).
+    # pause_job refuses these: a frozen NCCL rank trips the collective heartbeat
+    # timeout. Command jobs and the single-GPU direct-invoke path are False.
     accelerate_launched: bool = False
 
-    # The spawned `accelerate launch` process, identified as (pid, create_time)
-    # so a reused PID can never be mistaken for our job.
+    # (pid, create_time) identifies the spawned process so a reused PID can
+    # never be mistaken for our job (see manager._gpu_guard, issue #83).
     pid: Optional[int] = None
     create_time: Optional[float] = None
 
@@ -106,19 +96,14 @@ class Job:
     stdout_path: Optional[str] = None
     ckpt_path: Optional[str] = None
 
-    # The job process's OS exit code, mirrored from the monitor loop on terminal
-    # transition (Phase 0c). None until the process exits, or for an adopted
-    # orphan (psutil liveness gives no code). ``run_gpu`` exits with this so
-    # bench harnesses / CI / `&&` chains compose exactly as they do inline.
+    # OS exit code, mirrored on terminal transition. None until the process
+    # exits, or for an adopted orphan (psutil liveness gives no code).
     returncode: Optional[int] = None
 
-    # Phase 1a — result envelope lift. A GPU job (bench script / test-*) that
-    # writes a bench envelope drops a pointer file (`result_path.json`) into its
-    # job dir via `bench/_common.write_result`; the monitor follows it on the
-    # terminal transition and records the envelope's absolute path here plus a
-    # `{label, metrics}` digest in `result_summary`. The canonical artifacts stay
-    # under `bench/<m>/results/` — the daemon holds only a pointer + digest, never
-    # the artifacts. Both None for a job that wrote no envelope (training, etc.).
+    # Result-envelope lift (see README "Where did my run land"): a GPU job that
+    # writes a bench envelope drops a `result_path.json` pointer; the monitor
+    # follows it and records the absolute path here plus a {label, metrics}
+    # digest in result_summary. Both None for a job that wrote no envelope.
     result_path: Optional[str] = None
     result_summary: Optional[dict] = None
 
@@ -187,24 +172,16 @@ def prune_jobs(
 ) -> dict:
     """Delete the job dirs of terminal jobs older than ``max_age_days``.
 
-    The daemon calls this once at boot, *before* ``load_all()``, so a pruned job
-    never enters the in-memory table and can't be resurrected by a later
-    ``persist()``. Also exposed as ``python -m anima_daemon prune`` for a manual
-    sweep (dry-run by default there).
+    Called once at boot, **before** ``load_all()`` — a pruned job must never
+    enter the in-memory table, or a later ``persist()`` would resurrect the
+    dir. Also exposed as ``python -m anima_daemon prune`` (dry-run by default).
 
-    Deliberately conservative — a job dir is a candidate only when **all** hold:
-
-    - its ``job.json`` parses and its state is terminal (never a queued/running/
-      paused job, and never a dir whose record we couldn't read: an unparseable
-      or missing ``job.json`` might be a submit racing us, so we leave it);
-    - it is older than ``max_age_days`` by ``ended_at`` (falling back to
-      ``submitted_at``, then the dir mtime);
-    - it is not among the ``keep_recent`` newest terminal jobs.
-
-    ``max_age_days=0`` disables pruning entirely. Returns a summary dict
-    ``{scanned, pruned: [ids], kept, freed_bytes, errors}``; ``dry_run`` computes
-    it without deleting. Never raises: a dir we can't remove is counted in
-    ``errors`` and left alone.
+    A dir is a candidate only when its ``job.json`` parses with a terminal
+    state (queued/running/paused and unreadable records are always kept), it's
+    older than ``max_age_days`` (by ``ended_at`` / ``submitted_at`` / mtime),
+    and it's not among the ``keep_recent`` newest terminal jobs.
+    ``max_age_days=0`` disables pruning. Returns
+    ``{scanned, pruned: [ids], kept, freed_bytes, errors}``; never raises.
     """
     days = config.JOB_RETENTION_DAYS if max_age_days is None else max_age_days
     keep = config.JOB_RETENTION_KEEP if keep_recent is None else keep_recent

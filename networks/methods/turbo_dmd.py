@@ -2,25 +2,17 @@
 
 Owns two plain ``LoRANetwork`` instances (student + fake) on one frozen Anima
 DiT — three with the τ-split critic (``fake_tau_banks=2`` adds ``fake_hi``, a
-second fake bank owning the high-τ band; see
-``_archive/proposals/turbo_tau_split_critic.md``). Each calls ``apply_to(unet)``
-which chains them onto every targeted Linear's forward — at runtime the chain
-order is::
+second fake bank owning the high-τ band). Each calls ``apply_to(unet)`` which
+chains them onto every targeted Linear's forward:
+``linear(x) -> [fake_hi ->] fake -> student -> original_linear``.
 
-    linear(x) -> [fake_hi.forward ->] fake.forward -> student.forward -> original_linear.forward
-
-Each LoRA module short-circuits at ``not self.enabled`` (see
-``lora_modules/lora.py::LoRAModule.forward``), so view-toggling is just
-``set_enabled(bool)`` on each network — O(num_modules) Python loop, negligible
-vs a DiT forward. The fake view drives exactly ONE bank (``set_fake_bank``,
-routed by the loop from the drawn τ); inactive banks stay disabled.
+Each LoRA module short-circuits at ``not self.enabled``, so view-toggling is
+just ``set_enabled(bool)`` on each network. The fake view drives exactly ONE
+bank (``set_fake_bank``); inactive banks stay disabled.
 
 Used by ``scripts/distill_turbo/distill.py``. Inference loads the saved
-``anima_turbo.safetensors`` through the standard LoRA path (no inference-side
-turbo code) — the student LoRA is just a normal LoRA with CFG=4 baked in.
-
-This harness is method-agnostic (two view-toggled LoRA stacks); the shipped
-objective driving it is DP-DMD.
+``anima_turbo.safetensors`` through the standard LoRA path — the student LoRA
+is just a normal LoRA with CFG=4 baked in.
 
 Docs: ``docs/structure/turbo.md`` (structure), ``docs/methods/turbo.md`` (ops).
 Paper: Wu, Li, Zhang, Ma, "Diversity-Preserved Distribution Matching
@@ -48,31 +40,22 @@ View = Literal["teacher", "student", "fake"]
 class TeacherFeatureDiscriminator(nn.Module):
     """GAN head over frozen-teacher block features (FastGen idea 1).
 
-    FastGen's ``Discriminator_ImageDiT`` un-flattens each tapped block's tokens
-    back to ``(B, D, H_p, W_p)`` and runs a conv head. Under Anima's native-shape
-    bucketing the patch grid is per-bucket and, with ``compile_blocks``, the block
-    output is the fake-5D ``(B, 1, L, 1, D)`` layout — so the spatial reshape is
-    the fragile part the proposal flags. Both granularities here sidestep it by
-    never reshaping to a grid:
+    FastGen's ``Discriminator_ImageDiT`` un-flattens each tap's tokens back to
+    ``(B, D, H_p, W_p)`` for a conv head — fragile under Anima's per-bucket
+    native-shape patch grid + compiled fake-5D ``(B, 1, L, 1, D)`` layout. Both
+    granularities here sidestep it by never reshaping to a grid:
 
-    - ``granularity="pooled"`` (v0): **mean-pool each tap's token output over
-      every axis between batch and channel** → ``(B, D)``, then the 2-layer MLP
-      per tap → one logit per tap → ``(B, num_taps)``.
-    - ``granularity="token"`` (LADD-style dense head): apply the SAME per-tap MLP
-      to every token (Linear/LayerNorm act on the last dim, so no reshape) →
-      ``(B, *spatial, 1)`` flattened to ``(B, N_tokens)`` per tap →
-      ``(B, num_taps·N)``. Dense per-patch real/fake signal; the hinge losses and
-      the f-distill ratio already ``mean()`` over the logit axis, so downstream
-      is shape-agnostic.
+    - ``granularity="pooled"`` (v0): mean-pool each tap over every axis between
+      batch and channel -> ``(B, D)``, then a 2-layer MLP per tap -> ``(B, num_taps)``.
+    - ``granularity="token"`` (LADD-style dense head): same per-tap MLP applied
+      to every token (no reshape needed) -> ``(B, num_taps·N)``.
 
-    Both run identically on the eager ``(B, T, H, W, D)`` grid and the compiled
-    ``(B, 1, L, 1, D)`` layout, in fp32 for GAN-loss stability. The parameters
-    are IDENTICAL across granularities (same MLP, applied pooled vs per-token),
-    so resume bundles load across a head switch — resume warns via
-    ``gan_disc_head`` in ``_WARN_FIELDS`` instead of refusing.
+    Both run identically on the eager and compiled layouts, in fp32 for
+    GAN-loss stability. Parameters are IDENTICAL across granularities, so
+    resume bundles load across a head switch.
 
-    Tiny by design (~``inner_dim²/2`` params/tap, ≈2M at D=2048) and discarded at
-    save — pure training scaffolding, exactly like the fake/critic LoRA.
+    Tiny by design (~inner_dim²/2 params/tap, ~2M at D=2048) and discarded at
+    save — pure training scaffolding, like the fake/critic LoRA.
     """
 
     def __init__(
@@ -107,13 +90,11 @@ class TeacherFeatureDiscriminator(nn.Module):
         logits = []
         for head, f in zip(self.heads, feats):
             if self.granularity == "token":
-                # Per-token logits: LayerNorm/Linear act on the last dim, so the
-                # head runs unchanged on (B, T, H, W, D) eager and (B, 1, L, 1, D)
-                # native-flatten alike → (B, *spatial, 1) → (B, N_tokens).
+                # LayerNorm/Linear act on the last dim, so this runs unchanged on
+                # eager (B,T,H,W,D) and compiled (B,1,L,1,D) alike.
                 logits.append(head(f.float()).flatten(1))
             else:
-                # Pool over every axis between batch (0) and channel (-1): handles
-                # both (B, T, H, W, D) eager and (B, 1, L, 1, D) native-flatten.
+                # Pool over every axis between batch (0) and channel (-1).
                 pooled = f.float().mean(dim=tuple(range(1, f.ndim - 1)))  # (B, D)
                 logits.append(head(pooled))
         return torch.cat(logits, dim=1)  # (B, num_taps) | (B, num_taps·N)
@@ -141,15 +122,13 @@ def load_step_expert_student(
     """Rebuild a per-step-expert turbo student as a router-free, kept-live net.
 
     Per-step-expert checkpoints can't go through ``merge_to_dit`` (K up-heads
-    don't fold into one DiT weight) nor the shared ``create_network_from_weights``
-    key-sniff (the ``.lora_ups.{k}.weight`` layout collides with Hydra's). The
-    file keeps the training-runtime fused-qkv key layout, so we build a fresh
-    ``StepExpertLoRAModule`` network on the same fused DiT (uniform rank from
-    metadata) and ``load_state_dict`` matches directly — no split→re-fuse.
+    don't fold into one DiT weight) nor the shared key-sniff (the
+    ``.lora_ups.{k}.weight`` layout collides with Hydra's). Builds a fresh
+    ``StepExpertLoRAModule`` network on the same fused DiT and
+    ``load_state_dict`` matches directly — no split→re-fuse.
 
-    Caller is responsible for ``apply_to``? No: this applies + loads + freezes,
-    returning a net ready for ``set_step_index`` per denoise step. Stash it on
-    the model so the sampler loop can find it.
+    This applies + loads + freezes, returning a net ready for
+    ``set_step_index`` per denoise step.
     """
     K = int(metadata.get("ss_turbo_step_expert_K", "0") or "0")
     if K <= 1:
@@ -163,10 +142,9 @@ def load_step_expert_student(
             "per-step-expert turbo checkpoint missing ss_turbo_student_rank "
             "metadata — cannot rebuild the student at the right rank."
         )
-    # scale = alpha / rank is fixed at module construction (load_state_dict only
-    # overwrites the alpha buffer, not the cached scale), so build with the
-    # trained alpha. Shipped config uses alpha == rank (scale 1.0); fall back to
-    # rank when the stamp is absent on older checkpoints.
+    # GOTCHA: scale = alpha/rank is fixed at module construction (load_state_dict
+    # only overwrites the alpha buffer, not the cached scale), so build with the
+    # trained alpha; fall back to rank (scale 1.0) when the stamp is absent.
     alpha = float(metadata.get("ss_turbo_student_alpha", str(rank)) or rank)
 
     network = create_network(
@@ -186,8 +164,7 @@ def load_step_expert_student(
             f"{info.unexpected_keys[:5]}..."
         )
     if info.missing_keys:
-        # Zero-init heads that never received a checkpoint tensor would silently
-        # contribute nothing; surface the count so a rank/target mismatch is loud.
+        # Surface the count so a rank/target mismatch is loud, not silent.
         logger.warning(
             f"step-expert turbo: {len(info.missing_keys)} missing keys "
             f"(first: {info.missing_keys[:5]})"
@@ -205,13 +182,11 @@ def _plain_lora_module_delta(
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """One runtime module's ΔW from a defused plain-LoRA file, kept factored.
 
-    Checkpoints store attention LoRAs per-component (q/k/v split — see
-    ``defuse_standard_qkv``); the runtime module is the fused Linear, whose ΔW
-    is the components' deltas concatenated along the output dim in spec order.
-    Returns fp32 factors ``(A [out, k], B [k, in])`` with ``ΔW = A @ B`` and
-    ``k = Σ component ranks`` (block-diagonal A over the components) — never
-    the materialized ``[out, in]`` matrix, so the downstream SVD stays a
-    small-core problem. None when any component is absent.
+    Checkpoints store attention LoRAs per-component (q/k/v split); the runtime
+    module is the fused Linear, whose ΔW is the components' deltas concatenated
+    along the output dim. Returns fp32 factors ``(A [out,k], B [k,in])`` with
+    ``ΔW = A @ B`` — never the materialized ``[out, in]`` matrix, so the
+    downstream SVD stays a small-core problem. None when any component absent.
     """
     spec = match_fused_spec(lora_name)
     if spec is None:
@@ -239,10 +214,9 @@ def _plain_lora_module_delta(
 def _warm_start_module(module, A: torch.Tensor, B: torch.Tensor) -> float:
     """SVD-truncate ``ΔW = A @ B`` into a plain LoRAModule's down/up; return
     captured energy fraction. Works in the k-dim factor space (QR of each
-    factor + SVD of the k×k core — k ≤ Σ component ranks) instead of the full
-    ``[out, in]`` matrix; a 196-module warm start is seconds, not minutes.
-    Folds the module's fixed ``scale`` (= alpha/rank, cached at construction)
-    so the applied delta equals the truncated ΔW exactly.
+    factor + SVD of the k×k core) instead of the full ``[out, in]`` matrix; a
+    196-module warm start is seconds, not minutes. Folds the module's fixed
+    ``scale`` so the applied delta equals the truncated ΔW exactly.
     """
     dev = module.lora_down.weight.device
     QA, RA = torch.linalg.qr(A.to(dev))
@@ -270,17 +244,16 @@ def warm_start_plain_lora(network: LoRANetwork, weights_path: str, label: str) -
     both directions. Modules absent from the file keep their constructed init.
 
     Intended for the DP-DMD student/fake warm start from an extracted
-    full-model delta (``scripts/toolkits/extract_delta_lora.py``); accepts any plain
-    LoRA file. Must run before ``compile_dit_blocks`` traces the forwards.
+    full-model delta; accepts any plain LoRA file. Must run before
+    ``compile_dit_blocks`` traces the forwards.
     """
     from safetensors.torch import load_file
 
     weights_sd = load_file(weights_path)
-    # A ComfyUI-native adaln extract (extract_delta_lora.py --adaln_layout comfy,
-    # e.g. the shipped anima_turboV10_delta_r96_asvd_adaln) names its adaln keys
-    # adaln_modulation_{br}_2; the modules to seed are named adaln_up_{br}. Rename
-    # so the per-module lookup below matches (else the 84 adaln modules silently
-    # keep default init). Presence-gated; no-op on adaln-less / runtime-layout files.
+    # GOTCHA: a ComfyUI-native adaln extract names its adaln keys
+    # adaln_modulation_{br}_2, but the modules to seed are named adaln_up_{br}.
+    # Rename so the per-module lookup below matches (else the 84 adaln modules
+    # silently keep default init). Presence-gated, no-op otherwise.
     from networks.lora_utils import (
         has_comfy_adaln_keys,
         relayout_adaln_comfy_to_runtime,
@@ -366,67 +339,54 @@ class TurboDMDNetwork:
         self.student_rank = int(student_rank)
         self.fake_rank = int(fake_rank)
         # Target the t-conditioned AdaLN modulation up-projections
-        # (``adaln_up_{branch}``) in addition to the default attn+MLP set. adaln
-        # is the largest mover in the official turbo delta (adaln.md), so the
-        # student gets the modulation-remap lever few-step distillation needs;
-        # the fake/critic mirrors it so its score estimate spans the same
-        # subspace. Both student and fake carry the extra 84 modules (3 branches
-        # × 28 blocks). include_patterns beats the factory's default exclude of
-        # ``adaln_up_`` (networks/lora_anima/config.py::_DEFAULT_EXCLUDE). The
-        # saved student is renamed to the ComfyUI adaln layout in save_student.
-        # ``fake_adaln`` (default: mirror ``train_adaln``) lets a VRAM-tight run
-        # drop the critic's 84 adaln modules — the fake's params+grads+AdamW
-        # states are pure overhead at save time (~0.8 GB at rank 96), at the
-        # cost of a score estimate blind to the student's adaln subspace
-        # (unbenched trade — adaln.md). Warm start tolerates the narrower
-        # module set (file keys without a module are skipped).
+        # (adaln_up_{branch}) in addition to the default attn+MLP set — adaln is
+        # the largest mover in the official turbo delta (docs/methods/adaln.md).
+        # Both student and fake carry the extra 84 modules (3 branches × 28
+        # blocks); the saved student is renamed to the ComfyUI adaln layout in
+        # save_student. ``fake_adaln`` (default: mirror train_adaln) lets a
+        # VRAM-tight run drop the critic's 84 adaln modules at the cost of a
+        # score estimate blind to the student's adaln subspace (unbenched).
         self.train_adaln = bool(train_adaln)
         self.fake_adaln = self.train_adaln if fake_adaln is None else bool(fake_adaln)
-        # 0 = adaln modules share network_dim; >0 = their own rank (see the
-        # network_reg_dims comment below). Applies to student and (when
-        # fake_adaln) the fake banks alike.
+        # 0 = adaln modules share network_dim; >0 = their own rank (see
+        # network_reg_dims below). Applies to student and (when fake_adaln)
+        # the fake banks alike.
         self.adaln_rank = int(adaln_rank)
         if self.adaln_rank < 0:
             raise ValueError(f"adaln_rank must be >= 0, got {adaln_rank}")
         if self.adaln_rank > 0 and not self.train_adaln:
             raise ValueError("adaln_rank > 0 requires train_adaln=true")
-        # 0 = adaln modules keep the network alpha (the reg_dims default —
-        # runs a rank/adaln_rank hotter alpha/rank scale when adaln_rank is
-        # set); >0 = their own alpha, e.g. scale-preserving
-        # network_alpha × adaln_rank / network_dim. Shared by student and
+        # 0 = adaln modules keep the network alpha (hotter alpha/rank scale
+        # when adaln_rank is set); >0 = their own alpha. Shared by student and
         # (when fake_adaln) the fake banks, like adaln_rank.
         self.adaln_alpha = float(adaln_alpha)
         if self.adaln_alpha < 0:
             raise ValueError(f"adaln_alpha must be >= 0, got {adaln_alpha}")
         if self.adaln_alpha > 0 and not self.train_adaln:
             raise ValueError("adaln_alpha > 0 requires train_adaln=true")
-        # τ-split critic (turbo_tau_split_critic Phase 1): 2 = a second fake
-        # stack (`fake_hi`) owning the high-τ band. Which bank answers/trains is
-        # the CALLER's choice via set_fake_bank (the boundary lives in the loop
-        # config, not here). 1 = the second stack is never constructed and every
+        # τ-split critic: 2 = a second fake stack (fake_hi) owning the high-τ
+        # band. Which bank answers/trains is the CALLER's choice via
+        # set_fake_bank. 1 = the second stack is never constructed and every
         # path below is byte-identical to the pre-bank harness.
         self.fake_tau_banks = int(fake_tau_banks)
         if self.fake_tau_banks not in (1, 2):
             raise ValueError(f"fake_tau_banks={self.fake_tau_banks}: expected 1 or 2.")
         # SmoothQuant-style per-input-channel rebalance absorbed into each
-        # ``lora_down`` (bit-equivalent at init, merges out cleanly). 0.0 = off,
-        # 0.5 = sqrt-balance. Applied to both student and fake — it only
-        # conditions the LoRA gradient on the DiT's outlier-DC input channels,
-        # so it leaves the DP-DMD objective untouched. The shipped calibration
-        # (networks/calibration/channel_stats.safetensors) is σ-insensitive, so
-        # it transfers to the student's 2-step grid and the fake's random τ.
+        # lora_down (bit-equivalent at init, merges out cleanly). 0.0 = off,
+        # 0.5 = sqrt-balance. Applied to both student and fake — conditions the
+        # LoRA gradient on the DiT's outlier-DC input channels only, so it
+        # leaves the DP-DMD objective untouched.
         self.channel_scaling_alpha = float(channel_scaling_alpha)
         # Per-step expert: when > 1 the student's adapted Linears become
         # StepExpertLoRAModule (shared down + K step-indexed up-heads); head k
-        # is trained only by step-k's gradient (see set_student_step + the
-        # detach in scripts/distill_turbo/distill.py). The fake/critic stays a
-        # plain single-head LoRA. 0/1 = the shipped single-head student.
+        # is trained only by step-k's gradient (set_student_step + the detach
+        # in distill.py). The fake/critic stays a plain single-head LoRA.
         self.student_step_expert_K = int(student_step_expert_K)
 
         # SVD-Down init (down_init="weight_svd"): seed the plain-LoRA student's
-        # lora_down from W0's top-r right singular vectors (scale-matched) —
-        # _archive/proposals/svd_down_lora_init.md. It targets the plain LoRAModule
-        # only, so it is mutually exclusive with the per-step-expert student.
+        # lora_down from W0's top-r right singular vectors (scale-matched).
+        # Targets the plain LoRAModule only, so mutually exclusive with the
+        # per-step-expert student.
         self.student_down_init = str(student_down_init)
         if self.student_down_init not in ("kaiming", "weight_svd"):
             raise ValueError(
@@ -447,19 +407,15 @@ class TurboDMDNetwork:
                 "expected 'kaiming' or 'weight_svd'."
             )
 
-        # Plain LoRA on both (LoRANetworkCfg defaults: no MoE/T-LoRA).
-        # alpha = rank by default (scale 1.0) per the LoRA-family convention.
-        # use_custom_down_autograd is forwarded for config compat but a deprecated
-        # no-op in the factory (fp32-bottleneck path removed 2026-06-10).
-        # step_expert_K rides **kwargs; >1 flips resolve_network_spec to
-        # StepExpertLoRAModule for the student only (the fake never sees it).
+        # Plain LoRA on both (LoRANetworkCfg defaults: no MoE/T-LoRA); alpha =
+        # rank by default. use_custom_down_autograd is forwarded for config
+        # compat but a deprecated no-op. step_expert_K rides **kwargs; >1 flips
+        # resolve_network_spec to StepExpertLoRAModule for the student only.
         # adaln_rank > 0 builds the adaln modules at their own (lower) rank via
-        # the factory's regex→dim override (``network_reg_dims``): the official
-        # turbo's adaln ΔW is near-lossless well below attn rank (in-dim 256 —
-        # r64 keeps 99.5% of the r96 energy), so uniform rank there is wasted
-        # VRAM. NB the reg_dims path keeps the NETWORK alpha, so the adaln
-        # modules run a higher alpha/rank scale (≈ rank/adaln_rank × the attn
-        # scale) — warm start folds the scale so the init is exact either way.
+        # network_reg_dims: the official turbo's adaln ΔW is near-lossless well
+        # below attn rank, so uniform rank there is wasted VRAM. NB the reg_dims
+        # path keeps the NETWORK alpha, so adaln runs a higher alpha/rank scale
+        # — warm start folds the scale so the init is exact either way.
         _adaln_reg_dims = (
             f".*adaln_up_.*={self.adaln_rank}" if self.adaln_rank > 0 else None
         )
@@ -491,16 +447,14 @@ class TurboDMDNetwork:
             **_student_kwargs,
         )
 
-        # Dual-pool gradient routing (docs/proposal/turbo_dual_pool_grad_routing.md):
-        # a SECOND always-on plain-LoRA pool. Pool A (this one) receives only the
-        # step-0 diversity gradient; the pool above (self.student = pool B) only the
-        # DMD/GAN/CDM refinement gradients (the routing is `requires_grad` gating in
-        # distill.py around the two existing backwards — both pools stay *enabled*,
-        # so activations always flow through A+B). Pool A is deliberately MINIMAL:
-        # plain LoRA on the attn/MLP set only — NO adaln modules (adaln is a quality
-        # remap → pool B), NO per-step-expert, NO channel scaling. Zero-init up
-        # (the LoRAModule default) means at step 0 the merged student IS the
-        # warm-started pool B, and A grows a pure de-collapse correction from zero.
+        # Dual-pool gradient routing: a SECOND always-on plain-LoRA pool. Pool A
+        # (this one) receives only the step-0 diversity gradient; pool B
+        # (self.student) only the DMD/GAN/CDM refinement gradients (routing is
+        # `requires_grad` gating in distill.py — both pools stay *enabled*, so
+        # activations always flow through A+B). Pool A is deliberately MINIMAL:
+        # plain LoRA on attn/MLP only, no adaln/per-step-expert/channel scaling.
+        # Zero-init up means at step 0 the merged student IS the warm-started
+        # pool B, and A grows a pure de-collapse correction from zero.
         self.dual_pool = bool(dual_pool)
         self.div_pool_rank = int(div_pool_rank)
         self.student_div: LoRANetwork | None = None
@@ -557,8 +511,7 @@ class TurboDMDNetwork:
         )
 
         # Apply student-first so the runtime chain is
-        # ``linear -> [fake_hi ->] fake -> student -> original`` (additive, but a
-        # stable order; fake_hi outermost when banks=2).
+        # linear -> [fake_hi ->] fake -> student -> original (fake_hi outermost)
         self.student.apply_to(
             text_encoders=[],
             unet=unet,
@@ -595,10 +548,10 @@ class TurboDMDNetwork:
             + ")"
         )
 
-        # Start in teacher view. LoRAModule defaults enabled=True, and diff-only
-        # set_view short-circuits when view==self._view, so we MUST disable every
-        # stack explicitly here — else the set_view invariant (cur state matches
-        # _VIEW_FLAGS[_view]) breaks once any stack carries nonzero weights.
+        # GOTCHA: LoRAModule defaults enabled=True, and set_view short-circuits
+        # when view==self._view, so we MUST disable every stack explicitly here
+        # — else the set_view invariant (cur state matches _VIEW_FLAGS[_view])
+        # breaks once any stack carries nonzero weights.
         self.student.set_enabled(False)
         if self.student_div is not None:
             self.student_div.set_enabled(False)
@@ -610,10 +563,8 @@ class TurboDMDNetwork:
 
         # GAN feature tap: off unless gan_feature_indices is given. The disc reads
         # frozen-teacher block activations via the DiT's first-class feature-tap
-        # (forward_mini_train_dit's return_block_features / return_features_early),
-        # NOT a forward hook; the caller hands the feature dict to self.disc through
-        # features_in_order. Taps arrive in native-flatten (B,1,L,1,D) under compile
-        # (pooled shape-agnostically); early-exit runs only blocks[0..k].
+        # (return_block_features/return_features_early), NOT a forward hook; the
+        # caller hands the feature dict to self.disc via features_in_order.
         self.disc: TeacherFeatureDiscriminator | None = None
         self.gan_feature_indices: list[int] = []
         if gan_feature_indices:
@@ -677,10 +628,9 @@ class TurboDMDNetwork:
         - ``student``: student on, fake off — produces v_student for x_pred.
         - ``fake``: fake on, student off — fake's score estimate at τ_DM.
 
-        Short-circuits when already in the target view (consecutive teacher
-        forwards in the CA + DM branches don't repay the ~O(num_modules)
-        attribute-write loop, and dynamo doesn't get a chance to invalidate
-        guards it would have re-validated anyway).
+        Short-circuits when already in the target view (avoids the
+        O(num_modules) attribute-write loop and an avoidable dynamo guard
+        re-validation).
         """
         if view == self._view:
             return
@@ -692,13 +642,13 @@ class TurboDMDNetwork:
             ) from e
         cur_student, cur_fake = self._VIEW_FLAGS[self._view]
         if want_student != cur_student:
-            # Both dual pools toggle together — the "student" view is always
-            # A+B (grad routing is `requires_grad`, not enablement; see route_*).
+            # Both dual pools toggle together — "student" view is always A+B
+            # (grad routing is `requires_grad`, not enablement; see route_*).
             for pool in self.student_pools:
                 pool.set_enabled(want_student)
         if want_fake != cur_fake:
             # Only the ACTIVE bank ever toggles — inactive banks stay disabled
-            # from __init__ on, so the fake view is always exactly one bank.
+            # from __init__ on.
             self.fake_banks[self._fake_bank].set_enabled(want_fake)
         self._view = view
 
@@ -720,9 +670,7 @@ class TurboDMDNetwork:
         """Select which fake bank the fake view drives (τ-split critic routing).
 
         The caller routes by the batch's drawn τ vs its configured boundary —
-        BEFORE the fake forward. Mid-fake-view switches flip only the two banks'
-        ``enabled`` flags (same dynamo-guard mechanism as teacher/student/fake
-        view switching). No-op at fake_tau_banks=1 (i must be 0).
+        BEFORE the fake forward. No-op at fake_tau_banks=1 (i must be 0).
         """
         banks = self.fake_banks
         if not 0 <= i < len(banks):
@@ -739,13 +687,12 @@ class TurboDMDNetwork:
     def set_student_step(self, i: int) -> None:
         """Select the student's step-``i`` up-head before its forward.
 
-        No-op when per-step-expert is off (the plain student modules have no
-        ``set_step``). The detach between the diversity step-0 backward and the
-        DMD steps-1..N chain (distill.py) means head 0 only ever sees the
-        diversity gradient and head k only step-k's DMD gradient — the shared
-        ``lora_down`` is trained by both. Mirror of ``LoRANetwork.set_step_index``;
-        kept as a coordinator method so the training loop never reaches into the
-        student network directly.
+        No-op when per-step-expert is off. The detach between the diversity
+        step-0 backward and the DMD steps-1..N chain (distill.py) means head 0
+        only ever sees the diversity gradient and head k only step-k's DMD
+        gradient — the shared lora_down is trained by both. Kept as a
+        coordinator method so the training loop never reaches into the student
+        network directly.
         """
         if self.student_step_expert_K > 1:
             self.student.set_step_index(i)
@@ -753,10 +700,9 @@ class TurboDMDNetwork:
     def student_params(self):
         """Trainable params for the student optimizer (all pools under dual_pool).
 
-        Filtered by ``requires_grad`` — so the caller must restore both pools to
-        grad-on (``route_all_on``) BEFORE grad-clip/step, else a transiently-gated
-        pool's grads escape clipping. The optimizer holds every pool's params from
-        construction; the mid-iteration routing only gates grad *accumulation*.
+        GOTCHA: filtered by ``requires_grad`` — the caller must restore both
+        pools to grad-on (``route_all_on``) BEFORE grad-clip/step, else a
+        transiently-gated pool's grads escape clipping.
         """
         return [
             p for pool in self.student_pools for p in pool.parameters() if p.requires_grad
@@ -766,8 +712,7 @@ class TurboDMDNetwork:
         """AdamW param groups: pool B at ``student_lr``, pool A at ``div_pool_lr``.
 
         ``div_pool_lr=0`` inherits ``student_lr``. Under single-pool this is one
-        group over the sole stack — equivalent to a flat ``student_params()`` build,
-        so the shipped path stays byte-identical.
+        group — the shipped path stays byte-identical.
         """
         groups = [{"params": list(self.student.parameters()), "lr": student_lr}]
         if self.student_div is not None:
@@ -815,9 +760,7 @@ class TurboDMDNetwork:
         """Trainable params for the fake optimizer — all banks, bank order.
 
         One optimizer spans every bank: with ``zero_grad(set_to_none=True)`` the
-        inactive bank's grads are None and AdamW skips them, and Adam's
-        per-param ``step`` state keeps bias correction correct under the sparse
-        updates τ-routing produces.
+        inactive bank's grads are None and AdamW skips them.
         """
         return [
             p for bank in self.fake_banks for p in bank.parameters() if p.requires_grad
@@ -826,12 +769,10 @@ class TurboDMDNetwork:
     def freeze_dit(self) -> None:
         """Set ``requires_grad=False`` on every base DiT param.
 
-        Must be called AFTER both ``apply_to``'s — the LoRA networks add
-        sub-modules to ``unet`` via ``add_module(lora.lora_name, lora)``, so
-        a wholesale ``unet.requires_grad_(False)`` BEFORE apply would still
-        be undone by the LoRA modules' own requires_grad=True params (good),
-        but a wholesale call AFTER would zero those too (bad). We selectively
-        walk only ``unet`` params whose name doesn't start with a LoRA prefix.
+        GOTCHA: must be called AFTER both ``apply_to``'s — the LoRA networks
+        add sub-modules to ``unet``, so a wholesale ``unet.requires_grad_(False)``
+        after apply would zero the LoRA params too. Selectively walks only
+        ``unet`` params whose name doesn't start with a LoRA prefix.
         """
         lora_prefixes = tuple(
             {m.lora_name for pool in self.student_pools for m in pool.unet_loras}
@@ -868,22 +809,17 @@ class TurboDMDNetwork:
             return
         if self.student_step_expert_K > 1:
             sd = self.student.state_dict()
-            # Strip any non-LoRA keys defensively (the per-step-expert layout is
-            # written verbatim, so drop non-load-bearing buffers here).
+            # Strip any non-LoRA keys defensively (per-step-expert layout is
+            # written verbatim).
             sd = {k: v for k, v in sd.items() if ".lora_" in k or ".alpha" in k}
             self._save_student_step_expert(sd, file, dtype, metadata)
             return
 
         # Delegate to the network's own save so the full distill chain runs.
-        # An OrthoInit / OrthoLoRA student stores P_init/Q_init/lambda_layer (or
-        # Cayley/SVD bases), NOT lora_down/lora_up — `save_weights` →
-        # `save_network_weights` distills those into the standard factorization.
-        # A naive ".lora_"/".alpha" pre-filter would strip them before the
-        # distill step ever sees them, emitting an alpha-only checkpoint
-        # (training-only buffers like `_timestep_mask` are already persistent=False
-        # so they never reach the state dict).
-        # `save_network_weights` relays adaln keys to the ComfyUI layout on the
-        # standard write path, so no post-hoc rewrite is needed here.
+        # GOTCHA: an OrthoInit/OrthoLoRA student stores P_init/Q_init/lambda_layer
+        # (or Cayley/SVD bases), NOT lora_down/lora_up — save_weights distills
+        # those into the standard factorization. A naive pre-filter here would
+        # strip them before the distill step ever sees them.
         self.student.save_weights(file, dtype, metadata)
         logger.info(f"saved student LoRA → {file}")
 
@@ -915,11 +851,10 @@ class TurboDMDNetwork:
 
         Two rank-r LoRAs on the same Linear fold to rank r_B+r_A by factor
         concatenation: ``down = concat(rows)``, ``up = concat(cols)`` reproduces
-        ``ΔW_B + ΔW_A`` identically. Per-pool scale (``alpha/rank``) differs, so it
-        is baked into ``up`` and the merged alpha set to the merged rank (scale 1).
-        ``div_scale`` multiplies pool A's ``up`` — the merge-time diversity dial.
-        Pool A is plain attn/MLP only, so its module set ⊆ pool B's; adaln-only
-        keys pass through from B untouched (A contributes 0 there).
+        ``ΔW_B + ΔW_A`` identically. Per-pool scale (alpha/rank) is baked into
+        ``up`` and the merged alpha set to the merged rank (scale 1). ``div_scale``
+        multiplies pool A's up — the merge-time diversity dial. Pool A's module
+        set ⊆ pool B's; adaln-only keys pass through from B untouched.
         """
         from safetensors.torch import save_file
         from library.training.hashing import precalculate_safetensors_hashes
@@ -991,15 +926,13 @@ class TurboDMDNetwork:
     ) -> None:
         """Write the per-step-expert student in its bespoke layout.
 
-        Multi-head keys (``…lora_ups.{k}.weight``) are NOT plain-LoRA loadable,
-        so the standard defuse-qkv save pipeline (which expects one
-        ``.lora_up.weight`` per ``.lora_down.weight``) can't run. We keep the
-        fused-qkv key layout the training-runtime DiT uses verbatim — the CLI /
-        ComfyUI step-expert loaders rebuild the network on the same fused DiT and
-        ``load_state_dict`` matches directly (no split→re-fuse round trip). The
-        ``ss_turbo_per_step_expert`` metadata stamp drives loader detection; the
-        keys deliberately reuse ``.lora_ups.`` so a stock loader fails loudly
-        rather than silently mis-merging only head 0.
+        Multi-head keys (``...lora_ups.{k}.weight``) are NOT plain-LoRA loadable,
+        so the standard defuse-qkv save pipeline can't run. Keeps the fused-qkv
+        key layout the training-runtime DiT uses verbatim — CLI/ComfyUI
+        step-expert loaders rebuild the network on the same fused DiT and
+        ``load_state_dict`` matches directly. The ``.lora_ups.`` keys
+        deliberately make a stock loader fail loudly rather than silently
+        mis-merging only head 0.
         """
         from safetensors.torch import save_file
         from library.training.hashing import precalculate_safetensors_hashes

@@ -38,7 +38,7 @@ def _mod_flags() -> list[str]:
 def _base_test_args(*, lora_default: bool = True) -> list[str]:
     """Build the shared ``inference.py`` argv prefix used by every ``test*`` command.
 
-    Honors three env levers so they compose uniformly across ``test`` and
+    Honors these env levers so they compose uniformly across ``test`` and
     ``test-smc-cfg``:
 
     - ``NOLORA=1`` skips ``--lora_weight`` (bare DiT). When unset, ``lora_default``
@@ -273,24 +273,22 @@ def cmd_test_easycontrol(extra):
         "empty_prompt": False,
     }
     _ADAPTERS = {
-        # colorize: feed a real B&W manga page; empty prompt → caption-free colorize.
+        # colorize: feed a real B&W manga page; empty prompt = caption-free colorize.
         "colorize": {
             "weight": "anima_colorize",
             "out": "colorize",
             "ref_dir": ROOT / "post_image_dataset" / "resized",
             "empty_prompt": True,
         },
-        # inpaint: the ref is the already-masked (gray-holed) PNG; a caption steers
-        # the fill, so don't force an empty prompt.
+        # inpaint: ref is the already-masked (gray-holed) PNG; a caption steers the fill.
         "inpaint": {
             "weight": "anima_inpaint",
             "out": "inpaint",
             "ref_dir": ROOT / "post_image_dataset" / "resized",
             "empty_prompt": False,
         },
-        # subject: cross-image descriptor — the ref is a DIFFERENT image of the
-        # character to retrieve, and the prompt owns layout/pose, so a caption is
-        # required for the test to mean anything (never force an empty prompt).
+        # subject: ref is a DIFFERENT image of the character to retrieve; the
+        # prompt owns layout/pose, so never force an empty prompt.
         "subject": {
             "weight": "anima_easycontrol_subject",
             "out": "subject",

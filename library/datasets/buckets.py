@@ -2,30 +2,17 @@ import math
 import random
 from typing import NamedTuple, Tuple
 
-# NB: numpy is imported lazily inside BucketManager (its only consumer) so that
-# the free-fit helpers below stay numpy-free. The GUI imports this module for
-# those helpers via library.preprocess.resize_preview; pulling in numpy at module
-# top added ~110ms to GUI startup for a class the GUI never instantiates.
+# NB: numpy is imported lazily inside BucketManager so the free-fit helpers
+# below (used by the GUI via library.preprocess.resize_preview) stay numpy-free.
 
-# ---------------------------------------------------------------------------
 # Per-tier token-count bands — the free-fit search range for each tier edge.
-#
-# Free-fit (the only resize mode; see freefit_bucket / freefit_band_for_edge
-# below and docs/proposal/free_aspect_token_band_resize.md) preserves an image's
-# native aspect ratio and lands its patch-grid token count anywhere inside its
-# tier's band. The per-tier discrete (W, H) "constant token bucket" pool that used
-# to define these tiers (and snapped every image to one of its entries) is gone —
-# only the numeric band survives, and every forward runs at its true token count
-# with zero intra-bucket padding under compile_dynamic_seq (the whole band is one
-# block graph). Token count = (W//16)*(H//16); every count here is within the rope
-# per-axis cap (256 patches). ``--target_res`` (preprocess-only) selects which
-# tiers are active; each image is assigned to the tier that resizes it the *least*
-# (``choose_edge``), reproducing v1.0's diverse 512–1536 spread.
-#
-# The bands are the natural (min, max) token count each tier historically carried:
-# single-family tiers (768/1280/1536) have lo == hi; 512/896/1024 carry two
-# families. ``freefit_band_for_edge`` widens the non-frozen tiers slightly so the
-# solver has aspect freedom; 1024 stays frozen at (4032, 4200) for the top-5 set.
+# Free-fit (the only resize mode; see freefit_bucket / freefit_band_for_edge,
+# _archive/proposals/free_aspect_token_band_resize.md) preserves native aspect ratio
+# and lands the patch-grid token count anywhere inside its tier's band, so every
+# forward runs at its true token count with zero padding under compile_dynamic_seq
+# (one block graph per band). Token count = (W//16)*(H//16), capped at 256/axis
+# (rope). ``--target_res`` selects active tiers; ``choose_edge`` picks the one
+# that resizes an image least.
 EDGE_TOKEN_BANDS: dict = {
     512: (1008, 1024),
     768: (2160, 2160),
@@ -49,14 +36,8 @@ def _band(edge: int) -> tuple[int, int]:
 
 
 def token_count_families(target_res) -> int:
-    """Number of distinct token counts (== compiled block graphs) for the tiers.
-
-    Each tier contributes its band endpoints (one count if the band is a single
-    family, two if it carries two — e.g. 1024 → {4032, 4200}), deduped across the
-    active tiers. Drives the dynamo cache-size budget in ``compile_blocks``. Under
-    ``compile_dynamic_seq`` each tier's whole band collapses to one graph, so this
-    is a safe upper bound. 1024 alone → 2.
-    """
+    """Number of distinct band-endpoint token counts across the active tiers
+    (deduped) — drives the dynamo cache-size budget in ``compile_blocks``."""
     counts: set = set()
     for edge in target_res:
         lo, hi = _band(edge)
@@ -66,11 +47,8 @@ def token_count_families(target_res) -> int:
 
 
 def token_count_range(target_res) -> tuple[int, int]:
-    """(min, max) token count across the active tiers.
-
-    Bounds the ``mark_dynamic`` seq-length hint in ``compile_blocks`` (so inductor
-    guards against a real range, not ``[2, ∞)``). 1024 alone → (4032, 4200).
-    """
+    """(min, max) token count across the active tiers — bounds the
+    ``mark_dynamic`` seq-length hint in ``compile_blocks``."""
     los = [_band(edge)[0] for edge in target_res]
     his = [_band(edge)[1] for edge in target_res]
     if not los:
@@ -84,25 +62,18 @@ def token_counts_for_resos(resos) -> set:
 
 
 def snap_sample_size(width: int, height: int) -> Tuple[int, int]:
-    """Snap a requested sample (W, H) to the DiT's 16px pixel grid.
-
-    The single definition of the snap ``_sample_image_inference`` applies before
-    sampling — shared with the compile token budget so both sides agree on the
-    seq len a sample prompt will actually run at.
-    """
+    """Snap a requested sample (W, H) to the DiT's 16px pixel grid — the same
+    snap ``_sample_image_inference`` applies, shared so the compile token
+    budget agrees with the seq len a sample prompt actually runs at."""
     return max(64, width - width % 16), max(64, height - height % 16)
 
 
 def token_counts_for_sample_prompts(prompts) -> set:
-    """Distinct DiT token counts the training sample prompts will request.
-
-    ``prompts`` are ``train_util.load_prompts`` dicts; width/height default to
-    512, matching ``_sample_image_inference``. Folded into the torch.compile
-    token budget so a sample resolution outside the training buckets (e.g.
-    ``--w 1024 --h 1536`` over 1024-tier data → 6144 tokens vs a (4032, 4200)
-    range) widens the compiled range instead of crashing mid-training with a
-    dynamic-seq ConstraintViolationError (issue #42).
-    """
+    """Distinct DiT token counts the training sample prompts will request
+    (``prompts`` = ``train_util.load_prompts`` dicts, width/height default 512).
+    Folded into the compile token budget so a sample resolution outside the
+    training buckets widens the compiled range instead of raising a
+    dynamic-seq ConstraintViolationError mid-training (issue #42)."""
     counts: set = set()
     for prompt_dict in prompts:
         w, h = snap_sample_size(
@@ -133,11 +104,9 @@ def edge_for_token_count(n_tokens: int, edges=ALLOWED_TARGET_RES) -> int:
         key=lambda e: abs(math.log(((_band(e)[0] + _band(e)[1]) / 2.0) / n)),
     )
 
-# The single measured-safe σ-demote route (sigma_lowres Phase 1b): images in the
-# 1024 tier train on an 896-tier sibling latent when the step's σ draw exceeds
-# the gate threshold. 896→768 FAILED its probe and 1280→1024 floors at a
-# different σ* — do not add routes here without their own per-σ-bin gradient
-# probe (project/sigma_lowres/bench/run_sigma_probe.py).
+# The single measured-safe σ-demote route (1024→896). Other candidate routes
+# (896→768, 1280→1024) failed/differ per their own gradient probe — do not add
+# routes without one (project/sigma_lowres/bench/run_sigma_probe.py).
 SIGMA_DEMOTE_ROUTE: Tuple[int, int] = (1024, 896)
 
 
@@ -148,13 +117,10 @@ def demote_bucket_for(
     demote_edge: int,
     max_ratio: "float | None" = None,
 ) -> "tuple[int, int] | None":
-    """σ-demote sibling grid ``(W', H')`` for a native free-fit bucket, or None.
-
-    Returns the demoted free-fit bucket only when ``(width, height)`` actually
-    sits in ``native_edge``'s token band — images native to lower tiers (e.g.
-    896 originals on the 1024→896 route) return None and train as-is. Pure and
-    deterministic: the preprocess sibling emit and the trainer's σ-conditional
-    fetch both call this, so they derive the identical demoted grid.
+    """σ-demote sibling grid ``(W', H')`` for a native free-fit bucket, or None
+    if ``(width, height)`` isn't native to ``native_edge``'s token band. Pure
+    and deterministic — preprocess emit and trainer fetch both call this so
+    they derive the identical demoted grid.
     """
     if max_ratio is None:
         max_ratio = DEFAULT_FREEFIT_MAX_RATIO
@@ -167,10 +133,8 @@ def demote_bucket_for(
 
 def demoted_token_counts(resos, native_edge: int, demote_edge: int) -> set:
     """Distinct token counts the σ-demote siblings of ``resos`` will run at.
-
-    Unioned into the torch.compile token budget (``train.py::_derive_token_budget``)
-    when sigma_lowres is on, so a demoted forward lands inside the compiled
-    dynamic-seq range instead of raising ConstraintViolationError mid-run.
+    Unioned into the compile token budget (``train.py::_derive_token_budget``)
+    when sigma_lowres is on, so demoted forwards stay inside the compiled range.
     """
     counts: set = set()
     for w, h in resos:
@@ -183,15 +147,10 @@ def demoted_token_counts(resos, native_edge: int, demote_edge: int) -> set:
 def choose_edge(width: int, height: int, target_res) -> int:
     """Assign an image to the tier that resizes it the *least*.
 
-    Free-fit preserves the native aspect ratio, so the only thing that varies
-    across tiers is the total patch-token budget (area). Each tier's nominal token
-    count is the midpoint of its band (``EDGE_TOKEN_BANDS``); the chosen tier
-    minimizes ``|log(nominal / native_tokens)|`` — the tier whose budget is closest
-    to the image's native patch area, up or down. So a 0.95MP image stays at 1024
-    (a tiny upscale) instead of being shoved down to 768 (a big downscale), while a
-    0.6MP image still picks 768. Scale-symmetric. Single-element ``target_res`` is
-    a no-op. (Equivalent to the old nearest-aspect cover-scale rule: with aspect
-    preserved, cover-scale ≈ sqrt(nominal / native_tokens).)
+    Minimizes ``|log(nominal_tokens / native_tokens)|`` (nominal = each tier's
+    band midpoint) — scale-symmetric, so a 0.95MP image stays at 1024 (small
+    upscale) rather than being downscaled to 768. Single-element ``target_res``
+    is a no-op.
     """
     if len(target_res) == 1:
         return target_res[0]
@@ -207,36 +166,21 @@ def choose_edge(width: int, height: int, target_res) -> int:
     return best_edge
 
 
-# ---------------------------------------------------------------------------
 # Free-fit ("free-aspect token-band") solver — see
-# docs/proposal/free_aspect_token_band_resize.md.
-#
-# Free-fit preserves the native aspect ratio and lands the patch-grid token count
-# *anywhere* inside the tier's band (EDGE_TOKEN_BANDS, e.g. [4032, 4200] for 1024).
-# Each forward runs at its true token count with zero padding; under
-# compile_dynamic_seq the whole band is one block graph, so the finer shape
-# granularity is free at compile time. Pure, deterministic functions — no I/O.
+# _archive/proposals/free_aspect_token_band_resize.md. Pure, deterministic, no I/O.
 
 DEFAULT_FREEFIT_MAX_RATIO = 4.0
 
-# Free-fit's aspect freedom comes entirely from the token-count band width: the
-# solver can only match a native aspect to sub-patch if the band admits an integer
-# grid near it. The single-family tiers (768 → 2160, 1280 → 6300, 1536 → 8640) and
-# the near-degenerate 512 (16-wide) have a *natural* band (lo == hi or nearly so)
-# that leaves free-fit no room — it falls back to the coarse divisor grids of that
-# one count and crops just like the old snap (the bug in #53's Phase 0: a 0.866-
-# aspect image on the 768 tier landed at 0.9375, a ~7.7% crop). Widening the band
-# symmetrically by this tolerance restores the "preserve aspect, crop → 0" promise.
-# It is free at compile time: under ``compile_dynamic_seq`` the whole [lo, hi] is
-# one graph regardless of width (the band only changes *which* counts appear, never
-# the graph count), and the train-side seq_range auto-derives from the on-disk
-# caches.
-FREEFIT_BAND_TOLERANCE = 0.025  # ±2.5% → ~5% interval around the tier's nominal
+# Single-family tiers (lo == hi, e.g. 768/1280/1536) and near-degenerate 512
+# leave the solver no aspect freedom without widening — without this a tier's
+# one exact token count forces a coarse divisor grid and crops like the old
+# snap (#53 Phase 0: 0.866-aspect image on 768 tier → 0.9375, ~7.7% crop).
+# Widening is free at compile time (whole [lo, hi] stays one compile_dynamic_seq
+# graph).
+FREEFIT_BAND_TOLERANCE = 0.025  # +/-2.5% -> ~5% interval around the tier's nominal
 
-# The 1024 tier stays frozen at its natural (4032, 4200): the frozen top-5 aspect
-# set (``DCW_ASPECT_BUCKETS``, consumed by CNS calibration + mod-distill) is drawn
-# from this tier, and its 2-family band is already the reference width. Bump this
-# set only with those consumers in mind.
+# 1024 stays frozen at its natural (4032, 4200): DCW_ASPECT_BUCKETS (CNS
+# calibration + mod-distill) is drawn from this tier's band.
 FREEFIT_FROZEN_EDGES: Tuple[int, ...] = (1024,)
 
 # Bumped whenever the band derivation changes, so free-fit resized PNGs cached
@@ -249,17 +193,9 @@ def freefit_band_for_edge(
 ) -> tuple[int, int]:
     """Token-count band ``(lo, hi)`` for a single tier — the free-fit search range.
 
-    Free-fit lands the patch-grid token count anywhere in this closed interval and
-    picks the grid closest to the image's native aspect, so a *wider* band lets it
-    preserve aspect more exactly (less crop). The whole band collapses to one
-    ``compile_dynamic_seq`` graph at train time, so width is free.
-
-    Starts from the tier's natural ``(min, max)`` token band (``EDGE_TOKEN_BANDS``),
-    then widens it symmetrically by ``tol`` for every tier **except** the frozen
-    ones (``FREEFIT_FROZEN_EDGES`` — currently 1024, kept at ``(4032, 4200)`` for
-    the frozen top-5 aspect set). Without the widening the single-family tiers (768 → 2160, 1280 → 6300,
-    1536 → 8640) and the near-degenerate 512 leave the solver no aspect freedom and
-    free-fit crops like the old snap.
+    Widens the tier's natural band (``EDGE_TOKEN_BANDS``) symmetrically by ``tol``
+    (a wider band gives the solver more aspect freedom, less crop), except for
+    ``FREEFIT_FROZEN_EDGES`` (1024, kept at its natural (4032, 4200)).
     """
     lo, hi = token_count_range((edge,))
     if edge in FREEFIT_FROZEN_EDGES:
@@ -277,19 +213,12 @@ def freefit_bucket(
 ) -> tuple[int, int]:
     """Native-aspect resize target whose patch grid fills the token ``band``.
 
-    Returns pixel ``(W, H)`` (both multiples of ``patch``) whose patch grid
-    ``(W//patch)*(H//patch)`` lies in ``[lo, hi]`` and whose aspect ratio is as
-    close as possible to the image's — clamped to ``[1/max_ratio, max_ratio]`` —
-    subject to ``max(W//patch, H//patch) <= rope_cap``. Deterministic in its
-    inputs.
-
-    Aspect distortion is sub-patch by construction (the cropped residual on the
-    covering axis is < ``patch`` px). Crop is zero unless the ratio clamp fired
-    (a degenerate input the caller explicitly allowed), in which case the caller
-    cover-crops to the clamped aspect just as the snap path does. The search is
-    exhaustive over the band — small (~10³ pairs) because the band is narrow and
-    bounded by ``rope_cap`` — so the result is the global aspect-error minimum,
-    tie-broken toward the grid that resizes the image the least.
+    Returns pixel ``(W, H)`` (multiples of ``patch``) whose patch grid
+    ``(W//patch)*(H//patch)`` lies in ``[lo, hi]`` and whose aspect is as close
+    as possible to the image's — clamped to ``[1/max_ratio, max_ratio]`` —
+    subject to ``max(W//patch, H//patch) <= rope_cap``. Crop is zero unless the
+    ratio clamp fired. Exhaustive search over the (narrow, rope-capped) band, so
+    the result is the global aspect-error minimum, tie-broken toward least resize.
     """
     lo, hi = int(band[0]), int(band[1])
     if lo <= 0 or hi < lo:
@@ -317,23 +246,16 @@ def freefit_bucket(
     return wp * patch, hp * patch
 
 
-# Dataset's measured top-5 (H, W) resolutions by frequency — a frozen literal.
-#
-# These were the top-5 (H, W) resolutions by frequency in post_image_dataset/lora/
-# back when training snapped to the discrete 1024-tier bucket pool (recounted
-# 2026-05-23). That pool is gone (free-fit is the only resize mode now), but this
-# set stays frozen as-is for the consumers that still key off it: CNS calibration
-# (scripts/calibration/cns_calibrate.py samples the top-N of this set) and
-# mod-guidance distillation (scripts/distill_mod/prep.py uses DCW_ASPECT_NAMES as
-# its default synth-bucket set). The DCW name is retained only because these
-# consumers import the symbol; the retired DCW line that originated it lives under
-# _archive/dcw/.
+# Frozen literal: dataset's top-5 (H, W) resolutions by frequency from the old
+# discrete 1024-tier bucket pool (pre-free-fit). Kept for CNS calibration and
+# mod-guidance distillation which still key off it (DCW name only because those
+# consumers import the symbol; the DCW line itself is retired, _archive/dcw/).
 DCW_ASPECT_BUCKETS: Tuple[Tuple[int, int], ...] = (
-    (1200, 896),  # 0 — 896x1200 portrait (most common, 4200-tok)
-    (1344, 800),  # 1 — 800x1344 tall portrait (4200-tok)
-    (896, 1200),  # 2 — 1200x896 landscape (4200-tok)
-    (1344, 768),  # 3 — 768x1344 tall portrait (4032-tok)
-    (1152, 896),  # 4 — 896x1152 portrait (4032-tok)
+    (1200, 896),  # 896x1200 portrait, most common, 4200-tok
+    (1344, 800),  # 800x1344 tall portrait, 4200-tok
+    (896, 1200),  # 1200x896 landscape, 4200-tok
+    (1344, 768),  # 768x1344 tall portrait, 4032-tok
+    (1152, 896),  # 896x1152 portrait, 4032-tok
 )
 DCW_ASPECT_NAMES: Tuple[str, ...] = tuple(f"{h}x{w}" for h, w in DCW_ASPECT_BUCKETS)
 DCW_ASPECT_TABLE: dict = {hw: i for i, hw in enumerate(DCW_ASPECT_BUCKETS)}
@@ -425,13 +347,9 @@ class BucketManager:
         target_res=None,
     ):
         if freefit_resos is not None:
-            # Free-fit (the only native-shape mode): the predefined set IS the
-            # distinct on-disk cached (W, H). Every cached latent then exact-matches
-            # in select_bucket and keeps its true (W, H) — nothing AR-snaps at load.
-            # The caches are literally the source of truth for which shapes/tiers
-            # are present; ``target_res`` is preprocess-only and inert here, and the
-            # compile budget is derived from the buckets actually populated
-            # (train.py::_derive_token_budget), not from any tier list.
+            # Free-fit: the on-disk cached (W, H) set IS the source of truth for
+            # buckets — every cached latent exact-matches in select_bucket, nothing
+            # AR-snaps at load. target_res is preprocess-only and inert here.
             resos = sorted(set(tuple(r) for r in freefit_resos))
         else:
             resos = make_bucket_resolutions(

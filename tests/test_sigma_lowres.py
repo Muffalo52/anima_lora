@@ -395,7 +395,7 @@ class TestYarnsigRope:
         )
 
     def test_default_on_with_sigma_lowres(self):
-        """yarnsig is part of the shipped combo recipe, so an unset flag under
+        """yarnsig is part of the shipped recipe, so an unset flag under
         --sigma_lowres resolves to the operating point — a plain --sigma_lowres
         run must not silently be a degraded (no-yarnsig) arm."""
         from train import AnimaTrainer

@@ -44,6 +44,33 @@ Both tokenize the same caption. Both pad **unconditionally** to `max_length = 51
 
 Why carry a T5 tokenizer without T5? Only its token IDs are used, as the *target-side* input to the LLMAdapter (§2.3). This saves the ~11 GB T5-XXL encoder and still gives the adapter a second, structurally different tokenization to cross-attend against.
 
+**Caveat — the T5 vocab is English-only, and CJK collapses to `<unk>`.** `t5_old/` is
+the `google/t5-v1_1-xxl` sentencepiece vocab (32,100, trained on C4). It has no CJK
+coverage at all — not "poor" coverage, *none*:
+
+```
+'a cat sitting on a bench' -> ['▁','a','▁cat','▁sitting','▁on','▁','a','▁bench']
+'안녕하세요'                -> ['▁', '<unk>']
+'你好世界'                  -> ['▁', '<unk>']
+'text that says "한글"'     -> ['▁text','▁that','▁says','▁"','<unk>','"']
+```
+
+Qwen3 (§2.2) tokenizes the same strings fine (byte-level BPE, 151k), so the *semantics*
+still reach the adapter through the cross-attention context. What collapses is the
+**query stream**: a 20-character Korean prompt gets 2 non-pad query slots instead of
+~25, so the adapter has almost no positions to write distinct content into, and all
+word-boundary / length structure is gone. The "second, structurally different
+tokenization" benefit above is therefore **English-only** — for a CJK prompt the target
+side contributes essentially nothing.
+
+Known consequence for prompt following in CJK. **Open question** for CJK *glyph
+rendering*: [`docs/findings/freetext_text_rendering.md`](../findings/freetext_text_rendering.md)
+attributes Anima's inability to draw Korean to the DiT's visual glyph head ("Qwen3
+already understands Korean semantically"), but that eval used an English control, which
+differs from Korean in *both* the glyph prior *and* this `<unk>` collapse — so the two
+were never separated. See also `library/preprocess/caption_variants.py` (filler-token
+selection already works around T5's English-centric vocab).
+
 `AnimaTokenizeStrategy.tokenize()` returns four tensors, all shape `(B, 512)`:
 
 ```

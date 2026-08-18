@@ -1,13 +1,3 @@
-# Tag-dropout Phase 1 — Arm A (shuffle_only): variants on, tag dropout = 0.0.
-#
-# docs/proposal/tag_dropout_mechanism.md Phase 1. Isolates the dropout axis:
-# both arms shuffle; this arm never drops a tag. The per-arm TE cache
-# (`text_cache_dir`) is built by scripts/preprocess/cache_text_embeddings.py at
-# --caption_tag_dropout_rate 0.0 with the shared `.variants.txt` sidecars moved
-# aside (in-process variant generation honoring the CLI rate — the colorize
-# sidestep). VAE + PE caches stay shared under post_image_dataset/lora.
-# Single artist via path_pattern.
-
 [general]
 caption_extension = '.txt'
 
@@ -18,11 +8,8 @@ validation_seed = 42
 
   [[datasets.subsets]]
   image_dir = 'post_image_dataset/resized'
-  cache_dir = 'post_image_dataset/lora'                        # VAE + PE (shared)
-  text_cache_dir = 'post_image_dataset/lora_te_mignon_armA'    # TE (arm A)
+  cache_dir = 'post_image_dataset/lora'
+  text_cache_dir = 'post_image_dataset/lora_te_mignon_armA'
   path_pattern = 'mignon/*'
   recursive = true
   num_repeats = 1
-  # NB: variant sampling (use_shuffled_caption_variants) + count are GLOBAL args
-  # supplied by the method (lora.toml) and read from the cache's num_variants —
-  # NOT valid user-config subset keys, so they are not repeated here.

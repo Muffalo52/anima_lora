@@ -36,28 +36,22 @@ def selective_block_grad_ckpt(model: Anima):
     """Arm per-block gradient checkpointing for one forward, then restore.
 
     ``Block.forward`` self-checkpoints when ``gradient_checkpointing`` is set
-    (gated on ``self.training`` + grad enabled). The decision is read eagerly per
-    block, so flipping it per call costs no recompile. We snapshot each block's
-    three checkpoint flags and restore them on exit, so this composes cleanly with
-    a global ``--grad_ckpt`` run without clobbering it.
+    (gated on ``self.training`` + grad enabled), read eagerly per block so
+    flipping it per call costs no recompile. Snapshots + restores each block's
+    checkpoint flags, so this composes with a global ``--grad_ckpt`` run.
 
-    We arm the **unsloth-offload** variant, NOT the standard ``torch_checkpoint``
-    path. ``block._forward`` (the actual compute) is ``torch.compile``'d, and
-    ``checkpoint(compiled_fn, use_reentrant=False)`` is unsupported: the recompute
-    diverges from the inductor forward graph (dynamo recompile-storms on the
-    GLOBAL_STATE ``num_threads`` flip, falls back to a non-autocast eager path →
-    fp32 recompute, mismatched saved-tensor set, ``CheckpointError``). The unsloth
-    path carries ``@torch._disable_dynamo`` (``models.py``), so the compiled
-    ``_forward`` runs eager in BOTH forward and recompute → consistent, and it
-    offloads saved tensors to CPU (extra VRAM win). The reentrant grad-drop bug
+    Arms the **unsloth-offload** variant, not standard ``torch_checkpoint``:
+    ``block._forward`` is ``torch.compile``'d, and
+    ``checkpoint(compiled_fn, use_reentrant=False)`` diverges from the inductor
+    forward graph in recompute → ``CheckpointError``. The unsloth path carries
+    ``@torch._disable_dynamo``, so ``_forward`` runs eager in both forward and
+    recompute, and it offloads saved tensors to CPU. The reentrant grad-drop bug
     ([[project_unsloth_reentrant_drops_grad]]) does not apply here: the frozen
-    teacher view has no grad-requiring params inside the region, so grad flows
-    purely through the grad-requiring input (x_renoised_gan → student).
+    teacher view has no grad-requiring params inside the region.
 
-    Used to wrap ONLY the grad-bearing GAN gen teacher forward: the frozen teacher
-    retains ~half the DiT's block activations there purely to backprop into
-    x_pred → student, so recomputing them in backward reclaims that peak VRAM
-    (~one half-depth forward of compute) — numerically exact (no dropout).
+    Wraps ONLY the grad-bearing GAN gen teacher forward, reclaiming the peak
+    VRAM the frozen teacher retains there purely to backprop into x_pred →
+    student (numerically exact — no dropout).
     """
     saved = [
         (
@@ -154,8 +148,6 @@ def teacher_anchor(
         t_b = torch.full((B,), s_i, device=ctx.device, dtype=ctx.dtype)
         v = ctx.teacher_cfg_velocity(z, t_b, crossattn_emb, c_null)
         z = (z.float() - (s_i - s_next) * v).to(ctx.dtype)
-    # Average velocity ε→z_tk over [t_k, 1]; this is exactly the target
-    # for the student's t=1 first step (Euler x_next = x − dt·v_first).
     return ((eps.float() - z.float()) / (1.0 - ctx.t_k_anchor)).detach()
 
 
@@ -184,13 +176,12 @@ def dmd_surrogate(
 
     The real score MUST be CFG-GUIDED (v_u + α·(v_c − v_u)), not cond-only:
     without guidance v_real≈v_fake (both unguided cond preds collapse,
-    dm_cos≈0.9999) and the quality gradient is noise. Fake stays cond-only
-    (matches the reference compute_dmd_loss).
+    dm_cos≈0.9999) and the quality gradient is noise. Fake stays cond-only.
 
-    τ-split critic: the DMD query routes to the owner bank too (training a
-    specialist and letting one bank answer all queries would ignore it). The
-    query τ is uniform by design (independent of t_distribution); banks=1
-    resolves to the identical torch.rand call/RNG stream.
+    τ-split critic: the DMD query also routes to the owner bank (else a
+    specialist bank would never see it). Query τ is uniform by design
+    (independent of t_distribution); banks=1 resolves to the identical
+    torch.rand call/RNG stream.
     """
     tau_dm = sample_t_routed(
         B,
@@ -243,30 +234,26 @@ def cdm_off_trajectory_loss(
     mask: torch.Tensor | None,
     B: int,
 ) -> None:
-    """L_CDM off-trajectory loss (CDM §3.3; docs/proposal/cdm.md Phase 1).
+    """L_CDM off-trajectory loss.
 
     From the grad step's on-trajectory (x_g, v_g, σ_g), Euler-extrapolate a large
-    random stride to x_off at t' ~ U(0,1) (velocity-driven, their Eq. 7 —
-    cdm_extrapolate detaches, so this is a fresh leaf like the DM renoise path:
-    one grad forward, no second BPTT chain). The student's local clean estimate
-    there, x0_off = x_off − t'·v_off, gets the same real-vs-fake DMD surrogate as
-    the DM branch (variant A: CFG'd real score, consistent with the fused DM;
-    fresh τ̂ draw). This supervises exactly the truncation-drift region few-step
-    Euler traverses off-manifold, which on-trajectory rollouts never visit even
-    under dynamic_schedule.
+    random stride to x_off at t' ~ U(0,1) (velocity-driven; detached, so this is
+    a fresh leaf — one grad forward, no second BPTT chain). The student's local
+    clean estimate there, x0_off = x_off − t'·v_off, gets the same real-vs-fake
+    DMD surrogate as the DM branch. Supervises the truncation-drift region
+    few-step Euler traverses off-manifold, which on-trajectory rollouts never
+    visit.
 
-    ORDER MATTERS: this whole branch must run BEFORE the GAN gen forward — that
+    ORDER MATTERS: this branch must run BEFORE the GAN gen forward — that
     forward's checkpointed recompute happens at backward under the then-current
-    view, so it must stay the last view flip of the step
+    view, so this must stay the last view flip of the step
     (project_turbo_view_ckpt_recompute_hazard).
 
     VRAM: the CDM student forward is unsloth-checkpointed (same lever as
-    gan.grad_ckpt — a full second grad graph next to the step-g graph OOMs a
-    16 GB card) and BACKWARDED IN-BRANCH, so its graph is freed before the GAN
-    forward builds. The ckpt'd forward recomputes at that backward under the
-    then-current view, so the view is restored to 'student' first (the
-    teacher/fake delta forwards flipped it) — backward-while-view-live, the same
-    contract the GAN forward honors. Records ``metrics.add_cdm``; returns nothing.
+    gan.grad_ckpt) and BACKWARDED IN-BRANCH, so its graph is freed before the GAN
+    forward builds. The ckpt'd forward recomputes under the then-current view,
+    so the view is restored to 'student' first — backward-while-view-live, the
+    same contract the GAN forward honors.
     """
     x_g_cdm, v_g_cdm, s_g_cdm = cdm_src
     # CPU RNG (seeded by torch.manual_seed, no GPU sync), per-sample.
@@ -341,7 +328,7 @@ def gan_generator_term(
     B: int,
     gan_weight: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """GAN generator term + f-distill reweighting (ideas 1 & 2).
+    """GAN generator term + f-distill reweighting.
 
     The disc scores the frozen TEACHER's block features of the student's renoised
     x_pred. Grad must flow into x_pred → student, so this renoise keeps x_pred
@@ -349,13 +336,11 @@ def gan_generator_term(
     disc itself is frozen here. return_features_early stops after the deepest
     tapped block (half-depth grad forward — full-stack OOM'd).
 
-    No-op when the GAN is off (``turbo.disc is None``) — and, unless f-distill
-    needs the logits, while ``gan_weight`` is still 0 inside the delay window
-    (skips the grad-bearing half-depth teacher forward entirely; no RNG draws
-    happen here, so the skip leaves the step's random stream unchanged). Returns
-    a zero loss and the ``grad_signal`` / ``fdistill_bins`` unchanged in both
-    cases; otherwise the gen loss, the (possibly f-distill-reweighted)
-    ``grad_signal``, and the updated EMA ``fdistill_bins``.
+    No-op when the GAN is off, or (unless f-distill needs the logits) while
+    ``gan_weight`` is still 0 inside the delay window — skips the grad-bearing
+    half-depth teacher forward entirely (no RNG draws here, so the skip leaves
+    the step's random stream unchanged), returning a zero loss and
+    ``grad_signal``/``fdistill_bins`` unchanged.
     """
     turbo = ctx.turbo
     if turbo.disc is None or (gan_weight == 0.0 and not ctx.fdistill_on):
@@ -411,16 +396,14 @@ def fake_update(
     """Fake (critic) + discriminator update against ``x_pred.detach()``.
 
     ``fake_steps_per_student_step`` inner updates, resampling (τ_fake, ε_fake)
-    each iteration (standard DMD2 practice — keep the fake's target ahead of the
-    moving x_pred dist). When the GAN is on, the discriminator steps once per
-    fake inner step (FastGen cadence). Runs the fake + disc optimizer/scheduler
-    steps in-place; returns the mean fake loss, mean disc loss, mean disc
-    margin (mean real − mean fake logit — the "disc winning" observable the
-    hinge means hide: both hinge losses sit at equilibrium ≈0.69/1.39 even while
+    each iteration (keeps the fake's target ahead of the moving x_pred dist).
+    When the GAN is on, the discriminator steps once per fake inner step
+    (FastGen cadence). Runs the fake + disc optimizer/scheduler steps in-place;
+    returns (all detached, for logging) mean fake loss, mean disc loss, mean
+    disc margin (mean real − mean fake logit — the "disc winning" signal the
+    hinge means hide, since both sit at equilibrium ≈0.69/1.39 even while
     per-logit structure does the damage), and mean per-logit spread (std over
-    the fake branch's logits — spatial structure of disc pressure under the
-    token head; 0 when the head emits a single logit) over the inner steps (all
-    detached scalars, for logging).
+    the fake branch's logits; 0 when the head emits a single logit).
     """
     turbo = ctx.turbo
     device, dtype = ctx.device, ctx.dtype

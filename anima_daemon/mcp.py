@@ -1,25 +1,13 @@
 """Stdio MCP bridge for the daemon — pure stdlib, zero new deps.
 
-Exposes the daemon's HTTP surface as MCP tools so any MCP client (Claude Code,
-Claude Desktop, OpenClaw, …) can submit / watch / stop jobs without being told
-an address: the bridge resolves the daemon itself via the pidfile
-(``config.discover_pidfile``), exactly like ``DaemonClient()``. The user's MCP
-config is therefore just a *command to run*::
+Exposes the daemon's HTTP surface as MCP tools; the bridge resolves the
+daemon itself via the pidfile (``config.discover_pidfile``), so MCP config is
+just a command to run — see ``anima_daemon/README.md`` "MCP bridge" for setup
+and the two deviations from ``server.TOOLS`` (``tail_log`` replaces the SSE
+``tail_logs``; only ``submit_*`` auto-start the daemon).
 
-    claude mcp add anima-daemon -- <repo>/.venv/Scripts/python.exe <repo>/anima_daemon/mcp.py
-
-The tool catalog is ``server.TOOLS`` (the same manifest served at ``GET
-/tools``) — one source of truth, registered verbatim. Two deviations:
-
-- ``tail_logs`` (SSE) is dropped — an MCP tool call returns once — and replaced
-  by ``tail_log`` (last N lines + current state, readable even with the daemon
-  down via the on-disk ``job.json``).
-- ``submit_training`` / ``submit_command`` auto-start the daemon
-  (``ensure_daemon``); every other tool is passive, so asking "is anything
-  running?" never boots a daemon as a side effect.
-
-Transport: newline-delimited JSON-RPC 2.0 over stdio (the MCP stdio transport).
-Nothing but protocol messages may touch stdout; diagnostics go to stderr.
+Transport: newline-delimited JSON-RPC 2.0 over stdio. Nothing but protocol
+messages may touch stdout; diagnostics go to stderr.
 """
 
 from __future__ import annotations
@@ -75,13 +63,10 @@ TAIL_LOG_TOOL = {
 
 
 def _tail_lines(path: str, n: int, *, max_bytes: int = 262_144) -> list[str]:
-    """Last ``n`` lines of a (possibly huge) log, decoded leniently.
-
-    tqdm redraws a bar in place with ``\\r`` on one physical line, so naive
-    ``splitlines()`` turns one progress bar into thousands of "lines" and the
-    tail window fills with redraws. Keep only the final rendering of each
-    physical line and drop blank ones.
-    """
+    """Last ``n`` lines of a (possibly huge) log, decoded leniently. tqdm
+    redraws ride ``\\r`` on one physical line, so naive ``splitlines()`` would
+    turn one progress bar into thousands of "lines" — keep only the final
+    rendering of each and drop blank ones."""
     try:
         p = Path(path)
         size = p.stat().st_size
@@ -227,9 +212,9 @@ class MCPServer:
         if name == "submit_command":
             args["kind"] = "command"  # the daemon defaults a bare /jobs POST to train
         if name in ("submit_training", "submit_command"):
-            # Env capture (Phase 0b): the raw-POST path skips client.submit's
-            # auto-capture, so snapshot the bridge's whitelisted env here (an
-            # explicit captured_env in the call still wins).
+            # The raw-POST path skips client.submit's auto-capture, so
+            # snapshot the bridge's whitelisted env here (an explicit
+            # captured_env in the call still wins).
             args.setdefault("captured_env", config.capture_env())
         if tool["method"] == "GET":
             return client._request("GET", path)

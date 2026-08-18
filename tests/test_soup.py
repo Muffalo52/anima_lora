@@ -14,7 +14,15 @@ import pytest
 import torch
 
 from scripts.soup.build import soup_state_dicts, truncated_soup
-from scripts.soup.pipeline import pool_glob, resolve_lrs, slug_for_pattern, uncond_name
+from scripts.soup.pipeline import (
+    pool_glob,
+    resolve_lrs,
+    sigma_argv,
+    sigma_overrides,
+    sigma_settings,
+    slug_for_pattern,
+    uncond_name,
+)
 
 OUT, IN, RANK = 12, 10, 4
 
@@ -186,6 +194,78 @@ class TestResolveLrs:
             resolve_lrs(3, "fast", None)
 
 
+class TestSigmaSettings:
+    OFF = {"sigma_lowres": False, "sigma_lowres_route": "1024:896"}
+    ON = {
+        "sigma_lowres": True,
+        "sigma_lowres_route": "1024:896",
+        "sigma_lowres_threshold": 0.5,
+        "sigma_lowres_route2": "1024:768",
+        "sigma_lowres_threshold2": 0.65,
+        "sigma_lowres_threshold2_max": 0.95,
+    }
+
+    def test_off_config_yields_nothing(self):
+        assert sigma_settings(self.OFF) == {}
+        assert sigma_argv(sigma_settings(self.OFF)) == []
+
+    def test_args_can_turn_it_on(self):
+        # ARGS reaches only the fine-tunes, so the pipeline has to lift the flag
+        # out of it to replay onto Phase 1.
+        cfg = sigma_settings(self.OFF, sigma_overrides(["--sigma_lowres"]))
+        assert cfg["sigma_lowres"] is True
+        assert "--sigma_lowres" in sigma_argv(cfg)
+
+    def test_args_override_the_config(self):
+        cfg = sigma_settings(
+            self.ON, sigma_overrides(["--foo", "1", "--sigma_lowres_threshold", "0.7"])
+        )
+        assert cfg["sigma_lowres_threshold"] == 0.7
+        assert cfg["sigma_lowres_route"] == "1024:896"  # untouched keys survive
+
+    def test_unset_flags_do_not_clobber(self):
+        # argparse.SUPPRESS: absent flags must be omitted, not defaulted.
+        assert sigma_overrides(["--network_dim", "32"]) == {}
+        assert sigma_settings(self.ON, sigma_overrides([])) == sigma_settings(self.ON)
+
+    def test_yarnsig_default_is_normalized_in(self):
+        # train.py turns yarnsig on at its operating point with --sigma_lowres,
+        # so an explicit config copy of that value must not fork the digest.
+        implicit = sigma_settings(self.ON)
+        explicit = sigma_settings({**self.ON, "sigma_lowres_yarnsig": "1,4,0.35,2"})
+        assert implicit["sigma_lowres_yarnsig"] == "1,4,0.35,2"
+        assert implicit == explicit
+        assert uncond_name("*", 1.0, 4, implicit) == uncond_name("*", 1.0, 4, explicit)
+
+    def test_empty_string_reads_as_absent(self):
+        # "" is how a span is switched off, and train.py reads it as absent.
+        assert sigma_settings({**self.ON, "sigma_lowres_span": ""}) == sigma_settings(
+            self.ON
+        )
+
+    def test_args_switching_a_key_off_is_forwarded_explicitly(self):
+        # Phase 1 merges the same config, so an ARGS "off" must be CLEARED on the
+        # command line — silently dropping the flag leaves base.toml's span live.
+        cfg_on = {**self.ON, "sigma_lowres_span": "late:0.75"}
+        cfg = sigma_settings(cfg_on, sigma_overrides(["--sigma_lowres_span", ""]))
+        assert "sigma_lowres_span" not in cfg
+        argv = sigma_argv(cfg, cfg_on)
+        assert argv[argv.index("--sigma_lowres_span") + 1] == ""
+        # …and with nothing to clear, no stray empty flag is emitted.
+        assert "--sigma_lowres_span" not in sigma_argv(sigma_settings(self.ON), self.ON)
+
+    def test_int_and_float_thresholds_digest_the_same(self):
+        assert sigma_settings(
+            {**self.ON, "sigma_lowres_threshold": 1}
+        ) == sigma_settings({**self.ON, "sigma_lowres_threshold": 1.0})
+
+    def test_argv_round_trips_every_key(self):
+        cfg = sigma_settings(self.ON)
+        argv = sigma_argv(cfg)
+        assert argv[0] == "--sigma_lowres"
+        assert sigma_settings(self.OFF, sigma_overrides(argv)) == cfg
+
+
 class TestUncondName:
     def test_determinism(self):
         n1 = uncond_name("a/*|b/*", 0.5, 2)
@@ -193,3 +273,17 @@ class TestUncondName:
         assert n1.endswith("_r0p5_e2")
         assert n1 != uncond_name("a/*|c/*", 0.5, 2)
         assert uncond_name("*", 0.5, 2) != uncond_name("*", 0.5, 4)  # dose in name
+
+    def test_sigma_off_keeps_the_legacy_name(self):
+        # Pre-existing uncond checkpoints must not be orphaned by this knob.
+        base = uncond_name("*", 1.0, 4)
+        assert uncond_name("*", 1.0, 4, None) == base
+        assert uncond_name("*", 1.0, 4, {}) == base
+
+    def test_sigma_forks_the_name(self):
+        base = uncond_name("*", 1.0, 4)
+        on = uncond_name("*", 1.0, 4, {"sigma_lowres": True, "x": "1024:896"})
+        assert on != base and on.startswith(base + "_sl")
+        # Routing differences fork it too — a 896-route init is not a 768 one.
+        other = uncond_name("*", 1.0, 4, {"sigma_lowres": True, "x": "1024:768"})
+        assert other != on

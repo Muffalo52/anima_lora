@@ -1,30 +1,12 @@
 """Stdlib HTTP surface for the daemon — zero new deps, localhost only.
 
 A hand-written ``(method, path)`` dispatch on a ``BaseHTTPRequestHandler``;
-request bodies are plain ``json.loads``'d dicts (no Pydantic — the only callers
-are trusted localhost clients: the ComfyUI node, an attached terminal, the MCP
-server). Served by ``ThreadingHTTPServer`` so a parked SSE stream just holds one
-blocked thread.
+request bodies are plain ``json.loads``'d dicts (no Pydantic — the only
+callers are trusted localhost clients). Served by ``ThreadingHTTPServer`` so
+a parked SSE stream just holds one blocked thread.
 
-Endpoints
-    GET  /                  → README.md (self-description for agentic callers)
-    GET  /tools             → [tool, …]  machine-readable manifest (JSON-Schema)
-    POST /jobs              {method, preset, methods_subdir, overrides, extra} → {job_id}
-                            or {kind:"command", label, argv, extra_env,
-                                 chain_train?}                                 → {job_id}
-    GET  /jobs              → [job, …]
-    GET  /jobs/{id}         → job (+ latest progress event, stale_for)
-    GET  /jobs/{id}/progress → filtered progress.jsonl events
-                            ?events=step,val&since_step=N&every_nth=N&last_n=N
-    POST /jobs/{id}/stop    → {job}
-    POST /jobs/{id}/pause   → {job_id, state, error?}  (SIGSTOP the job tree)
-    POST /jobs/{id}/resume  → {job_id, state, error?}  (SIGCONT it back to running)
-    POST /queue/start       → {ok, paused:false}  (resume a paused queue)
-    POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
-    GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
-    GET  /events            → SSE: daemon-level lifecycle events
-    GET  /health            → {ok, pid, port, root, fingerprint, active_job, paused, worker_alive, worker_idle_for}
-    POST /shutdown          {kill_jobs} → {ok}
+Full endpoint reference: ``anima_daemon/README.md`` (also served live at
+``GET /``); machine-readable manifest at ``GET /tools`` (``TOOLS`` below).
 """
 
 from __future__ import annotations
@@ -54,11 +36,8 @@ _JOB_PROGRESS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/progress$")
 _README = Path(__file__).resolve().parent / "README.md"
 
 # Machine-readable self-description served at GET /tools — one entry per
-# operation, JSON-Schema ``input_schema`` so a thin MCP bridge (or any LLM tool
-# loop) can register these directly. Each tool names the underlying HTTP
-# ``method`` + ``path`` so a caller can hit the endpoint itself. Kept in sync
-# with the handlers below by hand; it is small and rarely changes. The prose
-# walkthrough is GET / (README.md).
+# operation, JSON-Schema `input_schema` so a thin MCP bridge (or any LLM tool
+# loop) can register these directly. Kept in sync with the handlers by hand.
 TOOLS = [
     {
         "name": "submit_training",
@@ -367,14 +346,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _open_sse(self) -> None:
         """Open an SSE response — one response per connection, never keep-alive.
 
-        An SSE body has no ``Content-Length`` and no chunked framing, so the only
-        end-of-response signal a client gets is the socket closing. Under
-        ``HTTP/1.1`` keep-alive ``ThreadingHTTPServer`` holds the socket open
-        after the handler returns, awaiting a next request — so a client that had
-        already been sent the ``eof`` event still blocked forever (``curl -N``,
-        ``DaemonClient.stream``, and thus ``make daemon-attach`` on a *finished*
-        job all hung). ``Connection: close`` + ``close_connection`` make the
-        handler's return the client's EOF. Nothing legitimate reuses this socket.
+        An SSE body has no ``Content-Length``/chunked framing, so the socket
+        closing is the client's only EOF signal. Keep-alive would hold the
+        socket open after the handler returns, so a client already sent the
+        ``eof`` event blocked forever (hung ``make daemon-attach`` on a
+        finished job). ``Connection: close`` + ``close_connection`` fix that;
+        don't revert to keep-alive.
         """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -458,9 +435,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "pid": os.getpid(),
                 "port": self.server.server_address[1],
                 "root": str(config.ROOT),
-                # The source fingerprint we BOOTED with (not re-hashed live) —
-                # a client compares it against current on-disk source to detect
-                # stale daemon code and trigger an eager restart (Phase 0a).
+                # Fingerprint we BOOTED with, not re-hashed live — see
+                # config.source_fingerprint / client.daemon_is_stale.
                 "fingerprint": getattr(self.server, "boot_fingerprint", None),
                 "active_job": active.id if active else None,
                 "paused": self.manager.is_paused(),
@@ -649,11 +625,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    # SO_REUSEADDR means "rebind a TIME_WAIT socket" on POSIX (safe, wanted for
-    # quick restarts) but "double-bind a live in-use port" on Windows — which
-    # would silently spin up a second daemon on a port a sibling/stranger
-    # already holds, defeating serve_with_fallback's collision detection. So
-    # enable it only off-Windows; on Windows a contested bind must fail loudly.
+    # SO_REUSEADDR means "rebind a TIME_WAIT socket" on POSIX (safe) but
+    # "double-bind a live in-use port" on Windows, defeating
+    # serve_with_fallback's collision detection — so Windows must fail loudly.
     allow_reuse_address = os.name != "nt"
 
     def __init__(self, addr, manager: JobManager, *, fingerprint=None):
@@ -674,14 +648,12 @@ def serve(manager: JobManager, *, port: int, fingerprint=None) -> _Server:
 def serve_with_fallback(manager: JobManager, *, port: int, fingerprint=None) -> _Server:
     """Bind ``port``; if it's already taken, fall back to an OS-chosen free one.
 
-    The catch: don't blindly grab a new port on every collision, or a startup
-    race (GUI auto-start + ``make daemon`` firing together) would spin up a
-    *second* daemon that overwrites the pidfile — breaking the single-daemon
-    invariant. So on ``EADDRINUSE`` we first probe the port: if an anima daemon
-    already answers ``/health`` there (a sibling that won the race), we re-raise
-    so the caller exits and defers to it. Only when a *stranger* holds the port
-    do we move to an ephemeral one (the actual port is recorded in the pidfile,
-    and ``ensure_daemon`` re-resolves it from there)."""
+    On ``EADDRINUSE`` we first probe the port: if an anima daemon already
+    answers ``/health`` there (a startup-race sibling that won), we re-raise
+    so the caller stands down instead of spinning up a second daemon that
+    would overwrite the pidfile. Only a *stranger* holding the port sends us
+    to an ephemeral one (``ensure_daemon`` re-resolves it from the pidfile).
+    """
     try:
         return _Server((config.HOST, port), manager, fingerprint=fingerprint)
     except OSError:
