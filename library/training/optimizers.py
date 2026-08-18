@@ -19,8 +19,19 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
     optimizer_kwargs = {}
     if args.optimizer_args is not None and len(args.optimizer_args) > 0:
         for arg in args.optimizer_args:
-            key, value = arg.split("=")
-            value = ast.literal_eval(value)
+            key, value = arg.split("=", 1)
+
+            try:
+                value = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                # Allow Python module constants / objects commonly used
+                # in optimizer arguments, e.g. torch.float16, torch.bfloat16.
+                safe_globals = {
+                    "__builtins__": {},
+                    "torch": torch,
+                }
+                value = eval(value, safe_globals)
+
             optimizer_kwargs[key] = value
 
     lr = args.learning_rate
