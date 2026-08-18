@@ -23,6 +23,14 @@ This document is a comprehensive English guide for using the **Anima LoRA** trai
 
 ## 1. System Requirements
 
+> **Windows AMD / ROCm:** Windows Radeon support is available through the same
+> one-line installer used for NVIDIA. The installer auto-detects the GPU vendor,
+> selects the ROCm dependency set for AMD, and keeps `torch.compile` enabled
+> while using PyTorch SDPA instead of CUDA Flash Attention. The currently
+> verified ROCm targets are RDNA 4 `gfx1200` / `gfx1201`. See
+> [Windows ROCm Guide](rocm.md) for supported hardware, version pinning, manual
+> setup, and troubleshooting.
+
 | Item | Minimum | Recommended |
 |---|---|---|
 | GPU | At least **RTX 3060 or higher — 2xxx series and below are not supported** | VRAM 16 GB or more |
@@ -65,10 +73,10 @@ This project uses [`uv`](https://github.com/astral-sh/uv) for dependency managem
 
 ### 3.0 One-line install (easiest, no git required) ✅
 
-Recommended for beginners. Paste this single line into PowerShell — it installs `uv` if missing, **installs the CUDA 13.2 toolkit if missing** (see **§2**), downloads the latest release, runs `uv sync` (Python 3.13 + torch are resolved automatically), creates an **"Anima LoRA GUI" desktop shortcut**, and **opens the GUI for you**:
+Recommended for beginners. Paste this single line into PowerShell — the installer auto-detects NVIDIA vs AMD, installs `uv` if missing, installs the **CUDA 13.2 toolkit only for NVIDIA** (see **§2**), selects ROCm automatically for AMD, downloads the latest release, creates an **"Anima LoRA GUI" desktop shortcut**, and **opens the GUI for you**:
 
 ```powershell
-irm https://raw.githubusercontent.com/sorryhyun/anima_lora/main/install.ps1 | iex
+irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
 ```
 
 Installs into `.\anima_lora\` (override with `$env:ANIMA_DIR`; pin a version with `$env:ANIMA_VERSION='v1.4.0'`). **When it finishes, the GUI opens by itself** — from there:
