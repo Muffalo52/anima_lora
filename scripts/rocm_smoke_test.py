@@ -18,16 +18,26 @@ def main() -> int:
     if torch.version.hip is None:
         raise RuntimeError("installed PyTorch is not a ROCm build")
 
-    # Exercise device allocation, compile, and backward rather than accepting
-    # an import-only success, which misses runtime/device/Triton failures.
+    # Exercise device allocation, compile, SDPA, and backward rather than
+    # accepting an import-only success, which misses runtime/device/Triton
+    # failures and the attention path used by Anima on ROCm.
     @torch.compile
     def compiled_loss(value: torch.Tensor) -> torch.Tensor:
         return value.square().mean()
 
     x = torch.randn(64, 64, device="cuda", requires_grad=True)
     compiled_loss(x).backward()
+
+    q = torch.randn(
+        2, 4, 64, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    attention = torch.nn.functional.scaled_dot_product_attention(q, q, q)
+    attention.float().square().mean().backward()
     torch.cuda.synchronize()
-    print("ROCm tensor/compile/backward smoke test: OK")
+    if not torch.isfinite(attention).all() or not torch.isfinite(q.grad).all():
+        raise RuntimeError("ROCm PyTorch SDPA produced non-finite values")
+
+    print("ROCm tensor/compile/SDPA/backward smoke test: OK")
     return 0
 
 

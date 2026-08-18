@@ -2,7 +2,11 @@ import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
-from library.runtime.backend import is_rocm, resolve_attention_mode
+from library.runtime.backend import (
+    is_rocm,
+    needs_rocm_attention_fallback,
+    resolve_attention_mode,
+)
 from scripts import update
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +32,18 @@ def test_rocm_keeps_explicit_non_flash_modes():
 
 def test_cuda_keeps_flash():
     assert resolve_attention_mode("flash", _torch(None)) == "flash"
+
+
+def test_none_request_does_not_report_rocm_fallback():
+    assert resolve_attention_mode(None, _torch(None)) == "torch"
+    assert not needs_rocm_attention_fallback(None, _torch(None))
+    assert not needs_rocm_attention_fallback(None, _torch("7.14.0"))
+
+
+def test_only_explicit_rocm_flash_request_reports_fallback():
+    assert needs_rocm_attention_fallback("flash", _torch("7.14.0"))
+    assert not needs_rocm_attention_fallback("torch", _torch("7.14.0"))
+    assert not needs_rocm_attention_fallback("flash", _torch(None))
 
 
 def test_update_reuses_saved_rocm_backend(monkeypatch, tmp_path):

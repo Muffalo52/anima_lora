@@ -10,9 +10,16 @@ def is_rocm(torch_module: Any) -> bool:
     return getattr(getattr(torch_module, "version", None), "hip", None) is not None
 
 
+def needs_rocm_attention_fallback(
+    requested: str | None, torch_module: Any
+) -> bool:
+    """Return whether an explicit Flash request must fall back on ROCm."""
+    return requested == "flash" and is_rocm(torch_module)
+
+
 def resolve_attention_mode(requested: str | None, torch_module: Any) -> str:
     """Use PyTorch SDPA when the CUDA-only Flash backend is selected on ROCm."""
     mode = requested or "torch"
-    if mode == "flash" and is_rocm(torch_module):
+    if needs_rocm_attention_fallback(requested, torch_module):
         return "torch"
     return mode
