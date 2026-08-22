@@ -79,6 +79,47 @@ _NON_HIDDEN_NAME_PREFIXES = (
     'x_embedder', 'pos_embedder', 'patch_embed', 'context_embedder',
 )
 
+# Patterns matching normalization & AdaLN / modulation components across
+# DiT, Flux, SD3, PixArt, Lumina, Anima, and other transformer models.
+_ADALN_NAME_PATTERN = re.compile(
+    r'(?:ada_?ln|modulation|norm\d*_linear|norm\d*_context_linear|norm_linear|_modulation)',
+    re.IGNORECASE
+)
+
+
+def _is_norm_lora_module(lora_module) -> bool:
+    """Determine if a lora/adapter module targets a normalization layer or AdaLN modulation."""
+    module_type = getattr(lora_module, 'module_type', None)
+    if module_type in ("layernorm", "groupnorm"):
+        return True
+
+    cls_name = lora_module.__class__.__name__
+    if "Norm" in cls_name:
+        return True
+
+    mod_cls = getattr(lora_module, "module", None)
+    if mod_cls is not None:
+        mod_cls_name = getattr(mod_cls, "__name__", "")
+        if any(norm_term in mod_cls_name.lower() for norm_term in ("norm", "rmsnorm", "layernorm", "groupnorm")):
+            return True
+
+    org_modules = getattr(lora_module, "org_module", None) or getattr(lora_module, "org_module_ref", None)
+    if org_modules and len(org_modules) > 0 and org_modules[0] is not None:
+        org = org_modules[0]
+        org_cls_name = org.__class__.__name__.lower()
+        if any(norm_term in org_cls_name for norm_term in ("norm", "rmsnorm", "layernorm", "groupnorm")):
+            return True
+
+    original_name = getattr(lora_module, "original_name", "") or ""
+    if _ADALN_NAME_PATTERN.search(original_name):
+        return True
+
+    lora_name = getattr(lora_module, "lora_name", "") or ""
+    if _ADALN_NAME_PATTERN.search(lora_name):
+        return True
+
+    return False
+
 
 def tag_lora_module_params(lora_module):
     """Tag a LoRA/OFT module's ``nn.Parameter`` objects with optimizer-relevant
@@ -86,13 +127,17 @@ def tag_lora_module_params(lora_module):
 
     Sets the following attributes on the appropriate parameters:
 
-    * ``_is_dora_scale``  — DoRA magnitude scale
-    * ``_is_oft``         — OFT skew-symmetric blocks
-    * ``_is_lora_A``      — LoRA down/A factor
-    * ``_is_lora_B``      — LoRA up/B factor
-    * ``is_hidden``       — 2D hidden-layer weight (determined via
+    * ``_is_dora_scale``      — DoRA magnitude scale
+    * ``_is_oft``             — OFT skew-symmetric blocks
+    * ``_is_lora_A``          — LoRA down/A factor
+    * ``_is_lora_B``          — LoRA up/B factor
+    * ``is_hidden``           — 2D hidden-layer weight (determined via
       ``original_name`` heuristic)
-    * ``is_vector``       — logically-vector parameter (multi-dim)
+    * ``is_vector``           — logically-vector parameter (multi-dim)
+    * ``is_norm``             — normalization weight / bias / AdaLN modulation
+    * ``is_scalar``           — scalar parameter (1-element or scalar multiplier)
+    * ``is_bias``             — additive bias parameter
+    * ``weight_decay_ratio``  — weight decay scaling relative to base optimizer
 
     ``is_hidden`` is determined by checking ``original_name`` (the dotted
     path into the root model) against ``_NON_HIDDEN_NAME_PREFIXES`` — a set
@@ -110,6 +155,7 @@ def tag_lora_module_params(lora_module):
     original_name = getattr(lora_module, 'original_name', None) or ''
     is_hidden = not any(original_name.startswith(pfx)
                         for pfx in _NON_HIDDEN_NAME_PREFIXES)
+    is_norm = _is_norm_lora_module(lora_module)
 
     # --- OFT blocks ---
     oft_blocks = getattr(lora_module, 'oft_blocks', None)
@@ -127,10 +173,19 @@ def tag_lora_module_params(lora_module):
         dora_scale._is_dora_scale = True
         dora_scale.is_vector = True
 
+    # --- OFT per-channel rescale ---
+    rescale = getattr(lora_module, 'rescale', None)
+    if isinstance(rescale, nn.Parameter):
+        rescale.is_vector = True
+
     # --- Standard LoRA down/up ---
     for attr, tag in (
         ('lora_down', '_is_lora_A'),
         ('lora_up', '_is_lora_B'),
+        ('lora_down1', '_is_lora_A'),
+        ('lora_up1', '_is_lora_B'),
+        ('lora_down2', '_is_lora_A'),
+        ('lora_up2', '_is_lora_B'),
     ):
         sub = getattr(lora_module, attr, None)
         # Single module (Linear/Conv2d)
@@ -146,17 +201,60 @@ def tag_lora_module_params(lora_module):
                     setattr(mod.weight, tag, True)
                     mod.weight.is_hidden = is_hidden
 
-    # --- Fallback: tag all remaining 2D trainable params ---
-    for p in lora_module.parameters(recurse=False):
+    # --- Tag all trainable parameters with is_norm, is_scalar, is_bias, and weight_decay_ratio ---
+    for name, p in lora_module.named_parameters():
         if not isinstance(p, nn.Parameter):
             continue
-        if p.ndim < 2:
-            continue
-        if getattr(p, '_is_oft', False):
-            continue
-        if getattr(p, '_is_lora_A', False) or getattr(p, '_is_lora_B', False):
-            continue
-        p.is_hidden = is_hidden
+
+        # 1. Bias Tagging
+        p_is_bias = (
+            name.endswith('bias')
+            or name.endswith('b_norm')
+            or name.endswith('diff_b')
+            or getattr(p, '_is_bias', False)
+            or getattr(p, 'is_bias', False)
+        )
+        p.is_bias = p_is_bias
+
+        # 2. Scalar Tagging
+        p_is_scalar = (
+            p.numel() == 1
+            or name.endswith('scalar')
+            or name.endswith('lora2_nu')
+            or getattr(p, '_is_scalar', False)
+            or getattr(p, 'is_scalar', False)
+        )
+        p.is_scalar = p_is_scalar
+
+        # 3. Norm Tagging
+        p_is_norm = is_norm or name.endswith('w_norm') or name.endswith('b_norm') or getattr(p, 'is_norm', False)
+        p.is_norm = p_is_norm
+
+        # 4. Hidden Layer Fallback for 2D+ trainable params
+        if (
+            p.ndim >= 2
+            and not getattr(p, '_is_oft', False)
+            and not getattr(p, '_is_lora_A', False)
+            and not getattr(p, '_is_lora_B', False)
+        ):
+            p.is_hidden = is_hidden
+
+        # 5. Weight Decay Ratio Assignment
+        if p_is_bias or p_is_norm or p_is_scalar or getattr(p, '_is_dora_scale', False) or getattr(p, 'is_vector', False) or p.ndim <= 1:
+            default_wd_ratio = 0.0
+        else:
+            default_wd_ratio = 1.0
+
+        custom_wd_ratio = getattr(p, '_custom_weight_decay_ratio', None)
+        if custom_wd_ratio is None:
+            custom_wd_ratio = getattr(p, 'custom_weight_decay_ratio', None)
+        if custom_wd_ratio is None:
+            custom_wd_ratio = getattr(lora_module, 'weight_decay_ratio', None)
+
+        if custom_wd_ratio is not None:
+            p.weight_decay_ratio = float(custom_wd_ratio)
+        else:
+            p.weight_decay_ratio = default_wd_ratio
 
 
 def _tag_all_network_params(network):
